@@ -68,7 +68,7 @@ function printBanner(server, config, log = console.log) {
   const url = serverUrl(server, config);
   log(url ? `Blackhouse Leads Portal preview running at ${url}` : 'Blackhouse Leads Portal preview started, but the server address is not available.');
   log(config.mode === 'mongo'
-    ? 'Mode: MONGO. Records are read from and saved to MongoDB; sign-in required. Monday.com, respond.io and Google are not connected.'
+    ? 'Mode: MONGO. Records are read from and saved to MongoDB; sign-in required. Monday.com and respond.io are read-only (see below); Google is not connected.'
     : 'Mode: DEMO. Fictional data only, kept in your browser. No database, no API, no outside services.');
   if (config.integrations) {
     const m = config.integrations.monday, r = config.integrations.respond;
