@@ -1,0 +1,7 @@
+node_modules/
+npm-debug.log*
+
+# real configuration and credentials stay on this computer; the placeholder example is committed
+.env
+.env.*
+!.env.example

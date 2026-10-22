@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+
+# real credentials never belong in the repo; example files with placeholders are allowed
+.env
+.env.*
+!.env.example
+.clasp.json
+.clasprc.json
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

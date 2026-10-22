@@ -1,0 +1,363 @@
+'use strict';
+// Read-only Monday.com client. Column matching follows Code.gs (FIELD_DEFS, LISTING_TITLES, calendarViewings_, loiMap_):
+// columns are found by TITLE on each board, so no column IDs are hard-coded.
+// Only GraphQL `query` operations can be sent; mutations are refused before any request is made.
+const { IntegrationError, tracked } = require('./status');
+
+// from Code.gs CONFIG.HIDE and CONFIG.LISTING_SKIP_GROUPS
+const HIDE = ['Archive', 'Archived', 'For Validation', 'Broker Inquiries', 'Messaged Brokers for Viber', 'Copied to Broker Partnerships',
+  'Relocation Specialists', 'Social Media Content', 'Email Marketing Inquiries'];
+const LISTING_SKIP_GROUPS = ['archive', 'property rented out', 'clean up', 'office space', 'do not post'];
+
+// subset of Code.gs FIELD_DEFS used by the preview: key → [titles in priority order, exact-only, allowed column types]
+const LEAD_COLS = {
+  nextAction: [['next action', 'status'], false, ['status', 'color', 'dropdown', 'text']],
+  boardStatus: [['status'], true, ['status', 'color', 'dropdown']],
+  va: [['va assigned', 'va assinged', 'assigned va', 'va']],
+  leadsFrom: [['leads from', 'lead source', 'source']],
+  inquiry: [['inquiry type', 'rent or buy', 'buy or rent', 'transaction type'], true],
+  clientStatus: [['client status'], true],
+  contactName: [['contact name', 'client name']],
+  phone: [['contact phone number', 'contact phone', 'phone number', 'phone']],
+  email: [['email', 'contact email', 'email address']],
+  location: [['preferred location', 'location', 'client requirements']],
+  city: [['city', 'preferred city'], true],
+  budget: [['budget', 'maximum budget']],
+  bedrooms: [['number of bedrooms', 'no of bedrooms', 'bedrooms']],
+  occupancy: [['number of occupancy', 'no of occupants', 'occupancy', 'occupants']],
+  moveIn: [['target move in date', 'target move-in date', 'move in date', 'move-in date']],
+  leaseTerm: [['lease term']],
+  pets: [['pets']],
+  otherReqs: [['other requirements'], true],
+  failReason: [['reason for failure'], true],
+  inquiryDate: [['date of inquiry', 'inquiry date', 'date inquired']],
+  failedDate: [['failed date', 'date failed', 'lost date'], true],
+  contractDate: [['contract date'], true],
+  nationality: [['nationality'], true],
+  salesperson: [['salesperson'], true],
+  aiStatusLabel: [['ai status'], true, ['status', 'color']],
+  aiStatusText: [['ai status', 'ai status detail'], true, ['text', 'long_text']],
+  contactId: [['respond id', 'respond io id', 'respondio id', 'respond io contact id', 'respond contact id', 'contact id']],
+};
+// subset of Code.gs LISTING_TITLES (prefix matching only for titles longer than 3 characters, as in Code.gs)
+const LISTING_COLS = {
+  location: ['location', 'city', 'area', 'address', 'building location', 'neighborhood', 'district'],
+  building: ['building name', 'building', 'project', 'condo', 'property name', 'development'],
+  type: ['listing type', 'offer type', 'for rent sale', 'rent sale', 'transaction', 'type', 'category'],
+  bedrooms: ['bedrooms', 'of bedrooms', 'bedroom', 'number of bedrooms', 'no of bedrooms', 'br', 'unit type'],
+  bathrooms: ['bathrooms', 'of bathrooms', 'bathroom', 'number of bathrooms', 't b', 'toilet and bath', 'baths'],
+  sqm: ['sqm', 'floor area', 'size', 'area sqm', 'floor area sqm', 'unit size'],
+  parking: ['parking', 'parking slot', 'parking slots', 'number of parking'],
+  price: ['price', 'monthly rent', 'rent', 'rental', 'rate', 'asking price', 'selling price', 'list price'],
+  furnishing: ['furnishing', 'furnished', 'furniture'],
+  pets: ['pet friendly', 'pets allowed', 'pets', 'pet'],
+  unit: ['floor unit', 'floor unit no', 'unit no', 'unit number'],
+  status: ['availability', 'status', 'unit status'],
+  photos: ['photos', 'images', 'pictures', 'photo', 'gallery'],
+  ownerPhone: ['owner number', 'owner phone', 'owner contact', 'owner mobile', 'contact number', 'mobile number', 'mobile', 'whatsapp', 'whatsapp number', 'phone', 'phone number', 'contact'],
+};
+
+const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const SKIP_TYPES = { name: 1, subtasks: 1 };
+
+function matchLeadCols(columns) {
+  const used = {}, out = {};
+  for (const [key, [titles, exact, types]] of Object.entries(LEAD_COLS)) {
+    const ok = (c) => !used[c.id] && !SKIP_TYPES[c.type] && (!types || types.includes(c.type));
+    const wanted = titles.map(norm);
+    let col = null;
+    for (let i = 0; i < wanted.length && !col; i++) col = columns.find((c) => ok(c) && norm(c.title) === wanted[i]);
+    if (!col && !exact) col = columns.find((c) => ok(c) && wanted.some((w) => norm(c.title).startsWith(w)));
+    if (col) { out[key] = col.id; used[col.id] = 1; }
+  }
+  return out;
+}
+function matchListingCols(columns) {
+  const used = {}, out = {};
+  for (const [key, titles] of Object.entries(LISTING_COLS)) {
+    const wanted = titles.map(norm), ok = (c) => !used[c.id] && !SKIP_TYPES[c.type] && (key !== 'photos' || c.type === 'file');
+    const c = columns.find((x) => ok(x) && wanted.includes(norm(x.title))) || columns.find((x) => ok(x) && wanted.some((w) => w.length > 3 && norm(x.title).startsWith(w)));
+    if (c) { out[key] = c.id; used[c.id] = 1; }
+  }
+  return out;
+}
+// Calendar: viewings (calendarViewings_) + LOI/contract evidence (loiMap_)
+function matchCalendarCols(columns) {
+  const find = (re, type) => { const c = columns.find((x) => re.test(String(x.title).trim()) && (!type || x.type === type)); return c ? c.id : ''; };
+  const out = { fin: find(/^final schedule$/i, 'date'), client: find(/^clients?$/i, 'board_relation'), bld: find(/^building$/i), city: find(/^city$/i),
+    time: find(/^time$/i), broker: find(/^salesperson$/i), status: find(/^status$/i),
+    loi: find(/^date loi\s+submitted$/i, 'date'), loi2: find(/^loi creation date$/i, 'date'), file: find(/^loi$/i, 'file'),
+    cdate: find(/^contract date$/i), cfile: find(/^contract$/i, 'file'), sfile: find(/^signed contract$/i, 'file'), paid: find(/^total paid$/i) };
+  Object.keys(out).forEach((k) => { if (!out[k]) delete out[k]; });
+  return out;
+}
+/** Status/dropdown label names from a column's settings_str (Code.gs statusOptions_). */
+function labelsOf(col) {
+  if (!col) return [];
+  try {
+    const s = JSON.parse(col.settings_str || '{}'), l = s.labels || {};
+    const names = Array.isArray(l) ? l.map((x) => x && x.name) : Object.keys(l).sort((a, b) => Number(a) - Number(b)).map((k) => l[k]);
+    return [...new Set(names.map((x) => String(x || '').trim()).filter(Boolean))];
+  } catch (e) { return []; }
+}
+
+// ---------- value helpers ----------
+const cellText = (cv) => (cv ? String(cv.display_value || cv.text || '').trim() : '');
+function values(item, cols) {
+  const byId = {}; (item.column_values || []).forEach((cv) => { byId[cv.id] = cv; });
+  const v = {};
+  Object.entries(cols).forEach(([k, id]) => { v[k] = cellText(byId[id]); v['_' + k] = byId[id]; });
+  return v;
+}
+const fileIds = (cv) => { try { return ((JSON.parse((cv && cv.value) || '{}') || {}).files || []).map((f) => String(f.assetId || '')).filter(Boolean); } catch (e) { return []; } };
+/** Budget/price text → number: "₱150k", "150,000", "20M"; a range takes the upper value (data-points.xlsx "Lead value"). */
+function money(t) {
+  const s = String(t || '').toLowerCase().replace(/[,₱\s]|php/g, '');
+  const all = [...s.matchAll(/(\d*\.?\d+)([km])?/g)].map((m) => parseFloat(m[1]) * (m[2] === 'k' ? 1e3 : m[2] === 'm' ? 1e6 : 1));
+  return all.length ? Math.round(Math.max(...all)) : 0;
+}
+const ymdIn = (t) => (String(t || '').match(/(\d{4}-\d{2}-\d{2})/) || [])[1] || '';
+const beds = (t) => /studio/i.test(t) ? 'Studio' : ((String(t || '').match(/\d+/) || [])[0] || String(t || ''));
+function time24(t) {
+  const m = String(t || '').match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!m) return '';
+  let h = Number(m[1]); const min = m[2] || '00', ap = (m[3] || '').toLowerCase();
+  if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0;
+  return h < 24 ? String(h).padStart(2, '0') + ':' + min : '';
+}
+const hue = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h) % 360; };
+
+/** Raw lead record; AI Status / Temperature / Days are added later by pipeline.computeLead. */
+function shapeLead(it, cols) {
+  const v = values(it, cols), group = (it.group && it.group.title) || '';
+  const inquiry = /buy|sale|purchase/i.test(v.inquiry) ? 'Buy' : /rent|lease/i.test(v.inquiry) ? 'Rent'
+    : /sale|buy/i.test(group) ? 'Buy' : /rent|lease/i.test(group) ? 'Rent' : '';
+  const contactId = v.contactId.replace(/\D/g, '');
+  return {
+    id: String(it.id), code: it.name, mondayItemId: String(it.id), group,
+    name: v.contactName || it.name, phone: v.phone, email: v.email,
+    status: v.clientStatus || v.nextAction || '', nextAction: v.nextAction, boardStatus: v.boardStatus, clientStatus: v.clientStatus,
+    aiStatusLabel: v.aiStatusLabel, aiStatusText: v.aiStatusText,
+    ai: '', temp: '', waiting: '',
+    inquiry, va: v.va, salesperson: v.salesperson, source: v.leadsFrom,
+    origin: /respond/i.test(v.leadsFrom) ? 'respond.io' : 'Monday',
+    budget: money(v.budget), city: v.city || '', bedrooms: beds(v.bedrooms), occupants: v.occupancy,
+    pets: !v.pets ? '' : /^(no|none|wala|0)\b/i.test(v.pets) ? 'No Pets' : 'With Pets',
+    requirements: [v.location, v.otherReqs].filter(Boolean).join('; ').slice(0, 500),
+    nationality: v.nationality, moveIn: ymdIn(v.moveIn), leaseTerm: v.leaseTerm, failReason: v.failReason, leaseEnd: '',
+    inquiryDate: ymdIn(v.inquiryDate), failedDate: ymdIn(v.failedDate), contractDate: ymdIn(v.contractDate),
+    createdAt: it.created_at || '', updatedAt: it.updated_at || it.created_at || '',
+    daysInStage: null, onRespond: !!contactId, contactId,
+  };
+}
+function shapeListing(it, cols) {
+  const v = values(it, cols), group = (it.group && it.group.title) || '';
+  let phone = v.ownerPhone;
+  try { const j = JSON.parse((v._ownerPhone && v._ownerPhone.value) || 'null'); if (j && j.phone) phone = j.phone; } catch (e) { /* plain text */ }
+  // photos: files in the photos column first, then any other image asset on the item (Code.gs shapeListing_)
+  const IMG = /^(jpe?g|png|gif|webp)$/i;
+  const order = fileIds(v._photos);
+  const assets = (it.assets || []).filter((a) => IMG.test(String(a.file_extension || '').replace(/^\./, '')))
+    .sort((a, b) => { const ia = order.indexOf(String(a.id)), ib = order.indexOf(String(b.id)); return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib); });
+  const st = v.status;
+  return {
+    id: String(it.id), code: String(it.id), building: v.building || it.name, tower: v.unit ? 'Unit ' + v.unit : '', floor: null,
+    city: v.location, type: /sale|sell|buy/i.test(v.type + ' ' + group) ? 'For Sale' : 'For Rent', price: money(v.price),
+    bedrooms: beds(v.bedrooms), bathrooms: parseInt(v.bathrooms, 10) || 0, sizeSqm: parseFloat(v.sqm) || 0, furnishing: v.furnishing,
+    parking: !!v.parking && !/^(0|no|none)$/i.test(v.parking), petFriendly: /yes|allow|friendly|ok/i.test(v.pets) && !/^no/i.test(v.pets),
+    availability: !st || /^avail/i.test(st) ? 'Available' : /reserv|hold|pending/i.test(st) ? 'Reserved' : 'Not Available', availabilityLabel: st,
+    contact: it.name, contactPhone: phone, hue: hue(it.id), group,
+    photos: assets.slice(0, 12).map((a) => String(a.id)),   // asset IDs only; the browser loads them through /api/monday/photo
+    _assets: assets.slice(0, 12),
+  };
+}
+function viewingStatus(label, date, today) {
+  if (/cancel/i.test(label)) return 'Cancelled';
+  if (/done|viewed|complete|loi|contract|closed/i.test(label)) return 'Done';
+  if (/confirm/i.test(label)) return 'Confirmed';
+  if (/propos|pending|tentative/i.test(label)) return 'Proposed';
+  return date < today ? 'Done' : 'Confirmed';
+}
+
+// ---------- client ----------
+const COL_FIELDS = 'id text value ... on MirrorValue { display_value } ... on BoardRelationValue { linked_item_ids }';
+const ITEM_FIELDS = `id name created_at updated_at group { id title } column_values(ids: $c) { ${COL_FIELDS} }`;
+const LISTING_FIELDS = `id name created_at updated_at group { id title } assets { id public_url url_thumbnail file_extension } column_values(ids: $c) { ${COL_FIELDS} }`;
+const MAX_ITEMS = 5000, TTL_MS = 5 * 60e3, MIN_REFRESH_MS = 30e3, PHOTO_URL_TTL = 40 * 60e3, PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+function assertReadOnly(query) {
+  if (!/^\s*query\b/.test(query) || /\b(mutation|subscription)\b/i.test(query)) {
+    throw new IntegrationError('monday', 'Blocked: only read queries are allowed in this phase.', { status: 500 });
+  }
+}
+
+function createMonday(cfg, status) {
+  const mockApi = /^http:\/\/(127\.0\.0\.1|localhost):/.test(cfg.apiUrl);
+
+  async function gql(query, variables) {
+    assertReadOnly(query);
+    let res;
+    try {
+      res = await fetch(cfg.apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: cfg.token },
+        body: JSON.stringify({ query, variables: variables || {} }),
+        signal: AbortSignal.timeout(20000),
+      });
+    } catch (e) { throw new IntegrationError('monday', 'Could not reach Monday.com (' + (e.name === 'TimeoutError' ? 'timed out' : e.message) + ').'); }
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* not JSON */ }
+    if (res.status === 401 || res.status === 403) throw new IntegrationError('monday', `Monday.com rejected MONDAY_TOKEN (HTTP ${res.status}).`);
+    if (res.status === 429) throw new IntegrationError('monday', 'Monday.com is rate-limiting requests. Try again in a minute.');
+    if (!body) throw new IntegrationError('monday', `Monday.com returned HTTP ${res.status}.`);
+    if (res.status !== 200 || body.errors || body.error_message) {
+      const msg = (body.errors && body.errors.map((e) => e.message).join('; ')) || body.error_message || 'HTTP ' + res.status;
+      throw new IntegrationError('monday', 'Monday.com: ' + msg);
+    }
+    return body.data || {};
+  }
+
+  async function boardMeta(boardId) {
+    const d = await gql('query ($b: [ID!]) { boards(ids: $b) { id name columns { id title type settings_str } } }', { b: [boardId] });
+    const b = (d.boards || [])[0];
+    if (!b) throw new IntegrationError('monday', `Monday board ${boardId} was not found, or the MONDAY_TOKEN user can't see it.`);
+    return b;
+  }
+  async function allItems(boardId, colIds, fields = ITEM_FIELDS) {
+    const first = await gql(`query ($b: [ID!], $c: [String!]) { boards(ids: $b) { items_page(limit: 200) { cursor items { ${fields} } } } }`, { b: [boardId], c: colIds });
+    let page = ((first.boards || [])[0] || {}).items_page || { items: [] };
+    const out = [...(page.items || [])];
+    while (page.cursor && out.length < MAX_ITEMS) {
+      page = (await gql(`query ($k: String!, $c: [String!]) { next_items_page(limit: 200, cursor: $k) { cursor items { ${fields} } } }`, { k: page.cursor, c: colIds })).next_items_page || {};
+      out.push(...(page.items || []));
+    }
+    return out.slice(0, MAX_ITEMS);
+  }
+
+  const loaders = {
+    async leads(id) {
+      const meta = await boardMeta(id), cols = matchLeadCols(meta.columns);
+      const hide = HIDE.map(norm);
+      const leads = (await allItems(id, Object.values(cols))).map((it) => shapeLead(it, cols))
+        .filter((l) => !hide.includes(norm(l.group)) && !hide.includes(norm(l.nextAction)));
+      const colById = Object.fromEntries(meta.columns.map((c) => [c.id, c]));
+      // VA Assigned / Salesperson labels as set up on the board (Code.gs statusOptions_), plus any value in use
+      const used = (k) => leads.map((l) => l[k]).filter(Boolean);
+      const labels = {
+        va: [...new Set(labelsOf(colById[cols.va]).concat(used('va')))],
+        salesperson: [...new Set(labelsOf(colById[cols.salesperson]).concat(used('salesperson')))],
+        vaColumn: !!cols.va, salespersonColumn: !!cols.salesperson,
+      };
+      return { leads, labels, mapped: Object.keys(cols) };
+    },
+    async listings(id) {
+      const cols = matchListingCols((await boardMeta(id)).columns);
+      const listings = (await allItems(id, Object.values(cols), LISTING_FIELDS)).map((it) => shapeListing(it, cols))
+        .filter((x) => !LISTING_SKIP_GROUPS.includes(norm(x.group)));
+      const assets = new Map(), at = Date.now();
+      listings.forEach((x) => { x._assets.forEach((a) => assets.set(String(a.id), { listingId: x.id, url: a.public_url, thumb: a.url_thumbnail || a.public_url, at })); delete x._assets; });
+      return { listings, assets };
+    },
+    async calendar(id) {
+      const cols = matchCalendarCols((await boardMeta(id)).columns);
+      if (!cols.fin) throw new IntegrationError('monday', `Calendar board ${id} has no "Final Schedule" date column.`);
+      const items = await allItems(id, Object.values(cols));
+      const today = new Date().toISOString().slice(0, 10), viewings = [], lm = {};
+      items.forEach((it) => {
+        const v = values(it, cols), group = (it.group && it.group.title) || '';
+        const rel = v._client && v._client.linked_item_ids, lead = rel && rel[0] ? String(rel[0]) : '';
+        const date = ymdIn(v.fin);
+        if (date) viewings.push({ id: String(it.id), leadId: lead, listingId: '', building: v.bld.split(',')[0].trim(), city: v.city.split(',')[0].trim(),
+          date, time: time24(v.time), broker: v.broker, status: viewingStatus(v.status, date, today), statusLabel: v.status, feedback: '' });
+        // LOI / contract evidence per client (Code.gs loiMap_): Failed/Archive rows and Status Failed are skipped
+        if (!lead || /failed|archive/i.test(group) || /fail/i.test(v.status || '')) return;
+        const o = lm[lead] = lm[lead] || { d: '', ds: '', dc: '', cd: '', files: 0, cfiles: 0, sfiles: 0, paid: 0, booked: 0 };
+        const created = Date.parse(it.created_at || '') || 0;
+        if (created && (!o.booked || created < o.booked)) o.booked = created;   // first Calendar item = first viewing booked
+        const ds = ymdIn(v.loi), dc = ymdIn(v.loi2), cd = ymdIn(v.cdate);
+        if (ds > o.ds) o.ds = ds; if (dc && (!o.dc || dc < o.dc)) o.dc = dc; if ((ds || dc) > o.d) o.d = ds || dc; if (cd > o.cd) o.cd = cd;
+        o.files += fileIds(v._file).length; o.cfiles += fileIds(v._cfile).length; o.sfiles += fileIds(v._sfile).length;
+        o.paid += money(v.paid);
+      });
+      return { viewings, lm };
+    },
+  };
+  const BOARD_OF = { leads: 'leads', listings: 'listings', calendar: 'calendar' };
+
+  // in-memory cache only (nothing from Monday is written to MongoDB); one request in flight per dataset
+  const cache = new Map();
+  function cached(key, force, fn) {
+    const hit = cache.get(key), now = Date.now();
+    if (hit && (hit.pending || (now - hit.at < (force ? MIN_REFRESH_MS : TTL_MS)))) return hit.pending || Promise.resolve(hit.value);
+    const pending = tracked(status, fn).then((value) => { cache.set(key, { at: Date.now(), value }); return value; },
+      (err) => { cache.delete(key); throw err; });
+    cache.set(key, { ...(hit || {}), pending });
+    return pending;
+  }
+
+  /** Loads every configured board; each one succeeds or reports its own error (never substituted). */
+  async function loadAll(force) {
+    const raw = {}, errors = {}, notConfigured = [];
+    await Promise.all(Object.keys(BOARD_OF).map(async (ds) => {
+      const boardId = cfg.boards[BOARD_OF[ds]];
+      if (!boardId) { notConfigured.push(ds === 'calendar' ? 'viewings' : ds); return; }
+      try { raw[ds] = await cached(ds + ':' + boardId, force, () => loaders[ds](boardId)); } catch (err) { errors[ds === 'calendar' ? 'viewings' : ds] = err.message; }
+    }));
+    return {
+      leads: raw.leads ? raw.leads.leads : [], labels: raw.leads ? raw.leads.labels : null,
+      listings: raw.listings ? raw.listings.listings : [], viewings: raw.calendar ? raw.calendar.viewings : [], lm: raw.calendar ? raw.calendar.lm : {},
+      calendarOk: !!raw.calendar, errors, notConfigured, fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  async function notes(itemId) {
+    const d = await tracked(status, () => gql('query ($i: [ID!]) { items(ids: $i) { id updates(limit: 50) { id text_body created_at creator { name } } } }', { i: [itemId] }));
+    const item = (d.items || [])[0];
+    return ((item && item.updates) || []).map((u) => ({ id: String(u.id), by: (u.creator && u.creator.name) || 'Monday', text: String(u.text_body || '').slice(0, 4000), at: u.created_at }))
+      .sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  }
+
+  /**
+   * One listing photo through the server (the browser never gets Monday's file links).
+   * Monday's public_url links expire after about an hour, so links older than 40 minutes are refreshed with a read query.
+   * The Monday token is NOT sent to the file host. Only JPEG/PNG/GIF/WebP up to 10 MB are passed on.
+   */
+  async function photo(assetId, thumb) {
+    const entry = cache.get('listings:' + cfg.boards.listings);
+    const map = entry && entry.value && entry.value.assets;
+    const a = map && map.get(String(assetId));
+    if (!a) return null;   // only photos of listings on the configured Listings board
+    if (Date.now() - a.at > PHOTO_URL_TTL || !a.url) {
+      const d = await tracked(status, () => gql('query ($ids: [ID!]!) { assets(ids: $ids) { id public_url url_thumbnail } }', { ids: [String(assetId)] }));
+      const f = (d.assets || [])[0];
+      if (!f || !f.public_url) throw new IntegrationError('monday', 'That photo is no longer on Monday.', { status: 404, countsAsFailure: false });
+      Object.assign(a, { url: f.public_url, thumb: f.url_thumbnail || f.public_url, at: Date.now() });
+    }
+    const url = thumb ? a.thumb : a.url;
+    const okUrl = (u) => /^https:\/\//.test(u) || (mockApi && /^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(u));
+    if (!okUrl(url)) throw new IntegrationError('monday', 'Photo link is not HTTPS.', { status: 502, countsAsFailure: false });
+    let res;
+    try { res = await fetch(url, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(20000) }); }   // no Authorization header
+    catch (e) { throw new IntegrationError('monday', 'Could not load the photo from Monday.', { countsAsFailure: false }); }
+    if (!okUrl(res.url || url)) throw new IntegrationError('monday', 'Photo link redirected to a non-HTTPS address.', { countsAsFailure: false });
+    if (res.status !== 200) throw new IntegrationError('monday', `Photo request returned HTTP ${res.status}.`, { status: res.status === 404 ? 404 : 502, countsAsFailure: false });
+    const type = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!PHOTO_TYPES.includes(type)) throw new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
+    if (Number(res.headers.get('content-length') || 0) > PHOTO_MAX_BYTES) throw new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > PHOTO_MAX_BYTES) throw new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
+    return { type, body: buf };
+  }
+
+  async function test() {
+    const ids = Object.values(cfg.boards).filter(Boolean);
+    const d = await tracked(status, () => gql('query ($b: [ID!]) { me { name } boards(ids: $b) { id name } }', { b: ids.length ? ids : ['0'] }));
+    const names = Object.fromEntries((d.boards || []).map((b) => [String(b.id), b.name]));
+    return { user: (d.me && d.me.name) || '', boards: Object.fromEntries(Object.entries(cfg.boards).map(([k, id]) => [k, id ? (names[id] ? { found: true, name: names[id] } : { found: false }) : null])) };
+  }
+
+  return { loadAll, notes, photo, test };
+}
+
+module.exports = { createMonday, assertReadOnly, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, HIDE };

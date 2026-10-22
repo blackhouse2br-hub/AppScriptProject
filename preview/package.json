@@ -1,0 +1,25 @@
+{
+  "name": "blackhouse-leads-preview",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local preview of the Blackhouse Leads Portal: demo mode with fictional data, or an Express + MongoDB backend.",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "start:demo": "node --env-file-if-exists=.env server.js --mode=demo",
+    "start:mongo": "node --env-file-if-exists=.env server.js --mode=mongo",
+    "create-manager": "node --env-file-if-exists=.env scripts/create-manager.js",
+    "reset-manager-password": "node --env-file-if-exists=.env scripts/reset-manager-password.js",
+    "seed:demo": "node --env-file-if-exists=.env scripts/seed-demo.js",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22.9"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "mongoose": "^9.11.3"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.3.0"
+  }
+}
