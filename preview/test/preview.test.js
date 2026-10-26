@@ -32,7 +32,11 @@ test('mode selection is explicit', () => {
   assert.throws(() => loadConfig({ APP_MODE: 'mongo', MONGODB_URI: 'http://x' }, NO_ARGS), /must start with mongodb/);
   assert.throws(() => loadConfig({ APP_MODE: 'live' }, NO_ARGS), /must be "demo" or "mongo"/);
   assert.throws(() => loadConfig({ NODE_ENV: 'production' }, NO_ARGS), /Demo mode is for local use only/);
-  assert.throws(() => loadConfig({ NODE_ENV: 'production', APP_MODE: 'mongo', MONGODB_URI: 'mongodb://h/db' }, NO_ARGS), /Google sign-in is required before production/);
+  assert.throws(() => loadConfig({ NODE_ENV: 'production', APP_MODE: 'mongo', MONGODB_URI: 'mongodb://h/db' }, NO_ARGS), /Email-and-password sign-in is for the local preview only/);
+  // fully configured for Google + Pages/Railway, production is still blocked until a staging deployment is tested
+  assert.throws(() => loadConfig({ NODE_ENV: 'production', APP_MODE: 'mongo', MONGODB_URI: 'mongodb://h/db', HOST: '0.0.0.0', AUTH_PROVIDER: 'google',
+    PUBLIC_API_URL: 'https://api.example.com', PORTAL_URL: 'https://portal.example.com/', GOOGLE_CLIENT_ID: '1-a.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'x' }, NO_ARGS),
+  /Production start is still blocked: Google sign-in is required before production/);
 });
 
 test('mongo mode refuses to start when MongoDB is unreachable (no demo fallback)', async () => {
@@ -75,6 +79,9 @@ test('startup errors keep their cause and never print credentials', () => {
   reportStartupError(err, (l) => lines.push(l));
   assert.match(lines.join('\n'), /caused by: bad auth/);
   assert.doesNotMatch(lines.join('\n'), /secret/);
+  // hosting configuration errors are plain messages on Railway's log, without a stack trace
+  const cfgErr = []; reportStartupError(new Error('PUBLIC_API_URL is required when the server is reachable from other computers.'), (l) => cfgErr.push(l));
+  assert.strictEqual(cfgErr.length, 1);
   const odd = []; reportStartupError(new TypeError('unexpected'), (l) => odd.push(l));
   assert.ok(odd.length > 1, 'unexpected errors include the stack');
 });
@@ -88,7 +95,7 @@ test('demo server: static app, demo config, API off, no network allowed', async 
     assert.match(home.headers.get('content-security-policy'), /connect-src 'none'/);
     assert.match(await home.text(), /app\.js/);
     assert.match(await (await fetch(base + '/config.js')).text(), /"mode":"demo"/);
-    assert.deepStrictEqual(await (await fetch(base + '/healthz')).json(), { ok: true, mode: 'demo', db: 'not used' });
+    assert.deepStrictEqual(await (await fetch(base + '/healthz')).json(), { ok: true, app: 'blackhouse-leads-portal', mode: 'demo', db: 'not used', auth: 'none' });
     const api = await fetch(base + '/api/bootstrap');
     assert.strictEqual(api.status, 404);
     assert.match((await api.json()).error, /switched off in demo mode/);
@@ -108,6 +115,34 @@ test('front-end scripts parse; only api-client.js makes requests, and only to /a
     if (f !== 'api-client.js') assert.doesNotMatch(src, /\bfetch\(/, f);
   }
   assert.match(fs.readFileSync(path.join(PUB, 'api-client.js'), 'utf8'), /\^\\\/api\\\//);
+});
+
+// Regression: the phone menu's .side-scrim sat in the .shell grid without a desktop rule hiding it, so it took the
+// second column and pushed <main> below the sidebar (blank content area on desktop).
+test('desktop layout: menu scrim hidden outside the phone/tablet rules, main pinned to column 2', () => {
+  const css = fs.readFileSync(path.join(PUB, 'styles.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  // drop every @media / @container block (brace-matched), leaving the always-on rules
+  let base = '', i = 0;
+  while (i < css.length) {
+    const at = css.indexOf('@', i);
+    if (at < 0 || !/^@(media|container)/.test(css.slice(at, at + 10))) { base += css.slice(i, at < 0 ? css.length : at + 1); if (at < 0) break; i = at + 1; continue; }
+    base += css.slice(i, at);
+    let j = css.indexOf('{', at), depth = 0;
+    for (; j < css.length; j++) { if (css[j] === '{') depth++; else if (css[j] === '}' && --depth === 0) break; }
+    i = j + 1;
+  }
+  const rule = (sel) => { const m = base.match(new RegExp('(^|[},])\\s*([^{}]*' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[^{}]*)\\{([^}]*)\\}')); return m ? m[3] : ''; };
+  assert.match(rule('.side-scrim'), /display:\s*none/, '.side-scrim must be hidden by default');
+  assert.match(rule('.shell > main'), /grid-column:\s*2/);
+  assert.match(rule('.shell > #side'), /grid-column:\s*1/);
+});
+
+test('MongoDB mode default data source is Monday.com unless MongoDB was chosen by hand', () => {
+  const SH = require('../public/shared');
+  assert.strictEqual(SH.defaultSource(undefined), 'monday');
+  assert.strictEqual(SH.defaultSource('monday'), 'monday');
+  assert.strictEqual(SH.defaultSource('mongo'), 'mongo');
+  assert.strictEqual(SH.defaultSource('anything else'), 'monday');
 });
 
 test('.env files are ignored and the example has placeholders only', () => {

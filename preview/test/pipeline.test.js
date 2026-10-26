@@ -48,7 +48,11 @@ test('temperature (temperature_)', () => {
   assert.strictEqual(t([m('va', 1, 'user')]), 'Cold');                          // never replied
   assert.strictEqual(t([m('va', 30, 'user'), m('va', 40, 'user'), m('client', 50)]), 'Cold');   // 2 unanswered
   assert.strictEqual(t([m('client', 2)], 'Active'), 'Active');
-  assert.strictEqual(P.temperature('Scheduling', null, lead({ createdAt: new Date(NOW - 2 * D).toISOString() }), NOW).temp, 'Cold');   // no chat: by lead age
+  // chat not read yet: Unchecked (no status guessed from the lead's age); no Respond ID: Not on Respond.io
+  const old = { createdAt: new Date(NOW - 9 * D).toISOString() };
+  assert.strictEqual(P.temperature('Scheduling', null, lead({ ...old, contactId: '555001' }), NOW).temp, 'Unchecked');
+  assert.strictEqual(P.temperature('Scheduling', null, lead({ ...old, contactId: '' }), NOW).temp, 'Not on Respond.io');
+  assert.strictEqual(P.temperature('Failed', null, lead({ contactId: '555001' }), NOW).temp, 'Dead');
 });
 
 test('days in stage (stageSegments_), with the LOI roll-back', () => {

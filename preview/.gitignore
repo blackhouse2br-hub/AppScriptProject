@@ -1,5 +1,7 @@
 node_modules/
 npm-debug.log*
+# GitHub Pages build output (made by scripts/build-pages.js; the Actions workflow builds it fresh)
+dist-pages/
 
 # real configuration and credentials stay on this computer; the placeholder example is committed
 .env

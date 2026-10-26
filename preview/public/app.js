@@ -9,6 +9,7 @@
   'use strict';
   const SH = window.BH_SHARED, { LISTS } = SH, { generate, ymd } = window.BH_DEMO, API = window.BH_API;
   const DEMO = !(window.BH_CONFIG && window.BH_CONFIG.mode === 'mongo');
+  const GOOGLE = !DEMO && window.BH_CONFIG.auth === 'google';   // hosted portal: Google sign-in, no passwords
   const where = () => (DEMO ? 'in this browser (demo)' : 'in MongoDB');
   const SRC = DEMO ? 'demo data' : 'MongoDB';
   const STORE = 'bh_preview_demo_v1', PREF = 'bh_preview_prefs_v1';
@@ -16,8 +17,8 @@
   // ---------- constants copied from the original Index.html ----------
   const AI_STAGES = ['Property Matching', 'Scheduling', 'LOI', 'Contract', 'Collection', 'Active', 'For Renewal', 'Failed', 'Not on Respond.io'];
   const AI_COLORS = { 'Property Matching': '#2f81f7', 'Scheduling': '#bf8700', 'LOI': '#8250df', 'Contract': '#0969da', 'Collection': '#e36209', 'Active': '#1a7f37', 'For Renewal': '#116329', 'Failed': '#6e7781', 'Not on Respond.io': '#57606a' };
-  const TEMPS = ['Hot', 'Warm', 'Cold', 'Lost', 'Dead', 'Not on Respond.io', 'Active'];
-  const TEMP_STYLE = { Hot: ['#ff6b6b', '🔥'], Warm: ['#f0883e', '☀️'], Cold: ['#58a6ff', '❄️'], Lost: ['#8b949e', '⌛'], Dead: ['#6e7681', '✝'], Active: ['#3fb950', '✓'], 'Not on Respond.io': ['#8b949e', '○'] };
+  const TEMPS = SH.TEMPS;
+  const TEMP_STYLE = { Hot: ['#ff6b6b', '🔥'], Warm: ['#f0883e', '☀️'], Cold: ['#58a6ff', '❄️'], Lost: ['#8b949e', '⌛'], Dead: ['#6e7681', '✝'], Active: ['#3fb950', '✓'], 'Not on Respond.io': ['#8b949e', '○'], Unchecked: ['#8b949e', '?'] };
   const DEAL_TABS = { loic: 'LOI (Client)', loio: 'LOI (Owner)', contract: 'Contract', collection: 'Collection', active: 'Active', renewal: 'For Renewal' };
   const VSTAT_COLORS = { Proposed: '#d29922', Confirmed: '#4c8dff', Done: '#3fb950', Cancelled: '#8b949e' };
   const LEAD_PLUS = ['LOI', 'Contract', 'Collection', 'Active', 'For Renewal'];
@@ -80,12 +81,15 @@
     list: null, limit: 150, open: null, tab: 'details', draft: {}, calMonth: null, calBroker: '', setTab: 'team',
     inv: { q: '', city: '', type: '', beds: '', avail: '' }, modal: null, returnFocus: null,
     // mongo mode: which records are shown (MongoDB, or live read-only Monday.com), integration status, chat cache
-    source: 'mongo', integ: null, srcErrors: {}, srcNotConfigured: [], srcFetchedAt: '', srcBusy: false, chat: {}, mTest: null,
+    // mongo mode: leads/listings/calendar come from Monday.com (read-only) by default; MongoDB only if chosen by hand in this browser
+    source: SH.defaultSource(prefs.source), integ: null, srcErrors: {}, srcNotConfigured: [], srcFetchedAt: '', srcBoards: {}, srcLive: null, srcNewer: false, srcBusy: false, chat: {}, mTest: null,
+    mongoRecords: null,
     srcToken: 0, rsInfo: null, teamLabels: null, teamLabelsBusy: false,
     ephemeral: !!BIG,
   };
   function persist() { if (DEMO && !S.ephemeral && !store.set(STORE, JSON.stringify(D))) toast('This browser blocked saving: changes last until you reload.', true); }
-  function savePrefs() { store.set(PREF, JSON.stringify({ view: S.view, as: S.as, theme: S.theme })); }
+  // `source` is stored only when chosen by hand (Data source switch), so the default stays Monday.com
+  function savePrefs() { store.set(PREF, JSON.stringify({ view: S.view, as: S.as, theme: S.theme, ...(prefs.source ? { source: prefs.source } : {}) })); }
 
   // ---------- helpers ----------
   const $ = (s, r = document) => r.querySelector(s);
@@ -144,7 +148,7 @@
   }
 
   // ---------- lead filtering ----------
-  const TEMP_RANK = { Hot: 0, Warm: 1, Cold: 2, Active: 3, Lost: 4, Dead: 5, 'Not on Respond.io': 6 };
+  const TEMP_RANK = { Hot: 0, Warm: 1, Cold: 2, Active: 3, Lost: 4, Dead: 5, 'Not on Respond.io': 6, Unchecked: 7 };
   const toggle = (arr, v) => { const i = arr.indexOf(v); if (i < 0) arr.push(v); else arr.splice(i, 1); };
 
   // ---------- shell ----------
@@ -181,6 +185,28 @@
     const tip = s.state === 'error' ? s.lastError : s.state === 'not_configured' ? 'Set ' + (s.missing || []).join(', ') + ' in preview/.env' : s.lastOkAt ? 'Last success ' + ago(s.lastOkAt) : 'Not used yet';
     return `<span class="ist ${cls}" title="${esc(tip)}"><span class="dot"></span>${esc(name)}: ${label}</span>`;
   }
+  const hhmm = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  /**
+   * How old the Monday data on screen is (time its read started), whether a newer copy is loading, and any refresh
+   * failure. Old data is always labelled as old; nothing else is shown in its place.
+   */
+  function mondayDataNote() {
+    const shown = S.srcBoards || {}, live = (S.srcLive && S.srcLive.boards) || {}, staleMs = S.srcStaleMs || 300e3;
+    const old = !!S.srcFetchedAt && Date.now() - new Date(S.srcFetchedAt).getTime() > staleMs;
+    const refreshing = Object.values(live).some((b) => b.refreshing);
+    const failed = Object.entries(live).filter(([k, b]) => b.refreshError && shown[k] && shown[k].loaded);
+    let h = `<div class="src-note${old ? ' stale' : ''}" role="status">Live Monday.com data, read-only: nothing is written to Monday or saved to MongoDB or this browser.`;
+    if (S.srcFetchedAt) h += ` Data on screen was read from Monday at <b>${esc(hhmm(S.srcFetchedAt))}</b> (${esc(ago(S.srcFetchedAt))}).${old ? ' <b>It may be out of date.</b>' : ''}`;
+    if (refreshing) h += ' Refreshing in the background… the data on screen stays until the new copy is ready.';
+    if (S.srcNewer) h += ' <b>Newer data is ready</b> and appears when you close the open panel.';
+    h += '</div>';
+    if (failed.length) {
+      h += `<div class="src-err" role="alert">${failed.map(([k, b]) => `<div><b>Monday ${esc(k)}: refresh failed at ${esc(hhmm(b.refreshFailedAt))}.</b> ${esc(b.refreshError)} Still showing the last successful copy, read at ${esc(hhmm(shown[k].fetchedAt))} (${esc(ago(shown[k].fetchedAt))}); it is not up to date.</div>`).join('')}
+        <div class="sub">No MongoDB or demo data is used instead. It retries on its own; Refresh tries again now.</div></div>`;
+    }
+    if (S.srcLive && S.srcLive.checkError) h += `<div class="src-err" role="alert"><b>Couldn't check Monday.com for newer data:</b> ${esc(S.srcLive.checkError)} The data on screen was read ${esc(ago(S.srcFetchedAt))}.</div>`;
+    return h;
+  }
   function demoBar() {
     if (!DEMO) {
       const m = S.integ && S.integ.monday, canMonday = !!(m && m.configured);
@@ -189,14 +215,15 @@
       return `<div class="demo-bar live-bar ${S.source === 'monday' ? 'ext' : ''}"><span class="demo-tag live">MongoDB</span>
         <div class="seg" role="group" aria-label="Data source">
           <button data-act="source" data-v="mongo" aria-pressed="${S.source === 'mongo'}">MongoDB</button>
-          <button data-act="source" data-v="monday" aria-pressed="${S.source === 'monday'}" ${canMonday ? '' : 'disabled'} title="${canMonday ? 'Show live Monday.com data (read-only)' : 'Monday.com is not connected: set MONDAY_TOKEN and the board IDs in preview/.env'}">Monday.com · read-only</button></div>
+          <button data-act="source" data-v="monday" aria-pressed="${S.source === 'monday'}" title="${canMonday ? 'Show live Monday.com data (read-only) — the default' : 'Monday.com is not connected: set MONDAY_TOKEN and the board IDs in preview/.env'}">Monday.com · read-only</button></div>
         ${S.srcBusy ? '<span class="muted">Loading from Monday.com…</span>' : ''}
         ${S.source === 'monday' && S.rsInfo ? (S.rsInfo.busy ? `<span class="muted" role="status">Checking respond.io chats… ${Math.max(0, (S.rsInfo.linked || 0) - (S.rsInfo.pending || 0))} of ${S.rsInfo.linked || '?'}</span>`
-          : S.rsInfo.error ? '' : `<span class="muted" role="status">Reply states checked ${S.rsInfo.at ? esc(ago(S.rsInfo.at)) : ''}</span>`) : ''}
+          : S.rsInfo.error ? '' : `<span class="muted" role="status">Reply states checked ${S.rsInfo.at ? esc(ago(S.rsInfo.at)) : ''}</span>`)
+          : S.source === 'monday' && S.integ && S.integ.respond && S.integ.respond.configured && !S.integ.respond.listChecks ? '<span class="muted">respond.io: read per lead when you open its Chat tab; other reply statuses show as unchecked</span>' : ''}
         ${istChip('Monday.com', m)}${istChip('respond.io', S.integ && S.integ.respond)}
         <span class="spacer"></span><span class="mb-text">Signed in as <b>${esc(me().name)}</b> (${esc(me().role)})</span>
         <button class="btn sm" data-act="logout">Sign out</button></div>
-        ${S.source === 'monday' ? `<div class="src-note">Live Monday.com data, read-only: nothing is written to Monday or saved to MongoDB.${S.srcFetchedAt ? ' Loaded ' + esc(ago(S.srcFetchedAt)) + '.' : ''}</div>` : ''}
+        ${S.source === 'monday' ? mondayDataNote() : ''}
         ${errs.length ? `<div class="src-err" role="alert">${errs.map(([k, v]) => `<div><b>${esc(k === 'all' ? 'Monday.com' : 'Monday ' + k)}:</b> ${esc(v)}</div>`).join('')}<div class="sub">No substitute data is shown for these.${S.srcErrors.viewings ? ' Without the Calendar board, AI Status uses Monday AI STATUS / status rules only, and Days in Stage starts from the inquiry date.' : ''}</div></div>` : ''}
         ${S.source === 'monday' && S.rsInfo && S.rsInfo.error ? `<div class="src-err" role="alert"><b>respond.io:</b> ${esc(S.rsInfo.error)} <span class="sub">Reply state and Temperature for those leads stay unchecked (no substitute data).</span></div>` : ''}
         ${nc.length ? `<div class="src-note">Not configured: ${nc.map((k) => esc(k)).join(', ')} (set the board IDs in preview/.env).</div>` : ''}`;
@@ -245,7 +272,8 @@
   const vaPill = (va) => va ? `<span class="vpill" style="--h:${vaHue(va)}">${esc(va)}</span>` : '<span class="muted">Unassigned</span>';
   const bedsTxt = (b) => !b ? '' : b === 'Studio' ? 'Studio' : b + ' BR';
   const daysTxt = (l) => (l.daysInStage == null ? '' : l.daysInStage + ' d in stage');
-  const replyBadge = (l) => l.onRespond && l.waiting ? `<span class="wait ${l.waiting}">${l.waiting === 'va' ? 'Needs VA Reply' : 'Waiting on Client'}</span>` : '';
+  const replyBadge = (l) => l.onRespond && l.waiting ? `<span class="wait ${l.waiting}">${l.waiting === 'va' ? 'Needs VA Reply' : 'Waiting on Client'}</span>`
+    : l.onRespond && l.replyChecked === false ? '<span class="wait unk" title="respond.io chat not read yet. Open the Chat tab to check it.">Reply unchecked</span>' : '';
   const COLS = [   // [key, header, sortable]
     ['id', 'Lead ID', 1], ['name', 'Client', 1], ['ai', 'AI Status', 1], ['temp', 'Temperature', 1], ['va', 'VA', 1], ['type', 'Type', 1],
     ['look', 'Looking For', 0], ['movein', 'Move-in', 1], ['source', 'Source', 1], ['added', 'Added', 1]];
@@ -375,8 +403,38 @@
     const total = S.list.reduce((a, l) => a + (l.budget || 0), 0);
     $('#footnote').textContent = `${S.list.length.toLocaleString()} of ${visibleLeads().length.toLocaleString()} leads · total lead value ${money(total) || '₱0'} · ${S.list.filter((l) => l.onRespond).length.toLocaleString()} linked to Respond.io · ${sourceLabel()}`;
   }
+  /** Items read so far per board during a long first load (from /api/monday/freshness; counts only). */
+  function loadProgressHtml() {
+    const b = S.srcProgress;
+    if (!b) return '<div class="load-prog sub" role="status">Checking progress…</div>';
+    const name = { leads: 'Leads', listings: 'Listings', viewings: 'Calendar' };
+    const rows = Object.entries(b).map(([k, x]) => {
+      const p = x.progress;
+      const state = x.error ? `<span class="hotnum">failed: ${esc(x.error)}</span>`
+        : x.loaded && !p ? 'done'
+        : p ? `${p.read.toLocaleString()}${p.total ? ' of ' + p.total.toLocaleString() : ''} read${p.startedAt ? ' · ' + esc(elapsed(p.startedAt)) : ''}`
+        : 'waiting';
+      return `<div>${esc(name[k] || k)}: ${state}</div>`;
+    });
+    return `<div class="load-prog sub" role="status">${rows.join('')}</div>`;
+  }
+  const elapsed = (iso) => { const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000)); return s < 60 ? s + ' s' : Math.floor(s / 60) + ' min ' + (s % 60) + ' s'; };
+  /** While the first Monday load runs: show per-board progress every 3 s (this check never starts another fetch). */
+  async function watchFirstLoad() {
+    const id = S.loadPoll = (S.loadPoll || 0) + 1;
+    const alive = () => S.loadPoll === id && S.srcBusy && S.source === 'monday' && !!S.user;
+    while (alive()) {
+      try { S.srcProgress = (await API.get('/api/monday/freshness')).boards; } catch (e) { if (signedOut(e)) return; }
+      if (!alive()) return;
+      const box = $('#list .empty'); if (box) box.innerHTML = emptyLeadsMsg();
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
   function emptyLeadsMsg() {
-    if (!DEMO && S.source === 'monday') return S.srcErrors && Object.keys(S.srcErrors).length ? 'Monday.com leads could not be loaded (see the error above).' : 'Monday.com returned no leads you can see.';
+    if (!DEMO && S.source === 'monday') {
+      if (S.srcBusy || !S.srcFetchedAt && !Object.keys(S.srcErrors || {}).length) return `Loading leads from Monday.com (read-only)…${loadProgressHtml()}<br><span class="sub">The first load after the app starts can take a few minutes. No other data is shown meanwhile.</span>`;
+      return S.srcErrors && Object.keys(S.srcErrors).length ? 'Monday.com leads could not be loaded (see the error above). No MongoDB or demo records are shown in their place.<br><span class="sub">Fix the problem and press Refresh, or choose <b>MongoDB</b> under Data source to work with MongoDB records.</span>' : 'Monday.com returned no leads you can see.';
+    }
     return (isManager() ? 'No leads on the board yet.' : 'No leads are assigned to you yet.') + (!DEMO && isManager() ? '<br><span class="sub">MongoDB has no leads. Importing from Monday.com is a later phase; for fictional sample records run <b>npm run seed:demo</b> on an empty database.</span>' : '');
   }
   const moreRow = () => S.list.length > S.limit ? `<div class="more-row" id="moreRow"><button class="btn sm" data-act="more">Show ${Math.min(PAGE_ROWS, S.list.length - S.limit)} more</button><span class="muted">Showing ${S.limit.toLocaleString()} of ${S.list.length.toLocaleString()}</span></div>` : '';
@@ -570,9 +628,10 @@
   function listingCard(x, extra) {
     const cls = { Available: 'av', Reserved: 'rs', 'Not Available': 'na' }[x.availability];
     const where1 = [x.code, [x.tower, x.floor != null ? 'floor ' + x.floor : ''].filter(Boolean).join(', '), x.city].filter(Boolean).join(' · ');
-    // Monday photos come through the server (/api/monday/photo/<asset>), so the page only ever loads same-origin images
+    // Monday photos come through the server (/api/monday/photo/<asset>), so the page only loads images from its own API
+    const photoUrl = (id, thumb) => API.url(`/api/monday/photo/${encodeURIComponent(id)}${thumb ? '?thumb=1' : ''}`);
     const ph = !DEMO && x.photos && x.photos.length ? x.photos : null;
-    const photo = ph ? `<a class="phl" href="/api/monday/photo/${esc(ph[0])}" target="_blank" rel="noopener" data-pid="${esc(x.id)}" aria-label="Open photo of ${esc(x.building)}"><img class="lphoto" src="/api/monday/photo/${esc(ph[0])}?thumb=1" alt="Photo of ${esc(x.building)}" loading="lazy" decoding="async"></a>
+    const photo = ph ? `<a class="phl" href="${esc(photoUrl(ph[0]))}" target="_blank" rel="noopener" data-pid="${esc(x.id)}" aria-label="Open photo of ${esc(x.building)}"><img class="lphoto" src="${esc(photoUrl(ph[0], true))}" alt="Photo of ${esc(x.building)}" loading="lazy" decoding="async"></a>
       ${ph.length > 1 ? `<button type="button" class="pnav prev" data-act="photonav" data-id="${esc(x.id)}" data-v="-1" aria-label="Previous photo">‹</button><button type="button" class="pnav next" data-act="photonav" data-id="${esc(x.id)}" data-v="1" aria-label="Next photo">›</button><span class="count" data-pc="${esc(x.id)}">1/${ph.length}</span>` : ''}` : '';
     return `<div class="lcard"><div class="lph ${ph ? 'has-photo' : ''}" style="--h:${x.hue}">${photo}<span class="badge ${cls}" title="${esc(x.availabilityLabel || x.availability)}">${esc(x.availability)}</span>${extra && extra.score != null ? `<span class="score">Match ${extra.score}</span>` : ''}<span class="ini">${esc(initials(x.building))}</span></div>
       <div class="lbody"><div><div class="lt">${esc(x.building)}</div><div class="sub">${esc(where1)}</div></div>
@@ -626,6 +685,12 @@
     S.chat[l.id] = { loading: true };
     try { S.chat[l.id] = { data: await API.get(`/api/respond/chat/${S.source === 'monday' ? 'monday' : 'mongo'}/${encodeURIComponent(l.id)}`) }; }
     catch (e) { if (signedOut(e)) return; S.chat[l.id] = { error: e.message }; }
+    // the chat just read gives this lead (only) its reply status and Temperature
+    const st = S.chat[l.id].data && S.chat[l.id].data.lead;
+    if (st && S.source === 'monday') {
+      Object.assign(l, st); IDX.delete(l);
+      if (S.view === 'leads' && $('#list')) { const row = rowEl(l.id); if (row) { row.outerHTML = rowHtml(l); const r2 = rowEl(l.id); if (r2) r2.classList.add('sel'); } updateCounts(); renderSide(); }
+    }
     refreshStatus();
     if (S.open === l.id && S.tab === 'chat') { renderDrawerBody(); const b = $('#dbody'); if (b) b.scrollTop = b.scrollHeight; }
   }
@@ -807,14 +872,14 @@
       : t.source === 'monday' ? `<span class="muted">VA labels and Salesperson names read from the Monday Leads board (${t.va.length} VA, ${t.salesperson.length} Salesperson labels).</span>`
       : t.source === 'error' ? `<span class="hotnum">Monday labels could not be loaded: ${esc(t.error)}. Only the preview's VA labels can be picked.</span>`
       : '<span class="muted">Monday is not connected: the preview\'s fictional VA labels are used.</span>';
-    return `<div class="panel"><h3>Team &amp; Access <span class="muted">${DEMO ? 'demo members (example.com addresses)' : 'stored in MongoDB · members sign in with their email and password'}</span><span class="spacer"></span>${edit ? '<button class="btn sm" data-act="user" data-v="">+ Add member</button>' : ''}</h3>
+    return `<div class="panel"><h3>Team &amp; Access <span class="muted">${DEMO ? 'demo members (example.com addresses)' : GOOGLE ? 'stored in MongoDB · members sign in with the Google account of this email' : 'stored in MongoDB · members sign in with their email and password'}</span><span class="spacer"></span>${edit ? '<button class="btn sm" data-act="user" data-v="">+ Add member</button>' : ''}</h3>
       ${note ? `<div class="pad" style="padding-bottom:0">${note}</div>` : ''}
       <div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>VA label</th>${t && t.source === 'monday' ? '<th>Monday match</th>' : ''}<th>Access</th></tr></thead><tbody>
       ${D.users.map((u) => `<tr class="${edit ? 'click' : ''}" ${edit ? `data-act="user" data-v="${esc(u.email)}"` : ''}><td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.vaLabel || '—')}</td>
         ${t && t.source === 'monday' ? `<td>${boardMatch(u)}</td>` : ''}
         <td class="sub">${u.role === 'Manager' ? 'Everything (edit)' : MOD_KEYS.filter((k) => (u.modules || {})[k] && u.modules[k] !== 'none').map((k) => VIEW_LABEL[k] + (u.modules[k] === 'view' ? ' (view)' : '')).join(', ') || 'No access'}</td></tr>`).join('')}
       </tbody></table></div></div>
-      <div class="sub">VAs see only leads assigned to their VA label; brokers see only leads they handle. ${DEMO ? 'In the live portal, sign-in uses Google accounts listed here.' : 'Changes to role and access apply on the member\'s next request. Google sign-in is a later phase.'}</div>`;
+      <div class="sub">VAs see only leads assigned to their VA label; brokers see only leads they handle. ${DEMO ? 'In the live portal, sign-in uses Google accounts listed here.' : 'Changes to role and access apply on the member\'s next request.' + (GOOGLE ? ' Removing a member, or changing their email, signs them out.' : ' On the hosted portal, members sign in with Google instead of a password.')}</div>`;
   }
   function userModal(email) {
     const u = D.users.find((x) => x.email === email) || { email: '', name: '', role: 'VA', vaLabel: '', modules: {} };
@@ -824,7 +889,7 @@
         <label>Role<select id="mRole">${['Manager', 'VA', 'Broker'].map((r) => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
         <label>VA label${!DEMO && S.teamLabels && S.teamLabels.source === 'monday' ? ' <span class="muted">(from Monday)</span>' : ''}<select id="mVa"><option value="">(none)</option>${vaChoices().concat(u.vaLabel && !vaChoices().includes(u.vaLabel) ? [u.vaLabel] : []).map((v) => `<option ${u.vaLabel === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
         ${!DEMO && S.teamLabels && S.teamLabels.source === 'monday' ? '<div class="full sub">Brokers see Monday leads where their <b>name</b> matches a Salesperson label exactly.</div>' : ''}
-        ${DEMO ? '' : `<label class="full">${email ? 'New password (leave blank to keep the current one)' : 'Temporary password'}<input id="mPass" type="password" autocomplete="new-password" minlength="${SH.MIN_PASSWORD}" maxlength="200" placeholder="At least ${SH.MIN_PASSWORD} characters"></label>`}</div>
+        ${DEMO ? '' : GOOGLE ? '<div class="full sub">They sign in with "Sign in with Google" using this email address. No password is needed.</div>' : `<label class="full">${email ? 'New password (leave blank to keep the current one)' : 'Temporary password'}<input id="mPass" type="password" autocomplete="new-password" minlength="${SH.MIN_PASSWORD}" maxlength="200" placeholder="At least ${SH.MIN_PASSWORD} characters"></label>`}</div>
       <div class="section-title">Module access <span class="muted" style="text-transform:none;font-weight:400">(Managers always have edit access)</span></div>
       <div class="grid">${MOD_KEYS.map((k) => `<label>${esc(VIEW_LABEL[k])}<select data-mod="${k}">${['none', 'view', 'edit'].map((a) => `<option value="${a}" ${((u.modules || {})[k] || 'none') === a ? 'selected' : ''}>${a === 'none' ? 'No access' : a === 'view' ? 'View' : 'Edit'}</option>`).join('')}</select></label>`).join('')}</div>
       <div class="actions">${email && email !== me().email ? '<button type="button" class="btn danger" data-act="deluser">Remove</button><span class="spacer"></span>' : ''}<button type="button" class="btn" data-act="mclose">Cancel</button><button type="submit" class="btn primary">Save</button></div>`, { form: 'user' });
@@ -834,10 +899,10 @@
     const orig = S.modal.orig, modules = {};
     $$('[data-mod]').forEach((s) => { modules[s.dataset.mod] = s.value; });
     const input = { name: $('#mName').value, email: $('#mEmail').value, role: $('#mRole').value, vaLabel: $('#mVa').value, modules };
-    if (!DEMO) input.password = $('#mPass').value;
+    if (!DEMO && !GOOGLE) input.password = $('#mPass').value;
     const { value, errors } = SH.validateUser(input, { vaLabels: vaChoices() });
     if (errors.length) return toast(errors[0], true);
-    if (!DEMO && !orig && !value.password) return toast(`Set a temporary password (at least ${SH.MIN_PASSWORD} characters).`, true);
+    if (!DEMO && !GOOGLE && !orig && !value.password) return toast(`Set a temporary password (at least ${SH.MIN_PASSWORD} characters).`, true);
     if (D.users.some((x) => x.email === value.email && x.email !== orig)) return toast('That email is already on the team.', true);
     const prev = D.users.find((x) => x.email === orig);
     if (prev && prev.role === 'Manager' && value.role !== 'Manager' && D.users.filter((x) => x.role === 'Manager').length < 2) return toast('Keep at least one Manager.', true);
@@ -995,12 +1060,59 @@
   }
 
   // ---------- mongo mode: sign-in + loading ----------
+  /**
+   * Sign-in user and app-owned records (team, templates) always come from MongoDB. Leads, listings and viewings
+   * come from MongoDB only when that source is selected; with Monday.com selected they stay empty until Monday
+   * answers (never filled with MongoDB or demo records in between).
+   */
   async function loadAll() {
     const b = await API.get('/api/bootstrap');
     S.user = b.user;
-    D = { leads: b.leads, listings: b.listings, calendar: b.viewings, users: b.users, templates: b.templates };
-    S.source = 'mongo'; S.srcErrors = {}; S.srcNotConfigured = []; S.chat = {}; S.srcToken = (S.srcToken || 0) + 1; S.rsInfo = null;
+    S.mongoRecords = { leads: b.leads, listings: b.listings, calendar: b.viewings };
+    D = { leads: D.leads || [], listings: D.listings || [], calendar: D.calendar || [], users: b.users, templates: b.templates };
+    if (S.source === 'mongo') useMongoRecords();
     await refreshStatus();
+  }
+  function useMongoRecords() {
+    const m = S.mongoRecords || { leads: [], listings: [], calendar: [] };
+    Object.assign(D, { leads: m.leads, listings: m.listings, calendar: m.calendar });
+    S.srcErrors = {}; S.srcNotConfigured = []; S.chat = {}; S.srcToken = (S.srcToken || 0) + 1; S.rsInfo = null;
+  }
+  /** Monday.com selected: clear Monday-sourced lists, show the loading state, then load (read-only). */
+  async function openMondaySource(force) {
+    Object.assign(D, { leads: [], listings: [], calendar: [] });
+    S.srcErrors = {}; S.srcNotConfigured = []; S.srcFetchedAt = ''; S.chat = {}; S.list = null;
+    S.srcBusy = true; S.srcProgress = null; render();
+    watchFirstLoad();
+    const ok = await loadMonday(force);
+    if (ok) { render(); watchMonday(); }
+    return ok;
+  }
+  /**
+   * While Monday.com is shown: rechecks the age and refresh state of the server's copy (no data in that reply) every
+   * 30 s, or 10 s while a refresh runs, and swaps in a newer copy once it's ready — but not while a lead, a dialog or a
+   * text field is in use; the bar says newer data is waiting instead.
+   */
+  async function watchMonday() {
+    const id = S.watch = (S.watch || 0) + 1;
+    const alive = () => S.watch === id && S.source === 'monday' && !!S.user;
+    while (alive()) {
+      await new Promise((r) => { S.watchWake = r; setTimeout(r, S.srcLive && S.srcLive.refreshing ? 10e3 : 30e3); });
+      if (!alive()) return;
+      if (S.srcBusy) continue;
+      let f;
+      try { f = await API.get('/api/monday/freshness'); } catch (e) {
+        if (signedOut(e)) return;
+        if (alive()) { S.srcLive = { ...(S.srcLive || {}), checkError: e.message }; renderModeBar(); }
+        continue;
+      }
+      if (!alive()) return;
+      S.srcLive = f;
+      const newer = Object.entries(f.boards || {}).some(([k, b]) => b.loadedAt && b.loadedAt !== (S.srcBoards[k] || {}).loadedAt);
+      const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+      if (newer && !S.open && !S.modal && !typing && !document.hidden) { if ((await loadMonday(false)) && alive()) render(); }
+      else { S.srcNewer = newer; renderModeBar(); }
+    }
   }
   /** Integration status (never fatal: the portal works without integrations). */
   async function refreshStatus() {
@@ -1011,14 +1123,20 @@
   /** Live read-only Monday.com records for the existing screens. Errors are shown, never replaced with other data. */
   async function loadMonday(force) {
     S.srcBusy = true; renderModeBar();
+    const token = S.srcToken;
+    // a reply that arrives after the user switched to MongoDB (or signed out) is ignored, never mixed in
+    const stale = () => S.source !== 'monday' || S.srcToken !== token || !S.user;
     try {
       const r = await API.get('/api/monday/bootstrap' + (force ? '?refresh=1' : ''));
+      if (stale()) return false;
       D.leads = r.leads; D.listings = r.listings; D.calendar = r.viewings;
-      S.srcErrors = r.errors || {}; S.srcNotConfigured = r.notConfigured || []; S.srcFetchedAt = r.fetchedAt;
+      S.srcErrors = r.errors || {}; S.srcNotConfigured = r.notConfigured || []; S.srcFetchedAt = r.fetchedAt || '';
+      S.srcBoards = r.boards || {}; S.srcLive = { boards: r.boards || {}, refreshing: !!r.refreshing }; S.srcStaleMs = r.staleAfterMs; S.srcNewer = false;
     } catch (e) {
-      if (signedOut(e)) return false;
-      D.leads = []; D.listings = []; D.calendar = []; S.srcErrors = { all: e.message }; S.srcNotConfigured = [];
-    } finally { S.srcBusy = false; }
+      if (signedOut(e) || stale()) return false;
+      D.leads = []; D.listings = []; D.calendar = []; S.srcErrors = { all: e.message }; S.srcNotConfigured = []; S.srcFetchedAt = '';
+      S.srcBoards = {}; S.srcLive = null; S.srcNewer = false;
+    } finally { if (!stale()) S.srcBusy = false; else if (S.source !== 'monday') S.srcBusy = false; }
     S.chat = {};
     await refreshStatus();
     S.srcToken = (S.srcToken || 0) + 1;
@@ -1031,7 +1149,8 @@
    */
   async function pollReplyStates(token) {
     const r0 = S.integ && S.integ.respond;
-    if (DEMO || S.source !== 'monday' || !r0 || !r0.configured) { S.rsInfo = null; return; }
+    // list-wide checks are off unless the server switches them on (RESPOND_LIST_CHECKS=on): chats are read per lead
+    if (DEMO || S.source !== 'monday' || !r0 || !r0.configured || !r0.listChecks) { S.rsInfo = null; return; }
     S.rsInfo = { busy: true, linked: 0, pending: 0, error: '' }; renderModeBar();
     for (let round = 0; round < 40; round++) {
       let r;
@@ -1048,7 +1167,27 @@
     if (S.rsInfo && token === S.srcToken) { S.rsInfo.busy = false; renderModeBar(); }
     refreshStatus();
   }
-  function renderLogin(msg) {
+  // why a Google sign-in was refused (codes from the API's /api/auth/google/callback; never details of the account)
+  const SIGNIN_ERRORS = {
+    not_member: 'That Google account isn\'t on the team. Ask a Manager to add your email address in Settings → Team & Access, then try again.',
+    mismatch: 'This email is linked to a different Google account. Ask a Manager to check your entry in Team & Access.',
+    domain: 'Use your company Google account to sign in.',
+    unverified: 'Google hasn\'t verified that email address yet.',
+    cancelled: 'Sign-in was cancelled.',
+    expired: 'That sign-in link expired or was opened in another browser. Please try again.',
+    google: 'Google sign-in didn\'t complete. Please try again in a minute.',
+  };
+  function renderGoogleLogin(msg, isErr) {
+    document.documentElement.dataset.theme = S.theme;
+    $('#app').innerHTML = `<div class="login"><div class="box">
+      <div class="brand" style="margin-bottom:14px"><div class="logo">BH</div><div>Blackhouse<small>Leads Portal</small></div></div>
+      ${msg ? `<div class="${isErr ? 'src-err' : 'sub'}" style="margin-bottom:10px" role="${isErr ? 'alert' : 'status'}">${esc(msg)}</div>` : ''}
+      <a class="btn primary" id="gSignIn" href="${esc(API.url('/api/auth/google/start'))}" style="width:100%;justify-content:center">Sign in with Google</a>
+      <div class="sub" style="margin-top:12px">Only team members listed in Team &amp; Access can sign in. Your role and access come from the portal, not from Google.</div></div></div>`;
+    const b = $('#gSignIn'); if (b) b.focus();
+  }
+  function renderLogin(msg, isErr) {
+    if (GOOGLE) return renderGoogleLogin(msg, isErr);
     document.documentElement.dataset.theme = S.theme;
     $('#app').innerHTML = `<div class="login"><form class="box" id="loginForm" autocomplete="on">
       <div class="brand" style="margin-bottom:14px"><div class="logo">BH</div><div>Blackhouse<small>Leads Portal · MongoDB (local backend)</small></div></div>
@@ -1061,15 +1200,18 @@
     const e = $('#lEmail'); if (e) e.focus();
   }
   function renderFatal(msg) {
-    $('#app').innerHTML = `<div class="login"><div class="box"><h3 style="margin-top:0">The local backend isn't available</h3>
+    $('#app').innerHTML = `<div class="login"><div class="box"><h3 style="margin-top:0">${API.base ? 'The portal API isn\'t available' : 'The local backend isn\'t available'}</h3>
       <div class="sub" style="margin-bottom:12px">${esc(msg)}</div>
-      <div class="sub" style="margin-bottom:12px">MongoDB mode does not switch to demo data. Start the server with <b>npm run start:demo</b> if you want the demo instead.</div>
+      <div class="sub" style="margin-bottom:12px">${API.base ? 'The portal never shows demo or cached data in its place.' : 'MongoDB mode does not switch to demo data. Start the server with <b>npm run start:demo</b> if you want the demo instead.'}</div>
       <button class="btn primary" data-act="retry">Try again</button></div></div>`;
   }
   async function boot() {
     if (DEMO) { if (!store.get(STORE)) persist(); return true; }
+    // returning from Google: show why a sign-in was refused, and take the code out of the address bar
+    const err = (location.hash.match(/^#signin-error=([a-z_]+)$/) || [])[1];
+    if (err || location.hash === '#') history.replaceState(null, '', location.pathname + location.search);
     try { await API.get('/api/session'); await loadAll(); return true; } catch (e) {
-      if (e.status === 401) renderLogin(); else renderFatal(e.message);
+      if (e.status === 401) renderLogin(err ? SIGNIN_ERRORS[err] || SIGNIN_ERRORS.google : '', !!err); else renderFatal(e.message);
       return false;
     }
   }
@@ -1130,13 +1272,15 @@
       try { S.mTest = await API.post('/api/integrations/monday/test'); } catch (e) { if (signedOut(e)) return; S.mTest = { error: e.message }; }
       await refreshStatus(); renderView();
     },
+    // a manual choice is remembered in this browser; Monday.com is the default otherwise
     source: async (el) => {
-      const v = el.dataset.v; if (v === S.source || S.srcBusy) return;
+      const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
-      if (v === 'monday') { S.source = 'monday'; if (!(await loadMonday(false))) return; }
-      else if (!(await attempt(loadAll))) return;
-      S.list = null; render();
-      toast(v === 'monday' ? 'Showing live Monday.com data (read-only).' : 'Showing MongoDB records.');
+      prefs.source = v; S.source = v; savePrefs();
+      if (v === 'monday') { await openMondaySource(false); toast('Showing live Monday.com data (read-only).'); return; }
+      S.srcBusy = false;
+      if (!(await attempt(loadAll))) return;
+      useMongoRecords(); S.list = null; render(); toast('Showing MongoDB records (chosen by hand; Monday.com stays the default until you switch back).');
     },
     user: (el) => userModal(el.dataset.v),
     deluser: async () => {
@@ -1154,12 +1298,21 @@
     refresh: async () => {
       if (DEMO) return toast('Demo data doesn\'t change on its own. In the live portal, Refresh reloads from Monday.com.');
       if (S.open && Object.keys(S.draft).length) return toast('Save or discard your changes first.', true);
-      if (S.source === 'monday') { if (await loadMonday(true)) { if (S.open) closeDrawer(); render(); toast(Object.keys(S.srcErrors).length ? 'Monday.com reload finished with errors.' : 'Reloaded from Monday.com.', !!Object.keys(S.srcErrors).length); } return; }
-      if (await attempt(loadAll)) { if (S.open) closeDrawer(); render(); toast('Reloaded from MongoDB.'); }
+      if (S.source === 'monday') {
+        if (!(await loadMonday(true))) return;
+        if (S.open) closeDrawer(); render(); if (S.watchWake) S.watchWake();
+        const errs = !!Object.keys(S.srcErrors).length;
+        toast(errs ? 'Some Monday.com boards could not be loaded (see the error above).'
+          : S.srcLive && S.srcLive.refreshing ? 'Refreshing from Monday.com in the background. The data on screen stays, with its age shown, until the new copy is ready.'
+          : 'Monday.com data on screen was read ' + ago(S.srcFetchedAt) + ' (refreshed at most every 30 s).', errs);
+        return;
+      }
+      if (await attempt(loadAll)) { useMongoRecords(); if (S.open) closeDrawer(); render(); toast('Reloaded from MongoDB.'); }
     },
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
-      S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.source = 'mongo'; S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null;
+      S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null;
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
     },
@@ -1171,7 +1324,7 @@
       const x = listingById(el.dataset.id); if (!x || !x.photos) return;
       const card = el.closest('.lph'), img = card.querySelector('.lphoto'), link = card.querySelector('.phl'), cnt = card.querySelector('[data-pc]');
       const i = (x.photos.indexOf((img.dataset.cur || x.photos[0])) + Number(el.dataset.v) + x.photos.length) % x.photos.length, id = x.photos[i];
-      card.classList.remove('ph-err'); img.dataset.cur = id; img.src = `/api/monday/photo/${encodeURIComponent(id)}?thumb=1`; link.href = `/api/monday/photo/${encodeURIComponent(id)}`;
+      card.classList.remove('ph-err'); img.dataset.cur = id; img.src = API.url(`/api/monday/photo/${encodeURIComponent(id)}?thumb=1`); link.href = API.url(`/api/monday/photo/${encodeURIComponent(id)}`);
       if (cnt) cnt.textContent = (i + 1) + '/' + x.photos.length;
     },
     notwired: (el) => toast(el.dataset.v + ' is switched off in the preview (read-only; no messages are sent).'),
@@ -1313,8 +1466,10 @@
   function start() {
     const qs = new URLSearchParams(location.search);
     if (VIEW_LABEL[qs.get('view')]) S.view = qs.get('view');
+    const deepLead = () => { if (qs.get('lead') && leadById(qs.get('lead'))) openLead(qs.get('lead'), qs.get('tab') || undefined); };
+    if (!DEMO && S.source === 'monday') { openMondaySource(false).then(deepLead); return; }   // default source: Monday.com (read-only)
     render();
-    if (qs.get('lead') && leadById(qs.get('lead'))) openLead(qs.get('lead'), qs.get('tab') || undefined);
+    deepLead();
   }
   boot().then((ok) => { if (ok) start(); });
 })();

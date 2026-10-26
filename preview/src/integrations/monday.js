@@ -192,7 +192,7 @@ function assertReadOnly(query) {
   }
 }
 
-function createMonday(cfg, status) {
+function createMonday(cfg, status, { now = Date.now } = {}) {
   const mockApi = /^http:\/\/(127\.0\.0\.1|localhost):/.test(cfg.apiUrl);
 
   async function gql(query, variables) {
@@ -219,27 +219,33 @@ function createMonday(cfg, status) {
   }
 
   async function boardMeta(boardId) {
-    const d = await gql('query ($b: [ID!]) { boards(ids: $b) { id name columns { id title type settings_str } } }', { b: [boardId] });
+    const d = await gql('query ($b: [ID!]) { boards(ids: $b) { id name items_count columns { id title type settings_str } } }', { b: [boardId] });
     const b = (d.boards || [])[0];
     if (!b) throw new IntegrationError('monday', `Monday board ${boardId} was not found, or the MONDAY_TOKEN user can't see it.`);
     return b;
   }
-  async function allItems(boardId, colIds, fields = ITEM_FIELDS) {
-    const first = await gql(`query ($b: [ID!], $c: [String!]) { boards(ids: $b) { items_page(limit: 200) { cursor items { ${fields} } } } }`, { b: [boardId], c: colIds });
+  // page size: 500 (Monday's maximum, as Code.gs used for leads/calendar); 200 for listings, whose asset data is heavier
+  // progress (optional): { read, total } updated after each page, so the page can show how far a long load has got
+  async function allItems(boardId, colIds, fields = ITEM_FIELDS, pageSize = 500, progress = null) {
+    const first = await gql(`query ($b: [ID!], $c: [String!]) { boards(ids: $b) { items_page(limit: ${pageSize}) { cursor items { ${fields} } } } }`, { b: [boardId], c: colIds });
     let page = ((first.boards || [])[0] || {}).items_page || { items: [] };
     const out = [...(page.items || [])];
+    if (progress) progress.read = out.length;
     while (page.cursor && out.length < MAX_ITEMS) {
-      page = (await gql(`query ($k: String!, $c: [String!]) { next_items_page(limit: 200, cursor: $k) { cursor items { ${fields} } } }`, { k: page.cursor, c: colIds })).next_items_page || {};
+      page = (await gql(`query ($k: String!, $c: [String!]) { next_items_page(limit: ${pageSize}, cursor: $k) { cursor items { ${fields} } } }`, { k: page.cursor, c: colIds })).next_items_page || {};
       out.push(...(page.items || []));
+      if (progress) progress.read = out.length;
     }
     return out.slice(0, MAX_ITEMS);
   }
+  const startProgress = (p, meta) => { if (p) { p.total = Number(meta.items_count) || null; p.read = 0; } };
 
   const loaders = {
-    async leads(id) {
+    async leads(id, p) {
       const meta = await boardMeta(id), cols = matchLeadCols(meta.columns);
+      startProgress(p, meta);
       const hide = HIDE.map(norm);
-      const leads = (await allItems(id, Object.values(cols))).map((it) => shapeLead(it, cols))
+      const leads = (await allItems(id, Object.values(cols), ITEM_FIELDS, 500, p)).map((it) => shapeLead(it, cols))
         .filter((l) => !hide.includes(norm(l.group)) && !hide.includes(norm(l.nextAction)));
       const colById = Object.fromEntries(meta.columns.map((c) => [c.id, c]));
       // VA Assigned / Salesperson labels as set up on the board (Code.gs statusOptions_), plus any value in use
@@ -251,18 +257,20 @@ function createMonday(cfg, status) {
       };
       return { leads, labels, mapped: Object.keys(cols) };
     },
-    async listings(id) {
-      const cols = matchListingCols((await boardMeta(id)).columns);
-      const listings = (await allItems(id, Object.values(cols), LISTING_FIELDS)).map((it) => shapeListing(it, cols))
+    async listings(id, p) {
+      const meta = await boardMeta(id), cols = matchListingCols(meta.columns);
+      startProgress(p, meta);
+      const listings = (await allItems(id, Object.values(cols), LISTING_FIELDS, 200, p)).map((it) => shapeListing(it, cols))
         .filter((x) => !LISTING_SKIP_GROUPS.includes(norm(x.group)));
       const assets = new Map(), at = Date.now();
       listings.forEach((x) => { x._assets.forEach((a) => assets.set(String(a.id), { listingId: x.id, url: a.public_url, thumb: a.url_thumbnail || a.public_url, at })); delete x._assets; });
       return { listings, assets };
     },
-    async calendar(id) {
-      const cols = matchCalendarCols((await boardMeta(id)).columns);
+    async calendar(id, p) {
+      const meta = await boardMeta(id), cols = matchCalendarCols(meta.columns);
       if (!cols.fin) throw new IntegrationError('monday', `Calendar board ${id} has no "Final Schedule" date column.`);
-      const items = await allItems(id, Object.values(cols));
+      startProgress(p, meta);
+      const items = await allItems(id, Object.values(cols), ITEM_FIELDS, 500, p);
       const today = new Date().toISOString().slice(0, 10), viewings = [], lm = {};
       items.forEach((it) => {
         const v = values(it, cols), group = (it.group && it.group.title) || '';
@@ -285,31 +293,83 @@ function createMonday(cfg, status) {
   };
   const BOARD_OF = { leads: 'leads', listings: 'listings', calendar: 'calendar' };
 
-  // in-memory cache only (nothing from Monday is written to MongoDB); one request in flight per dataset
+  /*
+   * Server memory only: nothing from Monday is written to MongoDB, and the page keeps it only in memory too.
+   * One request in flight per board. The first load is waited for; a failure means that board has no data (never
+   * substituted). After that the last successful copy is served while a newer one loads in the background, and a
+   * failed refresh keeps that copy, records the error and its time, and waits MIN_REFRESH_MS before retrying on its own.
+   * Each copy carries the time its read *started*, so data read over several minutes never looks newer than it is.
+   */
   const cache = new Map();
-  function cached(key, force, fn) {
-    const hit = cache.get(key), now = Date.now();
-    if (hit && (hit.pending || (now - hit.at < (force ? MIN_REFRESH_MS : TTL_MS)))) return hit.pending || Promise.resolve(hit.value);
-    const pending = tracked(status, fn).then((value) => { cache.set(key, { at: Date.now(), value }); return value; },
-      (err) => { cache.delete(key); throw err; });
-    cache.set(key, { ...(hit || {}), pending });
-    return pending;
+  const entry = (key) => {
+    if (!cache.has(key)) cache.set(key, { value: null, readFrom: 0, at: 0, pending: null, error: '', failedAt: 0 });
+    return cache.get(key);
+  };
+  function refresh(e, fn) {
+    if (e.pending) return e.pending;
+    const startedAt = now();
+    e.progress = { read: 0, total: null, startedAt };
+    const p = tracked(status, () => fn(e.progress)).then(
+      (value) => { Object.assign(e, { value, readFrom: startedAt, at: now(), error: '', failedAt: 0, pending: null }); },
+      (err) => { Object.assign(e, { error: err.message, failedAt: now(), pending: null }); throw err; });
+    p.catch(() => {});   // a background refresh reports through e.error; a first load rethrows to its caller
+    e.pending = p;
+    return p;
   }
+  function due(e, force) {
+    if (e.pending) return false;
+    const t = now(), backoff = e.failedAt && t - e.failedAt < MIN_REFRESH_MS;
+    if (!e.value) return !backoff;
+    return force ? t - e.at >= MIN_REFRESH_MS : t - e.at >= TTL_MS && !backoff;
+  }
+  async function cached(key, force, fn) {
+    const e = entry(key);
+    if (!e.value) { await refresh(e, fn); return e; }
+    if (due(e, force)) refresh(e, fn);   // not awaited: the last good copy is returned now
+    return e;
+  }
+  const iso = (t) => (t ? new Date(t).toISOString() : null);
+  /** What the page needs to label a board's data honestly (no data values). */
+  const meta = (e) => ({
+    loaded: !!e.value, fetchedAt: iso(e.readFrom), loadedAt: iso(e.at), refreshing: !!e.pending,
+    progress: e.pending && e.progress ? { read: e.progress.read, total: e.progress.total, startedAt: iso(e.progress.startedAt) } : null,
+    refreshError: e.value && e.error ? e.error : '', refreshFailedAt: e.value && e.error ? iso(e.failedAt) : null,
+  });
+  const boardList = () => Object.keys(BOARD_OF).map((ds) => ({ ds, name: ds === 'calendar' ? 'viewings' : ds, boardId: cfg.boards[BOARD_OF[ds]] }));
+  const summary = (boards) => {
+    const times = Object.values(boards).map((b) => b.fetchedAt).filter(Boolean).sort();
+    return { boards, fetchedAt: times[0] || null, refreshing: Object.values(boards).some((b) => b.refreshing), staleAfterMs: TTL_MS };
+  };
 
   /** Loads every configured board; each one succeeds or reports its own error (never substituted). */
   async function loadAll(force) {
-    const raw = {}, errors = {}, notConfigured = [];
-    await Promise.all(Object.keys(BOARD_OF).map(async (ds) => {
-      const boardId = cfg.boards[BOARD_OF[ds]];
-      if (!boardId) { notConfigured.push(ds === 'calendar' ? 'viewings' : ds); return; }
-      try { raw[ds] = await cached(ds + ':' + boardId, force, () => loaders[ds](boardId)); } catch (err) { errors[ds === 'calendar' ? 'viewings' : ds] = err.message; }
+    const raw = {}, errors = {}, notConfigured = [], boards = {};
+    await Promise.all(boardList().map(async ({ ds, name, boardId }) => {
+      if (!boardId) { notConfigured.push(name); return; }
+      const key = ds + ':' + boardId;
+      try { raw[ds] = (await cached(key, force, () => loaders[ds](boardId))).value; } catch (err) { errors[name] = err.message; }
+      boards[name] = meta(entry(key));
     }));
     return {
       leads: raw.leads ? raw.leads.leads : [], labels: raw.leads ? raw.leads.labels : null,
       listings: raw.listings ? raw.listings.listings : [], viewings: raw.calendar ? raw.calendar.viewings : [], lm: raw.calendar ? raw.calendar.lm : {},
-      calendarOk: !!raw.calendar, errors, notConfigured, fetchedAt: new Date().toISOString(),
+      calendarOk: !!raw.calendar, errors, notConfigured, ...summary(boards),
     };
   }
+
+  /** Age and refresh state of each board without waiting or sending data; starts a background refresh when one is due. */
+  function freshness() {
+    const boards = {};
+    for (const { ds, name, boardId } of boardList()) {
+      if (!boardId) continue;
+      const e = entry(ds + ':' + boardId);
+      if (due(e, false)) refresh(e, () => loaders[ds](boardId));
+      boards[name] = { ...meta(e), error: !e.value && !e.pending ? e.error : '' };
+    }
+    return summary(boards);
+  }
+  /** Resolves once no board is loading (tests). */
+  const settled = () => Promise.allSettled([...cache.values()].map((e) => e.pending).filter(Boolean));
 
   async function notes(itemId) {
     const d = await tracked(status, () => gql('query ($i: [ID!]) { items(ids: $i) { id updates(limit: 50) { id text_body created_at creator { name } } } }', { i: [itemId] }));
@@ -357,7 +417,22 @@ function createMonday(cfg, status) {
     return { user: (d.me && d.me.name) || '', boards: Object.fromEntries(Object.entries(cfg.boards).map(([k, id]) => [k, id ? (names[id] ? { found: true, name: names[id] } : { found: false }) : null])) };
   }
 
-  return { loadAll, notes, photo, test };
+  /**
+   * Up to `n` respond.io contact IDs from the Leads board's Respond ID column: one page, that column only (for the
+   * connection check; much lighter than a full load). Returns the IDs and how many rows on that page had one.
+   */
+  async function respondIdSample(n = 3) {
+    const id = cfg.boards.leads;
+    if (!id) throw new IntegrationError('monday', 'MONDAY_LEADS_BOARD_ID is not set, so there are no Respond IDs to test with.');
+    const col = matchLeadCols((await boardMeta(id)).columns).contactId;
+    if (!col) return { column: false, rows: 0, withId: 0, ids: [] };
+    const d = await gql(`query ($b: [ID!], $c: [String!]) { boards(ids: $b) { items_page(limit: 200) { items { id column_values(ids: $c) { id text } } } } }`, { b: [id], c: [col] });
+    const items = ((((d.boards || [])[0] || {}).items_page || {}).items) || [];
+    const ids = items.map((it) => String(((it.column_values || [])[0] || {}).text || '').replace(/\D/g, '')).filter(Boolean);
+    return { column: true, rows: items.length, withId: ids.length, ids: [...new Set(ids)].slice(0, n) };
+  }
+
+  return { loadAll, freshness, settled, notes, photo, test, respondIdSample };
 }
 
 module.exports = { createMonday, assertReadOnly, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, HIDE };

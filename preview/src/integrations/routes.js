@@ -41,6 +41,9 @@ function createIntegrations(config) {
   return { status, monday, respond, ic, teamLabels, allowedVaLabels, enrich };
 }
 
+const STATUS_FIELDS = ['ai', 'aiSub', 'aiSource', 'temp', 'tempWhy', 'waiting', 'since', 'lastText', 'replyChecked', 'onRespond', 'daysInStage', 'stageDays'];
+const statusFields = (l) => Object.fromEntries(STATUS_FIELDS.map((k) => [k, l[k]]));
+
 function integrationRoutes(r, integ) {
   const { status, monday, respond, ic } = integ;
   const notConnected = (res, name, vars) => res.status(409).json({ error: `${name} is not connected. Set ${vars.join(' and ')} in preview/.env and restart.`, notConnected: true });
@@ -52,7 +55,7 @@ function integrationRoutes(r, integ) {
   r.get('/integrations/status', (req, res) => res.json({
     readOnly: true,
     monday: { ...status.monday.snapshot(), boards: Object.fromEntries(Object.entries(ic.monday.boards).map(([k, v]) => [k, !!v])) },
-    respond: { ...status.respond.snapshot(), inboxLinks: !!ic.respond.spaceId },
+    respond: { ...status.respond.snapshot(), inboxLinks: !!ic.respond.spaceId, listChecks: ic.respond.listChecks },
   }));
 
   r.post('/integrations/monday/test', need('team', 'edit'), async (req, res) => {
@@ -64,7 +67,14 @@ function integrationRoutes(r, integ) {
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
     const all = await monday.loadAll(req.query.refresh === '1');
     const scoped = scopeExternal(req.user, { leads: integ.enrich(all, all.leads), viewings: all.viewings, listings: all.listings });
-    res.json({ ...scoped, errors: all.errors, notConfigured: all.notConfigured, calendarOk: all.calendarOk, fetchedAt: all.fetchedAt });
+    res.json({ ...scoped, errors: all.errors, notConfigured: all.notConfigured, calendarOk: all.calendarOk,
+      fetchedAt: all.fetchedAt, boards: all.boards, refreshing: all.refreshing, staleAfterMs: all.staleAfterMs });
+  });
+
+  // how old each board's in-memory copy is and whether a refresh is running or failed (no Monday data in the reply)
+  r.get('/monday/freshness', need('leads', 'view'), (req, res) => {
+    if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
+    res.json(monday.freshness());
   });
 
   async function visibleMondayLead(user, id) {
@@ -99,14 +109,15 @@ function integrationRoutes(r, integ) {
   r.get('/respond/reply-states', need('leads', 'view'), async (req, res) => {
     if (!respond) return notConnected(res, 'respond.io', ['RESPOND_TOKEN']);
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
+    if (!ic.respond.listChecks) return res.status(409).json({ error: 'List-wide respond.io checks are switched off. Open a lead\'s Chat tab to check that lead.', listChecksOff: true });
     try {
       const all = await monday.loadAll(false);
       if (all.errors.leads) return res.status(502).json({ error: all.errors.leads, integration: 'monday' });
       const visible = scopeExternal(req.user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads;
       const cids = visible.map((l) => String(l.contactId || '').replace(/\D/g, '')).filter(Boolean);
       const run = await respond.replyStates(cids, { compute: replyState });
-      const enriched = integ.enrich(all, visible), pick = ['ai', 'aiSub', 'aiSource', 'temp', 'tempWhy', 'waiting', 'since', 'lastText', 'replyChecked', 'onRespond', 'daysInStage', 'stageDays'];
-      res.json({ leads: Object.fromEntries(enriched.map((l) => [l.id, Object.fromEntries(pick.map((k) => [k, l[k]]))])),
+      const enriched = integ.enrich(all, visible);
+      res.json({ leads: Object.fromEntries(enriched.map((l) => [l.id, statusFields(l)])),
         checked: run.checked, pending: run.pending, errors: run.errors, linked: cids.length, checkedAt: new Date().toISOString() });
     } catch (err) { failed(res, err); }
   });
@@ -121,7 +132,12 @@ function integrationRoutes(r, integ) {
       if (!lead) return res.status(404).json({ error: 'Lead not found.' });
       const cid = String(lead.contactId || '').replace(/\D/g, '');
       if (!cid) return res.status(404).json({ error: 'This lead has no respond.io contact ID (Respond ID).', noContact: true });
-      res.json(await respond.chat(cid));
+      const chat = await respond.chat(cid);
+      if (req.params.source !== 'monday') return res.json(chat);
+      // the chat just read also gives this one lead its reply state and Temperature (newest 15, as the original used)
+      respond.remember(cid, chat.messages.length ? replyState(chat.messages.slice(-15), Date.now()) : null);
+      const all = await monday.loadAll(false);
+      res.json({ ...chat, lead: statusFields(integ.enrich(all, [lead])[0]) });
     } catch (err) { failed(res, err); }
   });
 

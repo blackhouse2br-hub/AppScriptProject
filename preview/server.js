@@ -47,8 +47,9 @@ async function start(env = process.env, argv = process.argv, { dbTimeoutMs } = {
   const config = loadConfig(env, argv);
   if (config.mode === 'mongo') await connectDb(config.mongoUri, { timeoutMs: dbTimeoutMs });
   try {
-    const server = await listen(createApp(config), config);
-    return { server, config };
+    const app = createApp(config);
+    const server = await listen(app, config);
+    return { server, config, app };
   } catch (err) {
     if (config.mode === 'mongo') await disconnectDb().catch(() => {});   // don't leave a DB connection open on a failed start
     throw err;
@@ -57,7 +58,7 @@ async function start(env = process.env, argv = process.argv, { dbTimeoutMs } = {
 
 /** Prints an error and its causes (messages only for known startup errors; stack for unexpected ones). Credentials are redacted. */
 function reportStartupError(err, log = console.error) {
-  const known = err && (err.code || /^(APP_MODE|MONGODB_URI|PORT|SESSION_HOURS|Demo mode|Email-and-password|Could not connect to MongoDB|MONDAY_|RESPOND_)/.test(err.message || ''));
+  const known = err && (err.code || /^(APP_MODE|MONGODB_URI|PORT|SESSION_HOURS|Demo mode|Email-and-password|Could not connect to MongoDB|MONDAY_|RESPOND_|PUBLIC_API_URL|PORTAL_URL|AUTH_PROVIDER|GOOGLE_|Google sign-in needs|The portal \(|Production start is still blocked)/.test(err.message || ''));
   log('[startup] ' + redact(err && err.message ? err.message : String(err)));
   let c = err && err.cause, depth = 0;
   while (c && depth++ < 5) { log('  caused by: ' + redact(c.code ? `${c.code}: ${c.message}` : c.message || String(c))); c = c.cause; }
@@ -78,13 +79,32 @@ function printBanner(server, config, log = console.log) {
   log('Press Ctrl+C to stop.');
 }
 
+/**
+ * Monday.com is the default data source in MongoDB mode, and a full first load can take minutes, so the boards are
+ * read once in the background right after startup (read-only; results stay in server memory). Logs counts and errors
+ * only (redacted), never data or credentials. The page shows its own loading/error state either way.
+ */
+function preloadMonday(app, log = console.log) {
+  const integ = app && app.locals && app.locals.integ;
+  if (!integ || !integ.monday) return null;
+  const t0 = Date.now();
+  log('Monday.com: loading the boards in the background (read-only)…');
+  return integ.monday.loadAll(false).then((all) => {
+    const errs = Object.entries(all.errors);
+    log(`Monday.com: ready in ${Math.round((Date.now() - t0) / 1000)} s — ${all.leads.length} leads, ${all.listings.length} listings, ${all.viewings.length} viewings`
+      + (errs.length ? ` · errors: ${errs.map(([k, v]) => k + ': ' + redact(v)).join(' | ')}` : ''));
+    return all;
+  }, (err) => { log('Monday.com: preload failed: ' + redact(err.message)); return null; });
+}
+
 if (require.main === module) {
-  start().then(({ server, config }) => {
+  start().then(({ server, config, app }) => {
     try { printBanner(server, config); } catch (err) { reportStartupError(err); }   // the server is up; a banner problem must not hide that
+    preloadMonday(app);
   }).catch((err) => {
     reportStartupError(err);
     process.exit(1);
   });
 }
 
-module.exports = { start, serverUrl, listenError, reportStartupError, printBanner };
+module.exports = { start, serverUrl, listenError, reportStartupError, printBanner, preloadMonday };

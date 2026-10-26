@@ -84,6 +84,8 @@ kbd { font: 11px/1 ui-monospace, Consolas, monospace; padding: 2px 5px; border: 
 .ist.idle { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); } .ist.idle .dot { background: var(--accent); }
 .ist.err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); } .ist.err .dot { background: var(--danger); }
 .src-note { font-size: 12px; color: var(--muted); margin: -6px 0 10px; }
+.load-prog { margin: 10px auto 0; display: inline-grid; gap: 2px; text-align: left; font-variant-numeric: tabular-nums; }
+.src-note.stale { color: var(--text); border-left: 3px solid var(--warn); padding-left: 8px; }
 .src-err { border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--line)); background: color-mix(in srgb, var(--danger) 12%, var(--panel)); color: var(--text);
   border-radius: 8px; padding: 8px 12px; margin: 0 0 10px; font-size: 13px; }
 .live-bar.ext { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
@@ -177,6 +179,7 @@ kbd { font: 11px/1 ui-monospace, Consolas, monospace; padding: 2px 5px; border: 
 .wait { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
 .wait.va { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
 .wait.client { background: var(--panel-2); color: var(--muted); }
+.wait.unk { background: transparent; color: var(--muted); border: 1px dashed var(--line); font-weight: 500; }
 .days { font-variant-numeric: tabular-nums; }
 .days.late { color: var(--danger); font-weight: 600; }
 
@@ -314,7 +317,10 @@ pre.report { white-space: pre-wrap; font: 12.5px/1.5 ui-monospace, Consolas, mon
 /* ===================== Tablet + phone =====================
    Desktop (> 900px) is unchanged. Below 900px the sidebar becomes a slide-in menu; below 640px the lead
    table becomes cards, filters move into a sheet, and the lead panel / dialogs go full-screen. */
-.nav-burger, .side-close, .fbtn, .agenda, .sheet-grip { display: none; }
+.nav-burger, .side-close, .fbtn, .agenda, .sheet-grip, .side-scrim { display: none; }
+/* desktop grid: explicit columns, so an extra element in .shell (e.g. the menu scrim) can never push <main> into a new row */
+.shell > #side { grid-column: 1; grid-row: 1; }
+.shell > main { grid-column: 2; grid-row: 1; }
 .fctl { display: contents; }
 .fcount { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; }
 

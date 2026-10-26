@@ -1,25 +1,42 @@
 /*
- * Same-origin JSON client for MongoDB mode. Only relative /api/ paths are allowed.
+ * JSON client for MongoDB mode. Only /api/ paths are allowed, on one API address:
+ *   - served by the Express server itself: same origin (BH_CONFIG.apiBase is empty)
+ *   - on GitHub Pages: the Railway API from the build's config.js (BH_CONFIG.apiBase, an https origin of the same site)
+ * The sign-in cookie is HttpOnly and set by the API; this file never sees or stores it.
  * In demo mode the server's CSP (connect-src 'none') blocks every request, and app.js never calls this.
  */
 (function () {
   'use strict';
-  async function request(method, url, body) {
-    if (!/^\/api\/[A-Za-z0-9/_-]+$/.test(url)) throw new Error('Only same-origin /api/ calls are allowed.');
+  const raw = (window.BH_CONFIG && window.BH_CONFIG.apiBase) || '';
+  let BASE = '';
+  if (raw) {
+    const u = new URL(raw);
+    const local = u.protocol === 'http:' && u.hostname === '127.0.0.1';
+    if ((u.protocol !== 'https:' && !local) || u.pathname !== '/' || u.search || u.hash || u.username) throw new Error('BH_CONFIG.apiBase must be an https origin.');
+    BASE = u.origin;
+  }
+  const url = (path) => {
+    if (!/^\/api\/[A-Za-z0-9/_-]+(\?[A-Za-z0-9=&_-]*)?$/.test(path)) throw new Error('Only /api/ calls are allowed.');
+    return BASE + path;
+  };
+  async function request(method, path, body) {
     let res;
     try {
-      res = await fetch(url, {
-        method, credentials: 'same-origin', cache: 'no-store',
+      res = await fetch(url(path), {
+        method, credentials: BASE ? 'include' : 'same-origin', cache: 'no-store', mode: BASE ? 'cors' : 'same-origin',
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
-    } catch (e) { throw new Error('Could not reach the local server. Is it still running?'); }
+    } catch (e) { throw new Error(BASE ? 'Could not reach the portal API. Check your connection, or try again in a minute.' : 'Could not reach the local server. Is it still running?'); }
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; throw err; }
     return data;
   }
   window.BH_API = {
+    base: BASE,
+    /** Full address of an API path, for links and images (listing photos). */
+    url,
     get: (u) => request('GET', u),
     post: (u, b) => request('POST', u, b || {}),
     patch: (u, b) => request('PATCH', u, b),

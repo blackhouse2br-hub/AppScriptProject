@@ -116,7 +116,8 @@ How it behaves:
 | Respond.io Chat | Read-only sample | Read-only from respond.io when `RESPOND_TOKEN` is set, else "not connected" |
 | Monday.com leads, listings, calendar, notes | n/a | Read-only, live (Data source switch) when configured |
 | Asking for Availability, For Client Approval, LOI / Contract / Collection / Active / For Renewal, Upselling, Service Requests, Project Pages, P&L, Files, Monday Sync | Placeholder | Placeholder |
-| Google sign-in, Monday writes, respond.io messaging, Drive files, e-signatures, webhooks, scheduled jobs | Not connected | Not connected |
+| Google sign-in | n/a | Built for the hosted server (DEPLOYMENT.md); the local preview keeps email and password |
+| Monday writes, respond.io messaging, Drive files, e-signatures, webhooks, scheduled jobs | Not connected | Not connected |
 
 ## Everyday use: quick keys and shortcuts
 
@@ -144,7 +145,9 @@ For a stress test in demo mode, open `http://127.0.0.1:4173/?leads=3000` (fictio
 
 ```
 server.js            entry point: picks the mode, connects MongoDB (mongo mode), starts Express
-src/config.js        environment → explicit mode; validation; credential redaction
+src/config.js        environment → explicit mode; validation; credential redaction; production block
+src/deploy.js        page/API addresses (GitHub Pages + Railway), same-site check, sign-in method
+src/google.js        Google sign-in (OAuth code flow + PKCE, ID token signature check, Team & Access match)
 src/db.js            mongoose connection (no fallback)
 src/models.js        Lead, Listing, Viewing, Note, User, Template, Session
 src/auth.js          scrypt password hashing, MongoDB sessions (HttpOnly, SameSite=Strict cookie), sign-in throttle
@@ -154,28 +157,30 @@ src/integrations/    read-only Monday.com (monday.js) and respond.io (respondio.
 src/app.js           Express app: security headers, /config.js, /healthz, static files
 public/shared.js     picklists, access rules, validation shared by browser and server
 public/app.js        the UI (unchanged design); data layer switches between localStorage and the API
-public/api-client.js same-origin JSON client (only /api/ paths)
-scripts/             create-manager, seed-demo
+public/api-client.js JSON client (only /api/ paths; same origin, or the configured API on GitHub Pages)
+scripts/             create-manager, reset-manager-password, seed-demo, build-pages (static portal for GitHub Pages)
+railway.json         Railway start command + health check
+DEPLOYMENT.md        GitHub Pages + Railway + Atlas + Google setup, step by step
 test/                node:test suites; test/fixtures/fake-integrations.js is a local fake Monday/respond.io API
 ```
 
 ## Before production
 
-This preview is approved for **local use with fictional data only**. Don't deploy it, and don't load real
-customer data (Monday.com exports, respond.io contacts, Users sheet records) until the items below are done.
-The server enforces part of this: with `NODE_ENV=production`, it refuses to start in **either** mode.
+The hosting plan (Railway runs the portal; GitHub Pages only redirects to it; MongoDB Atlas; Google sign-in) is
+described step by step in **[DEPLOYMENT.md](DEPLOYMENT.md)**. It needs no custom domain. With `NODE_ENV=production` the server
+still refuses to start in **either** mode, until a staging deployment has passed the checklist there.
 
-### Required: Google sign-in
+### Google sign-in (implemented; tested locally against a fake Google)
 
-Email-and-password sign-in is the approved method for the local MongoDB preview only. Production must use
-Google sign-in, matching the original portal (Google identity checked against Team & Access). Before production:
+Email-and-password sign-in works only on the local preview (`HOST=127.0.0.1`). A server reachable by others must use
+Google (`AUTH_PROVIDER=google`, the default there), matching the original portal.
 
-1. **OAuth client.** Create a Google OAuth 2.0 client (Web application) in the Blackhouse Google Cloud project, configure the consent screen, and register exact redirect URIs for local and production hosts. Keep the client ID and secret in environment variables (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`), never in the repo.
-2. **Server-side verification.** Use a maintained library (for example `openid-client` or `google-auth-library`) with the authorization-code flow, `state` and `nonce`/PKCE, and verify the ID token's signature, audience, issuer and expiry on the server. Never trust identity sent from the browser.
-3. **Access stays in Team & Access.** A Google account may sign in only if its verified email (`email_verified: true`) matches an active member in MongoDB. Optionally also restrict to the company Google Workspace domain (`hd` claim). Role, VA label and module access continue to come from MongoDB, checked per request. Never cache identity process-wide (the Apps Script `USER_MEMO_` pattern must not return).
-4. **Retire local passwords in production.** Remove or disable `/api/auth/login` with passwords, the password fields in Team & Access, and `npm run create-manager` password setup in production builds. Replace them with a one-time, documented way to name the first Manager by Google email.
-5. **Sessions.** Keep MongoDB sessions with `HttpOnly; Secure; SameSite` cookies behind HTTPS, set `trust proxy` for the hosting platform, sign users out when they're removed, and move the failed-sign-in throttle to a shared store if more than one instance runs.
-6. **Remove the production guard** in `src/config.js` only once 1–5 are implemented and tested, including tests for an unknown Google email, an unverified email, a wrong domain and a removed member.
+1. **OAuth client** in Google Cloud Console (Web application); `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are server variables only.
+2. **Server-side flow** (`src/google.js`): authorization code with PKCE, a one-time `state` bound to the browser, and a `nonce`. The ID token's RS256 signature is checked against Google's published keys, then issuer, audience, expiry and nonce. No extra library is needed; Node's crypto does it.
+3. **Access stays in Team & Access.** Only an active member whose verified email matches can sign in; optionally only one Workspace domain (`GOOGLE_ALLOWED_DOMAIN`). Role, VA label and module access come from MongoDB on every request. The Google account is linked on first sign-in and must match afterwards.
+4. **No passwords on a Google server.** `/api/auth/login` answers 404, Team & Access has no password fields, and members are added by email.
+5. **Sessions:** MongoDB sessions in a `__Host-` `HttpOnly; Secure; SameSite=Strict` cookie over HTTPS, `trust proxy` for Railway. Removing a member or changing their email signs them out.
+6. **Remove the production guard** in `src/config.js` only after the staging checklist in DEPLOYMENT.md passes.
 
 ### Also required before real data
 
@@ -185,8 +190,9 @@ Google sign-in, matching the original portal (Google identity checked against Te
 
 ## Security notes and limits of this phase
 
-- Sign-in uses local email-and-password accounts (scrypt) for this local preview with fictional data. Google sign-in is required before production (see above).
-- Session cookies are `HttpOnly; SameSite=Strict` (plus `Secure` when `NODE_ENV=production`). State-changing requests from other origins are rejected.
+- Sign-in uses local email-and-password accounts (scrypt) on the local preview, and Google on a hosted server (see above).
+- Session cookies are `HttpOnly; SameSite=Strict`, plus `Secure` and the `__Host-` prefix over HTTPS. State-changing requests are accepted only from this server's own page or `PORTAL_URL`; only `PORTAL_URL` gets CORS access.
+- Monday.com data is kept only in server memory (never in MongoDB or the browser's storage). After the first load, the last good copy stays on screen with the time it was read, while a newer one loads in the background; a failed refresh is shown in red with its time, and nothing else is substituted.
 - Every API input is checked against an allowlist; unknown fields and non-text values are refused.
 - The failed-sign-in throttle is in memory (per process). A shared store is needed before running several instances.
 - Lead fields such as AI Status, Temperature and reply state are stored snapshots here; in the live portal they are computed from Monday.com and respond.io.

@@ -130,14 +130,11 @@ function temperature(stage, r, l, now) {
   if (stage === 'Active' || stage === 'For Renewal') return { temp: 'Active', tempWhy: 'Closed client' };
   if (stage === 'Not on Respond.io') return { temp: 'Not on Respond.io', tempWhy: 'No respond.io chat linked' };
   if (stage === 'Failed') return { temp: 'Dead', tempWhy: 'Lead marked as failed' };
+  // chat not read: no guessed temperature (the original guessed from the lead's age; that looked like a real status)
   if (!r) {
-    const last = leadStart(l);
-    const d = last ? (now - last) / DAY : 99;
-    const why = (String(l.contactId || '').trim() ? 'No chat messages checked yet' : 'No Respond.io chat linked') + ' — last activity ' + (d < 1 ? 'today' : Math.floor(d) + 'd ago');
-    if (d >= 7) return { temp: 'Dead', tempWhy: why };
-    if (d >= 3) return { temp: 'Lost', tempWhy: why };
-    if (d >= 1) return { temp: 'Cold', tempWhy: why };
-    return { temp: 'Warm', tempWhy: why };
+    return String(l.contactId || '').replace(/\D/g, '')
+      ? { temp: 'Unchecked', tempWhy: 'respond.io chat not checked yet. Open the Chat tab to check it.' }
+      : { temp: 'Not on Respond.io', tempWhy: 'No respond.io chat linked' };
   }
   const lastIn = r.lastInAt || 0;
   const ago = lastIn ? (now - lastIn) / DAY : (now - (r.lastAt || now)) / DAY;

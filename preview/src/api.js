@@ -16,14 +16,19 @@ const LISTING_SCREENS = ['leads', 'invdash', 'calendar'];
 function apiRouter(config) {
   const r = express.Router();
   const integ = createIntegrations(config);
+  const google = config.auth.provider === 'google';
 
   // the API never silently swaps in demo data: if MongoDB is down, say so
   r.use((req, res, next) => (dbReady() ? next() : res.status(503).json({ error: 'The database is unavailable. Check that MongoDB is running. The app will not switch to demo data.' })));
-  // cross-site protection on top of SameSite=Strict cookies
+  // cross-site protection on top of SameSite=Strict cookies: changes only from this server's own page or the portal
+  // (PORTAL_URL); a sibling subdomain of the same site is not trusted
   r.use((req, res, next) => {
     if (req.method === 'GET' || req.method === 'HEAD') return next();
     const origin = req.headers.origin;
-    if (origin) { let host = ''; try { host = new URL(origin).host; } catch (e) { /* invalid */ } if (host !== req.headers.host) return res.status(403).json({ error: 'Cross-site request blocked.' }); }
+    if (origin && origin !== config.web.portalOrigin && origin !== config.web.apiOrigin) {
+      let host = ''; try { host = new URL(origin).host; } catch (e) { /* invalid */ }
+      if (host !== req.headers.host) return res.status(403).json({ error: 'Cross-site request blocked.' });
+    }
     if (!req.is('application/json') && req.headers['content-length'] !== '0' && req.method !== 'DELETE') return res.status(415).json({ error: 'Send JSON.' });
     next();
   });
@@ -113,23 +118,27 @@ function apiRouter(config) {
   r.post('/team', need('team', 'edit'), async (req, res) => {
     const { value, errors } = SH.validateUser(req.body, { vaLabels: await integ.allowedVaLabels() });
     if (errors.length) return bad(res, errors);
-    if (!value.password) return bad(res, [`Set a temporary password (at least ${SH.MIN_PASSWORD} characters).`]);
     const { password, ...rec } = value;
+    if (google) { const user = await User.create(rec); return res.status(201).json({ user }); }   // they sign in with this email's Google account
+    if (!password) return bad(res, [`Set a temporary password (at least ${SH.MIN_PASSWORD} characters).`]);
     const user = await User.create({ ...rec, passwordHash: await hashPassword(password) });
     res.status(201).json({ user });
   });
   r.patch('/team/:id', need('team', 'edit'), async (req, res) => {
-    const user = isId(req.params.id) ? await User.findById(req.params.id) : null;
+    const user = isId(req.params.id) ? await User.findById(req.params.id).select('+googleSub') : null;
     if (!user) return res.status(404).json({ error: 'Member not found.' });
     const { value, errors } = SH.validateUser(req.body, { vaLabels: await integ.allowedVaLabels() });
     if (errors.length) return bad(res, errors);
     if (user.role === 'Manager' && value.role !== 'Manager' && (await managers()) < 2) return bad(res, ['Keep at least one Manager.']);
-    const { password, ...rec } = value;
+    let { password, ...rec } = value;
+    if (google) password = '';   // no passwords on a Google sign-in server
+    const emailChanged = rec.email !== user.email;
     Object.assign(user, rec);
     if (password) user.passwordHash = await hashPassword(password);
+    if (emailChanged) user.googleSub = undefined;   // a new address means a new Google account must be linked
     user.markModified('modules');
     await user.save();
-    if (password) await revokeSessions(user._id, user._id.equals(req.user._id) ? req.sessionDoc._id : null);
+    if (password || emailChanged) await revokeSessions(user._id, user._id.equals(req.user._id) ? req.sessionDoc._id : null);
     res.json({ user });
   });
   r.delete('/team/:id', need('team', 'edit'), async (req, res) => {
@@ -167,6 +176,7 @@ function apiRouter(config) {
   integrationRoutes(r, integ);
 
   r.use((req, res) => res.status(404).json({ error: 'Unknown API route.' }));
+  r.integ = integ;   // used by server.js to preload Monday.com (read-only) at startup
   return r;
 }
 

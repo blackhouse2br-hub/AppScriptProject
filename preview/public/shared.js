@@ -26,7 +26,8 @@
   };
   // from the original Index.html
   const AI_STAGES = ['Property Matching', 'Scheduling', 'LOI', 'Contract', 'Collection', 'Active', 'For Renewal', 'Failed', 'Not on Respond.io'];
-  const TEMPS = ['Hot', 'Warm', 'Cold', 'Lost', 'Dead', 'Not on Respond.io', 'Active'];
+  // 'Unchecked': linked to respond.io, but its chat hasn't been read yet (no status is implied)
+  const TEMPS = ['Hot', 'Warm', 'Cold', 'Lost', 'Dead', 'Not on Respond.io', 'Active', 'Unchecked'];
   const MODULES = ['leads', 'vaportal', 'monitor', 'calendar', 'invdash', 'ldash', 'brokers', 'renewals', 'upsell', 'daily', 'services', 'pages', 'pl', 'team'];
   const ROLES = ['Manager', 'VA', 'Broker'];
   const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i;
@@ -145,7 +146,10 @@
     return { value: { name, language, body }, errors: [] };
   }
 
-  return { LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
+  /** MongoDB mode: Monday.com (read-only) is the default source for leads/listings/calendar; MongoDB only when chosen by hand. */
+  const defaultSource = (manualChoice) => (manualChoice === 'mongo' ? 'mongo' : 'monday');
+
+  return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
     validateLeadPatch, leadUpdateNote, validateNote, validateBooking, bookingLeadChanges, bookingNote,
     validateViewingPatch, validateAvailability, validateUser, validateTemplate };
 });

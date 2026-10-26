@@ -115,7 +115,10 @@ function createRespond(cfg, status) {
     return { checked: batch.length - Object.keys(errors).filter((k) => k !== '_').length, pending: Math.max(0, todo.length - batch.length) + (stop ? batch.length - i : 0), errors };
   }
 
-  return { chat, replyStates, cachedState };
+  /** Stores the reply state worked out from a chat someone opened, so that lead shows it (no extra request). */
+  const remember = (cid, st) => { const now = Date.now(); rsCache.set(cid, { until: now + ttlFor(st, now), st }); };
+
+  return { chat, replyStates, cachedState, remember };
 }
 
 module.exports = { createRespond, shapeMessage, SAFE_PATH };

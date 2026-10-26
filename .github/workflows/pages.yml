@@ -1,0 +1,43 @@
+# Publishes a redirect page on GitHub Pages that sends people to the portal hosted on Railway.
+# The portal itself (page + API + Google sign-in) runs only on Railway; GitHub Pages holds no app code or settings.
+#
+# Runs ONLY when started by hand (Actions → "Portal redirect to GitHub Pages" → Run workflow); a push never deploys.
+# Needs one repository *variable* (Settings → Secrets and variables → Actions → Variables), not a secret:
+#   RAILWAY_APP_URL   https://<service>.up.railway.app   (the Railway app's public address, no path)
+# Before publishing, the build checks <RAILWAY_APP_URL>/healthz: it must be this portal, in MongoDB mode, with Google
+# sign-in and a connected database. Otherwise nothing is published.
+name: Portal redirect to GitHub Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build the redirect page (checks the Railway portal first; no dependencies needed)
+        env:
+          RAILWAY_APP_URL: ${{ vars.RAILWAY_APP_URL }}
+        run: node preview/scripts/build-pages.js
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: preview/dist-pages
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -10,6 +10,8 @@
     "create-manager": "node --env-file-if-exists=.env scripts/create-manager.js",
     "reset-manager-password": "node --env-file-if-exists=.env scripts/reset-manager-password.js",
     "seed:demo": "node --env-file-if-exists=.env scripts/seed-demo.js",
+    "build:pages": "node scripts/build-pages.js",
+    "check-respond": "node --env-file-if-exists=.env scripts/check-respond.js",
     "test": "node --test --test-concurrency=1 \"test/*.test.js\""
   },
   "engines": {

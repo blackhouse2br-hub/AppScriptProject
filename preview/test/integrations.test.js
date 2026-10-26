@@ -166,7 +166,32 @@ test('Monday leads get AI Status (proof > Monday AI STATUS > rules) and Days in 
   assert.strictEqual(by('BH-T3').daysInStage, 2);
 });
 
-test('reply states from respond.io: human replies only, bounded batches, Temperature follows', async () => {
+test('respond.io list-wide checks are off by default: leads show Unchecked until their Chat tab is opened', async () => {
+  const b = await instance({});
+  const boss = await login(b, 'boss@example.com');
+  assert.strictEqual((await call(b, 'GET', '/api/integrations/status', boss)).data.respond.listChecks, false);
+  calls.respond.length = 0;
+  const rs = await call(b, 'GET', '/api/respond/reply-states', boss);
+  assert.strictEqual(rs.status, 409); assert.strictEqual(rs.data.listChecksOff, true);
+  const leads = (await call(b, 'GET', '/api/monday/bootstrap', boss)).data.leads, by = (id) => leads.find((l) => l.id === id);
+  assert.strictEqual(calls.respond.length, 0, 'loading the list reads nothing from respond.io');
+  for (const id of ['9001', '9006']) {
+    assert.deepStrictEqual([by(id).temp, by(id).replyChecked, by(id).waiting], ['Unchecked', false, ''], id);   // no guessed status
+    assert.match(by(id).tempWhy, /not checked yet/);
+  }
+  assert.strictEqual(by('9005').temp, 'Dead');   // Failed leads stay Dead (from Monday, not from a chat)
+  // opening one lead's Chat tab reads that contact only, and gives that lead its reply status and Temperature
+  const chat = await call(b, 'GET', '/api/respond/chat/monday/9006', boss);
+  assert.strictEqual(chat.status, 200);
+  assert.deepStrictEqual([chat.data.lead.waiting, chat.data.lead.temp, chat.data.lead.replyChecked], ['va', 'Hot', true]);
+  assert.ok(calls.respond.length > 0 && calls.respond.every((c) => c.method === 'GET' && c.path.startsWith('/contact/id:555006')));
+  const after = (await call(b, 'GET', '/api/monday/bootstrap', boss)).data.leads;
+  assert.strictEqual(after.find((l) => l.id === '9006').temp, 'Hot');
+  assert.strictEqual(after.find((l) => l.id === '9001').temp, 'Unchecked');
+});
+
+test('reply states from respond.io (RESPOND_LIST_CHECKS=on): human replies only, bounded batches, Temperature follows', async () => {
+  const base = await instance({ RESPOND_LIST_CHECKS: 'on' });
   const boss = await login(base, 'boss@example.com');
   calls.respond.length = 0;
   const r = await call(base, 'GET', '/api/respond/reply-states', boss);
@@ -220,6 +245,117 @@ test('listing photos: proxied, image types only, Monday token never sent to the 
   assert.strictEqual((await fetch(base + '/api/monday/photo/99999', { headers: { cookie: boss } })).status, 404);   // not a listing photo
   assert.strictEqual((await fetch(base + '/api/monday/photo/30001')).status, 401);                                  // sign-in required
 });
+
+test('startup preload reads Monday once (read-only) and logs counts only', async () => {
+  const { preloadMonday } = require('../server');
+  const app = createApp(loadConfig(envFor({}), ARGV));
+  calls.monday.length = 0;
+  const logs = [];
+  const all = await preloadMonday(app, (l) => logs.push(l));
+  assert.strictEqual(all.leads.length, 4);
+  assert.match(logs[1], /ready in \d+ s — 4 leads, 2 listings, 2 viewings/);
+  assert.ok(calls.monday.length > 0 && calls.monday.every((c) => /^\s*query\b/.test(c.body.query)));
+  assert.ok(!logs.join('\n').includes('mtest') && !logs.join('\n').includes('Test Client'));   // no token, no customer data
+  const n = calls.monday.length;
+  await app.locals.integ.monday.loadAll(false);                                                // the page's first load is served from memory
+  assert.strictEqual(calls.monday.length, n);
+  // nothing to preload when Monday isn't configured; a failing token is logged, not thrown
+  assert.strictEqual(preloadMonday(createApp(loadConfig(envFor({ MONDAY_TOKEN: '' }), ARGV)), () => {}), null);
+  const bad = []; const r = await preloadMonday(createApp(loadConfig(envFor({ MONDAY_TOKEN: 'bad-token' }), ARGV)), (l) => bad.push(l));
+  assert.match(bad[1], /errors: leads: Monday.com rejected MONDAY_TOKEN/); assert.strictEqual(r.leads.length, 0);
+});
+
+test('Monday refresh: last good copy served (with its age) while refreshing; a failed refresh keeps it and is reported', async () => {
+  const { createMonday } = require('../src/integrations/monday');
+  const { createStatus } = require('../src/integrations/status');
+  let t = Date.parse('2026-10-23T09:00:00Z');
+  const cfg = { ...loadConfig(envFor({}), ARGV).integrations.monday };
+  const m = createMonday(cfg, createStatus(true, []), { now: () => t });
+  calls.monday.length = 0;
+  const loading = m.loadAll(false);
+  // during the first load: progress per board, and asking for it does not start another fetch
+  const f0 = m.freshness();
+  assert.deepStrictEqual(Object.values(f0.boards).map((b) => [b.loaded, b.refreshing, !!b.progress]), [[false, true, true], [false, true, true], [false, true, true]]);
+  assert.ok(!JSON.stringify(f0).includes('Test Client'));
+  const first = await loading;
+  const perBoard = calls.monday.length;
+  m.freshness(); assert.strictEqual(calls.monday.length, perBoard, 'freshness never re-fetches fresh data');
+  assert.ok(first.boards.leads.progress === null, 'no progress once loaded');
+  assert.strictEqual(first.leads.length, 4); assert.strictEqual(first.refreshing, false);
+  assert.strictEqual(first.fetchedAt, '2026-10-23T09:00:00.000Z');   // the time the read started, not "now"
+  assert.deepStrictEqual(Object.keys(first.boards).sort(), ['leads', 'listings', 'viewings']);
+
+  // 6 minutes later (past the 5-minute limit) with Monday failing: old copy right away, labelled with its old time
+  t += 6 * 60e3; cfg.token = 'bad-token';
+  calls.monday.length = 0;
+  const during = await m.loadAll(false);
+  assert.strictEqual(during.leads.length, 4); assert.strictEqual(during.refreshing, true);
+  assert.strictEqual(during.fetchedAt, '2026-10-23T09:00:00.000Z');
+  assert.deepStrictEqual(during.errors, {});
+  await m.settled();
+  const after = await m.loadAll(false);
+  assert.strictEqual(after.leads.length, 4, 'last good copy kept after a failed refresh');
+  assert.strictEqual(after.fetchedAt, '2026-10-23T09:00:00.000Z', 'never relabelled as fresh');
+  assert.match(after.boards.leads.refreshError, /rejected MONDAY_TOKEN/);
+  assert.strictEqual(after.boards.leads.refreshFailedAt, '2026-10-23T09:06:00.000Z');
+  const n = calls.monday.length;
+  t += 10e3; await m.loadAll(false); assert.strictEqual(calls.monday.length, n, 'no automatic retry within 30 s of a failure');
+  const f = m.freshness();
+  assert.match(f.boards.leads.refreshError, /rejected/); assert.ok(!JSON.stringify(f).includes('Test Client'), 'freshness carries no data');
+
+  // Monday back: a forced refresh replaces the copy and clears the error
+  cfg.token = 'mtest'; t += 30e3;
+  await m.loadAll(true); await m.settled();
+  const fresh = await m.loadAll(false);
+  assert.strictEqual(fresh.fetchedAt, '2026-10-23T09:06:40.000Z'); assert.strictEqual(fresh.boards.leads.refreshError, '');
+  assert.ok(calls.monday.every((c) => /^\s*query\b/.test(c.body.query)), 'reads only');
+
+  // first load failing: no data at all, an error per board (nothing substituted)
+  const cold = createMonday({ ...cfg, token: 'bad-token' }, createStatus(true, []), { now: () => t });
+  const none = await cold.loadAll(false);
+  assert.strictEqual(none.leads.length, 0); assert.strictEqual(none.fetchedAt, null); assert.match(none.errors.leads, /rejected/);
+});
+
+test('Monday data is not stored in MongoDB or the browser', async () => {
+  const cookie = await login(base, 'boss@example.com');
+  await call(base, 'GET', '/api/monday/bootstrap', cookie);
+  const names = (await mongoose.connection.db.listCollections().toArray()).map((c) => c.name);
+  for (const n of names) {
+    const docs = JSON.stringify(await mongoose.connection.db.collection(n).find({}).toArray());
+    assert.ok(!docs.includes('Test Client One') && !docs.includes('BH-T1'), 'collection ' + n);
+  }
+  const fr = await call(base, 'GET', '/api/monday/freshness', cookie);
+  assert.strictEqual(fr.status, 200); assert.ok(fr.data.boards.leads.loaded);
+  // the page writes to localStorage only its demo data (demo mode) and display preferences
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const writes = src.match(/store\.set\([^,]+/g);
+  assert.deepStrictEqual(writes.sort(), ['store.set(PREF', 'store.set(STORE'].sort());
+  assert.match(src, /function persist\(\) \{ if \(DEMO &&/);
+});
+
+test('check-respond: reads a few Respond IDs and their chats; prints status and counts only', async () => {
+  const { checkRespond } = require('../scripts/check-respond');
+  const cfg = loadConfig(envFor({}), ARGV);
+  calls.monday.length = 0; calls.respond.length = 0;
+  const logs = [];
+  const r = await checkRespond(cfg, (l) => logs.push(l));
+  assert.strictEqual(r.state, 'ok');
+  assert.ok(r.sample.tested >= 1 && r.results.every((x) => x.ok));
+  const out = logs.join('\n');
+  assert.match(out, /Respond ID/); assert.match(out, /respond\.io: connected \(read-only\)/);
+  // nothing from the customer: no names, contact IDs, tokens or message text
+  const chats = await Promise.all(['555001', '555003', '555006'].map((id) => createRespondFor(cfg).chat(id).catch(() => null)));
+  const texts = chats.filter(Boolean).flatMap((c) => c.messages.map((m) => m.text)).filter((t) => t && t.length > 3);
+  assert.ok(texts.length > 0);
+  for (const s of [...texts, 'Test Client', '555001', '555003', '555006', 'mtest', 'rtest']) assert.ok(!out.includes(s), 'printed: ' + s);
+  // read-only: Monday queries only, respond.io GETs only
+  assert.ok(calls.monday.every((c) => /^\s*query\b/.test(c.body.query)));
+  assert.ok(calls.respond.length > 0 && calls.respond.every((c) => c.method === 'GET'));
+  await assert.rejects(checkRespond(loadConfig(envFor({ RESPOND_TOKEN: '' }), ARGV), () => {}), /RESPOND_TOKEN is empty/);
+  const bad = []; const rb = await checkRespond(loadConfig(envFor({ RESPOND_TOKEN: 'bad-token' }), ARGV), (l) => bad.push(l));
+  assert.strictEqual(rb.state, 'error'); assert.match(bad.join('\n'), /rejected RESPOND_TOKEN/);
+});
+const createRespondFor = (cfg) => require('../src/integrations/respondio').createRespond(cfg.integrations.respond, require('../src/integrations/status').createStatus(true, []));
 
 test('missing credentials show "not connected" and the routes refuse politely', async () => {
   const b = await instance({ MONDAY_TOKEN: '', RESPOND_TOKEN: '' });

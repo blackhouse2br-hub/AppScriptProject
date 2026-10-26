@@ -9,7 +9,7 @@ const ObjectId = Schema.Types.ObjectId;
 const toJSON = {
   versionKey: false,
   transform(doc, ret) {
-    ret.id = String(ret._id); delete ret._id; delete ret.passwordHash;
+    ret.id = String(ret._id); delete ret._id; delete ret.passwordHash; delete ret.googleSub;
     for (const k of ['leadId', 'listingId', 'userId']) if (ret[k]) ret[k] = String(ret[k]);
     return ret;
   },
@@ -88,6 +88,8 @@ const User = mongoose.model('User', new Schema({
   phone: { type: String, default: '' },
   modules: { type: Schema.Types.Mixed, default: {} },   // { moduleKey: 'view' | 'edit' }, validated by shared.validateUser
   passwordHash: { type: String, select: false },
+  // Google account ID, linked on the first Google sign-in; later sign-ins must come from that same account
+  googleSub: { type: String, select: false, index: { unique: true, sparse: true } },
   active: { type: Boolean, default: true },
 }, { ...opts, minimize: false }));
 
@@ -103,4 +105,13 @@ const Session = mongoose.model('Session', new Schema({
   expiresAt: { type: Date, required: true, expires: 0 },   // TTL index: MongoDB deletes expired sessions
 }, { timestamps: true }));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session };
+// one Google sign-in attempt (10 minutes): state, PKCE verifier and nonce, bound to the browser that started it
+const OAuthState = mongoose.model('OAuthState', new Schema({
+  stateHash: { type: String, required: true, unique: true },
+  browserHash: { type: String, required: true },
+  verifier: { type: String, required: true },
+  nonce: { type: String, required: true },
+  expiresAt: { type: Date, required: true, expires: 0 },
+}));
+
+module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState };

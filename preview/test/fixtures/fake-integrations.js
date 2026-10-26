@@ -4,7 +4,8 @@
 const http = require('http');
 
 const DAY = 864e5;
-const ymd = (offsetDays) => new Date(Date.now() + offsetDays * DAY).toISOString().slice(0, 10);
+// local calendar day, as the pipeline reads date-only values (noon local time); a UTC day made day counts depend on the clock
+const ymd = (offsetDays) => { const d = new Date(Date.now() + offsetDays * DAY); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const col = (id, title, type, labels) => ({ id, title, type, settings_str: labels ? JSON.stringify({ labels: Object.fromEntries(labels.map((l, i) => [String(i), l])) }) : '{}' });
 // 1×1 PNG (fictional photo)
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
@@ -90,7 +91,8 @@ const CHATS = () => ({
   // VA replied 5 h ago, client sent two messages since, then an automated workflow message → still Needs VA Reply, Hot
   '555006': [msg(14, 'outgoing', 'Auto-reply: we will get back to you', 0.5, 'workflow'), msg(13, 'incoming', 'Can I view tomorrow?', 1), msg(12, 'incoming', 'Hello again', 2), msg(11, 'outgoing', 'Sure, sending options', 5, 'user')],
 });
-function fakeRespond(path) {
+function fakeRespond(path, auth) {
+  if (auth === 'Bearer bad-token') return [401, { message: 'Unauthorized' }];
   const m = path.match(/^\/contact\/id:(\d+)(\/message\/list)?/);
   if (!m) return [404, {}];
   if (m[1] === '555003') return [404, { message: 'not found' }];
@@ -109,7 +111,7 @@ function createFakeServer() {
       }
       let out;
       if (req.url === '/monday') { calls.monday.push({ method: req.method, auth: req.headers.authorization, body: JSON.parse(data || '{}') }); out = fakeMonday(JSON.parse(data || '{}'), req.headers.authorization, req.headers.host); }
-      else if (req.url.startsWith('/respond')) { const p = req.url.slice('/respond'.length); calls.respond.push({ method: req.method, auth: req.headers.authorization, path: p }); out = fakeRespond(p); }
+      else if (req.url.startsWith('/respond')) { const p = req.url.slice('/respond'.length); calls.respond.push({ method: req.method, auth: req.headers.authorization, path: p }); out = fakeRespond(p, req.headers.authorization); }
       else out = [404, {}];
       res.writeHead(out[0], { 'content-type': 'application/json' }); res.end(JSON.stringify(out[1]));
     });
