@@ -3,6 +3,7 @@
 // columns are found by TITLE on each board, so no column IDs are hard-coded.
 // Only GraphQL `query` operations can be sent; mutations are refused before any request is made.
 const { IntegrationError, tracked } = require('./status');
+const { canonCity } = require('../../public/shared');
 
 // from Code.gs CONFIG.HIDE and CONFIG.LISTING_SKIP_GROUPS
 const HIDE = ['Archive', 'Archived', 'For Validation', 'Broker Inquiries', 'Messaged Brokers for Viber', 'Copied to Broker Partnerships',
@@ -29,6 +30,12 @@ const LEAD_COLS = {
   leaseTerm: [['lease term']],
   pets: [['pets']],
   otherReqs: [['other requirements'], true],
+  // Property Requirements report (exact titles only, so they never take another column)
+  building: [['specific building', 'preferred building', 'building name', 'building'], true],
+  sqm: [['sqm', 'preferred sqm', 'floor area', 'unit size', 'size'], true],
+  bathrooms: [['number of bathrooms', 'no of bathrooms', 'bathrooms', 'bathroom'], true],
+  parking: [['parking', 'parking slot', 'parking slots', 'no of parking'], true],
+  furnishing: [['furnishing', 'furnished', 'furnished unfurnished'], true],
   failReason: [['reason for failure'], true],
   inquiryDate: [['date of inquiry', 'inquiry date', 'date inquired']],
   failedDate: [['failed date', 'date failed', 'lost date'], true],
@@ -142,8 +149,11 @@ function shapeLead(it, cols) {
     inquiry, va: v.va, salesperson: v.salesperson, source: v.leadsFrom,
     origin: /respond/i.test(v.leadsFrom) ? 'respond.io' : 'Monday',
     budget: money(v.budget), city: v.city || '', bedrooms: beds(v.bedrooms), occupants: v.occupancy,
-    pets: !v.pets ? '' : /^(no|none|wala|0)\b/i.test(v.pets) ? 'No Pets' : 'With Pets',
+    // empty or a "not stated" label stays '' (Not specified); only an actual answer becomes No Pets / With Pets
+    pets: !v.pets || /^(n\/?a|not (specified|sure|stated)|unspecified|unknown|any|either|tbd|-+|\?)$/i.test(v.pets.trim()) ? ''
+      : /^(no|none|wala|0)\b/i.test(v.pets) ? 'No Pets' : 'With Pets',
     requirements: [v.location, v.otherReqs].filter(Boolean).join('; ').slice(0, 500),
+    location: v.location, building: v.building, sqm: v.sqm, bathrooms: v.bathrooms, parking: v.parking, furnishing: v.furnishing,
     nationality: v.nationality, moveIn: ymdIn(v.moveIn), leaseTerm: v.leaseTerm, failReason: v.failReason, leaseEnd: '',
     inquiryDate: ymdIn(v.inquiryDate), failedDate: ymdIn(v.failedDate), contractDate: ymdIn(v.contractDate),
     createdAt: it.created_at || '', updatedAt: it.updated_at || it.created_at || '',
@@ -162,7 +172,9 @@ function shapeListing(it, cols) {
   const st = v.status;
   return {
     id: String(it.id), code: String(it.id), building: v.building || it.name, tower: v.unit ? 'Unit ' + v.unit : '', floor: null,
-    city: v.location, type: /sale|sell|buy/i.test(v.type + ' ' + group) ? 'For Sale' : 'For Rent', price: money(v.price),
+    // one city per listing ("Taguig", "BGC" and a BGC tower with no City all become "Taguig (BGC)"); cityRaw keeps Monday's text
+    city: canonCity(v.location, v.building) || 'City not set', cityRaw: v.location,
+    type: /sale|sell|buy/i.test(v.type + ' ' + group) ? 'For Sale' : 'For Rent', price: money(v.price),
     bedrooms: beds(v.bedrooms), bathrooms: parseInt(v.bathrooms, 10) || 0, sizeSqm: parseFloat(v.sqm) || 0, furnishing: v.furnishing,
     parking: !!v.parking && !/^(0|no|none)$/i.test(v.parking), petFriendly: /yes|allow|friendly|ok/i.test(v.pets) && !/^no/i.test(v.pets),
     availability: !st || /^avail/i.test(st) ? 'Available' : /reserv|hold|pending/i.test(st) ? 'Reserved' : 'Not Available', availabilityLabel: st,
@@ -185,6 +197,14 @@ const ITEM_FIELDS = `id name created_at updated_at group { id title } column_val
 const LISTING_FIELDS = `id name created_at updated_at group { id title } assets { id public_url url_thumbnail file_extension } column_values(ids: $c) { ${COL_FIELDS} }`;
 const MAX_ITEMS = 5000, TTL_MS = 5 * 60e3, MIN_REFRESH_MS = 30e3, PHOTO_URL_TTL = 40 * 60e3, PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+/** Image type from a file's first bytes (JPEG, PNG, GIF, WebP); '' for anything else. */
+function imageType(b) {
+  if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length > 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (b.length > 6 && /^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1'))) return 'image/gif';
+  if (b.length > 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  return '';
+}
 
 function assertReadOnly(query) {
   if (!/^\s*query\b/.test(query) || /\b(mutation|subscription)\b/i.test(query)) {
@@ -263,7 +283,7 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
       const listings = (await allItems(id, Object.values(cols), LISTING_FIELDS, 200, p)).map((it) => shapeListing(it, cols))
         .filter((x) => !LISTING_SKIP_GROUPS.includes(norm(x.group)));
       const assets = new Map(), at = Date.now();
-      listings.forEach((x) => { x._assets.forEach((a) => assets.set(String(a.id), { listingId: x.id, url: a.public_url, thumb: a.url_thumbnail || a.public_url, at })); delete x._assets; });
+      listings.forEach((x) => { x._assets.forEach((a) => assets.set(String(a.id), { listingId: x.id, url: a.public_url, at })); delete x._assets; });
       return { listings, assets };
     },
     async calendar(id, p) {
@@ -380,21 +400,24 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
 
   /**
    * One listing photo through the server (the browser never gets Monday's file links).
-   * Monday's public_url links expire after about an hour, so links older than 40 minutes are refreshed with a read query.
-   * The Monday token is NOT sent to the file host. Only JPEG/PNG/GIF/WebP up to 10 MB are passed on.
+   * Always Monday's signed public_url: url_thumbnail is a monday.com/protected_static link that only answers a signed-in
+   * Monday user, so thumbnails failed (the page now scales the photo instead). public_url links expire after about an
+   * hour, so links older than 40 minutes are refreshed with a read query. The Monday token is NOT sent to the file host.
+   * Only JPEG/PNG/GIF/WebP up to 10 MB are passed on, recognised by their first bytes when S3 labels them generically.
+   * Read-only: this never changes, replaces or deletes a file on Monday.
    */
-  async function photo(assetId, thumb) {
+  async function photo(assetId) {
     const entry = cache.get('listings:' + cfg.boards.listings);
     const map = entry && entry.value && entry.value.assets;
     const a = map && map.get(String(assetId));
     if (!a) return null;   // only photos of listings on the configured Listings board
     if (Date.now() - a.at > PHOTO_URL_TTL || !a.url) {
-      const d = await tracked(status, () => gql('query ($ids: [ID!]!) { assets(ids: $ids) { id public_url url_thumbnail } }', { ids: [String(assetId)] }));
+      const d = await tracked(status, () => gql('query ($ids: [ID!]!) { assets(ids: $ids) { id public_url } }', { ids: [String(assetId)] }));
       const f = (d.assets || [])[0];
       if (!f || !f.public_url) throw new IntegrationError('monday', 'That photo is no longer on Monday.', { status: 404, countsAsFailure: false });
-      Object.assign(a, { url: f.public_url, thumb: f.url_thumbnail || f.public_url, at: Date.now() });
+      Object.assign(a, { url: f.public_url, at: Date.now() });
     }
-    const url = thumb ? a.thumb : a.url;
+    const url = a.url;
     const okUrl = (u) => /^https:\/\//.test(u) || (mockApi && /^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(u));
     if (!okUrl(url)) throw new IntegrationError('monday', 'Photo link is not HTTPS.', { status: 502, countsAsFailure: false });
     let res;
@@ -402,11 +425,14 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     catch (e) { throw new IntegrationError('monday', 'Could not load the photo from Monday.', { countsAsFailure: false }); }
     if (!okUrl(res.url || url)) throw new IntegrationError('monday', 'Photo link redirected to a non-HTTPS address.', { countsAsFailure: false });
     if (res.status !== 200) throw new IntegrationError('monday', `Photo request returned HTTP ${res.status}.`, { status: res.status === 404 ? 404 : 502, countsAsFailure: false });
-    const type = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    if (!PHOTO_TYPES.includes(type)) throw new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
+    const declared = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!PHOTO_TYPES.includes(declared) && !/^(application\/octet-stream|binary\/octet-stream|)$/.test(declared)) throw new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
     if (Number(res.headers.get('content-length') || 0) > PHOTO_MAX_BYTES) throw new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > PHOTO_MAX_BYTES) throw new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
+    // the bytes decide: a file labelled image/png that isn't one (or an SVG/HTML page) is refused
+    const type = imageType(buf);
+    if (!type) throw new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
     return { type, body: buf };
   }
 
@@ -435,4 +461,4 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
   return { loadAll, freshness, settled, notes, photo, test, respondIdSample };
 }
 
-module.exports = { createMonday, assertReadOnly, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, HIDE };
+module.exports = { createMonday, assertReadOnly, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, imageType, HIDE };

@@ -24,6 +24,8 @@ const Lead = mongoose.model('Lead', new Schema({
   email: { type: String, default: '', lowercase: true, maxlength: 120 },
   status: { type: String, enum: LISTS.clientStatuses, default: 'New Inquiry' },
   ai: { type: String, enum: AI_STAGES, default: 'Property Matching' },
+  // stage from the lead's evidence when ai is 'Not on Respond.io' (pipeline.computeLead); '' = same as ai
+  workStage: { type: String, enum: [''].concat(AI_STAGES), default: '' },
   temp: { type: String, enum: TEMPS, default: 'Not on Respond.io' },
   inquiry: { type: String, enum: ['Rent', 'Buy'], default: 'Rent' },
   va: { type: String, enum: [''].concat(LISTS.vas), default: '', index: true },
@@ -34,10 +36,15 @@ const Lead = mongoose.model('Lead', new Schema({
   city: { type: String, default: '' },
   bedrooms: { type: String, default: '' },
   occupants: { type: String, default: '' },
-  pets: { type: String, default: 'No Pets' },
+  pets: { type: String, default: '' },   // '' = not specified; 'No Pets' only when chosen
   requirements: { type: String, default: '', maxlength: 500 },
   nationality: { type: String, default: '', maxlength: 60 },
   moveIn: { type: String, default: '' },
+  building: { type: String, default: '', maxlength: 120 },
+  sqm: { type: String, default: '', maxlength: 40 },
+  bathrooms: { type: String, default: '' },
+  parking: { type: String, default: '' },
+  furnishing: { type: String, default: '' },
   leaseEnd: { type: String, default: '' },
   daysInStage: { type: Number, default: 0 },
   failReason: { type: String, default: '' },
@@ -114,4 +121,29 @@ const OAuthState = mongoose.model('OAuthState', new Schema({
   expiresAt: { type: Date, required: true, expires: 0 },
 }));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState };
+// ---- portal-only records about leads that may live on Monday.com (source 'monday', read-only there) or in MongoDB ----
+// leadId / listingId are the Monday item IDs or MongoDB IDs as text, so the same record works for either source.
+const leadRef = {
+  source: { type: String, enum: ['monday', 'mongo'], required: true },
+  leadId: { type: String, required: true, maxlength: 40 },
+};
+const by = { name: { type: String, default: '' }, userId: { type: ObjectId, ref: 'User' } };
+
+// "Asking for Availability": one record per lead + listing (the unique index stops duplicates); nothing is sent to anyone
+const contactSchema = new Schema({ via: { type: String, enum: ['call', 'whatsapp', 'viber'], required: true }, at: { type: Date, default: Date.now }, by: { type: String, default: '' } }, { _id: false });
+const AvailabilityRequest = mongoose.model('AvailabilityRequest', new Schema({
+  ...leadRef,
+  listingId: { type: String, required: true, maxlength: 40 },
+  listingName: { type: String, default: '', maxlength: 160 },
+  status: { type: String, enum: ['asking', 'available', 'unavailable'], default: 'asking', index: true },
+  contacts: { type: [contactSchema], default: [] },   // owner taps (call / WhatsApp / Viber), newest 20 kept
+  createdBy: by, updatedBy: by,
+}, opts).index({ source: 1, leadId: 1, listingId: 1 }, { unique: true }));
+
+// a portal override of what Monday says, e.g. "Failed" for an unresponsive lead; shown as an override, never written to Monday
+const LeadOverride = mongoose.model('LeadOverride', new Schema({
+  ...leadRef,
+  failed: { type: new Schema({ reason: { type: String, required: true, maxlength: 300 }, at: { type: Date, default: Date.now }, by: { type: String, default: '' }, byUserId: { type: ObjectId, ref: 'User' } }, { _id: false }), default: null },
+}, opts).index({ source: 1, leadId: 1 }, { unique: true }));
+
+module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride };

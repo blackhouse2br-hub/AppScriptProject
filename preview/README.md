@@ -103,6 +103,7 @@ How it behaves:
 | `npm run reset-manager-password` | Resets an existing Manager's password only: shows the Manager account(s), asks for the new password twice without displaying it, signs out that Manager's sessions. Needs an interactive terminal; never logs the password |
 | `npm run seed:demo` | Inserts fictional sample leads, listings, viewings, notes and templates into an empty database |
 | `npm test` | All tests |
+| `node test/ui-check.js [outDir]` | Browser check at desktop (1440 px) and phone (390 px) widths in headless Chrome/Edge, against a throwaway MongoDB and the local fake Monday/respond.io; screenshots and `results.json` in `outDir` |
 
 ## What's built
 
@@ -110,12 +111,15 @@ How it behaves:
 |---|---|---|
 | Leads list: tiles, search, filters, sort, chips | Working | Working |
 | Lead drawer: Details edit + validation, Notes, Properties matching, Book Viewing, For Scheduling → Confirmed Schedule → Done | Working | Working |
-| VA Portal, VA Management, Calendar, Inventory Dashboard (availability edit), Leads Report, Broker Management, Renewals, Daily Report | Working | Working |
+| VA Portal, VA Management, Calendar, Inventory Dashboard (availability edit), Leads Report, Broker Management, Renewals, Daily Report, Property Requirements | Working | Working |
 | Settings: Team & Access, WhatsApp Templates (stored only) | Working | Working (passwords, at least one Manager kept) |
 | Manager / VA / Broker permissions and lead visibility | Simulated in the browser | Enforced by the server on every request |
 | Respond.io Chat | Read-only sample | Read-only from respond.io when `RESPOND_TOKEN` is set, else "not connected" |
 | Monday.com leads, listings, calendar, notes | n/a | Read-only, live (Data source switch) when configured |
-| Asking for Availability, For Client Approval, LOI / Contract / Collection / Active / For Renewal, Upselling, Service Requests, Project Pages, P&L, Files, Monday Sync | Placeholder | Placeholder |
+| Properties tab: the VA's own search (city, bedrooms, rent/sale, price, furnishing, pets, keyword, "ignore the client's requirements") | Working | Working |
+| Asking for Availability: units being checked with owners (one per lead + listing, up to 60 per lead), owner Call / WhatsApp / Viber links that open only when tapped (taps logged, newest 20), owner confirmed / not available. Nothing is sent and nothing goes to Monday or respond.io | This browser | MongoDB (`AvailabilityRequest`), for Monday and MongoDB leads |
+| Mark as Failed: a **portal override** with a reason, **Managers only** (set and remove; enforced by the server), labelled "Portal override" wherever AI Status shows; Monday's Client Status / AI STATUS are not changed | This browser | MongoDB (`LeadOverride`) |
+| For Client Approval, LOI / Contract / Collection / Active / For Renewal, Upselling, Service Requests, Project Pages, P&L, Files, Monday Sync | Placeholder | Placeholder |
 | Google sign-in | n/a | Built for the hosted server (DEPLOYMENT.md); the local preview keeps email and password |
 | Monday writes, respond.io messaging, Drive files, e-signatures, webhooks, scheduled jobs | Not connected | Not connected |
 

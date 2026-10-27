@@ -34,6 +34,7 @@
     ['renewals', 'Renewals', P('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>')],
     ['upsell', 'Upselling', P('<path d="M3 11l18-8-8 18-2-8-8-2z"/>')],
     ['daily', 'Daily Report', P('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>')],
+    ['propreq', 'Property Requirements', P('<path d="M3 21h18M6 21V10l6-5 6 5v11"/><circle cx="17" cy="16" r="3"/><path d="m21 20-1.8-1.8"/>')],
     ['services', 'Service Requests', P('<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.5-2.5z"/>')],
     ['pages', 'Project Pages', P('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>')],
     ['pl', 'P&L', P('<path d="M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>')],
@@ -49,7 +50,6 @@
     pl: 'Profit & loss, commissions collected/pending and the Data Check rules, read from the Monday Calendar board.',
   };
   const LATER_TAB = {
-    asking: 'Units the VA asked owners about, with owner contact taps (call / WhatsApp / Viber through respond.io).',
     approval: 'Owner-confirmed units waiting for the client, and the “send confirmed units” chat pop-up.',
     loic: 'LOI created from the Lease/Sale templates, sent for e-signature, and the signed copy returned.',
     loio: 'Owner side of the LOI.', contract: 'Contract stage, with the 5-day owner-signing rule.',
@@ -110,8 +110,9 @@
   function toast(msg, err) { const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (err ? ' err' : ''); clearTimeout(toast.t); toast.t = setTimeout(() => { t.className = 'toast'; }, err ? 5000 : 2600); }
   const pill = (text, color) => text ? `<span class="pill" style="--c:${color || '#8b949e'}">${color ? '<span class="dot" style="background:' + color + '"></span>' : ''}${esc(text)}</span>` : '<span class="muted">—</span>';
   // guess = stage inferred only from the status text (shown dotted, like the original's unconfirmed AI guesses)
-  const aiPill = (l, guess) => pill(l.ai, AI_COLORS[l.ai]).replace('class="pill"', `class="pill${guess ? ' guess' : ''}"`);
-  const AI_SRC = { proof: 'Proof: Calendar board / Client Status', monday: 'Monday AI STATUS (last set by the live portal)', rules: 'Inferred from the Next Action / Status text' };
+  const aiPill = (l, guess) => pill(l.ai + (l.override ? ' · override' : ''), AI_COLORS[l.ai]).replace('class="pill"', `class="pill${guess ? ' guess' : ''}${l.override ? ' ovr' : ''}"`);
+  const AI_SRC = { proof: 'Proof: Calendar board / Client Status', monday: 'Monday AI STATUS (last set by the live portal)', rules: 'Inferred from the Next Action / Status text',
+    override: 'Portal override, saved in the portal only (not on Monday.com)' };
   const aiTip = (l) => [l.ai, l.aiSub, AI_SRC[l.aiSource]].filter(Boolean).join(' · ');
   const tempChip = (t) => t ? `<span class="tchip" style="--c:${TEMP_STYLE[t][0]}">${TEMP_STYLE[t][1]} ${esc(t)}</span>` : '<span class="muted">—</span>';
   const leadById = (id) => D.leads.find((l) => l.id === id);
@@ -225,7 +226,7 @@
         <button class="btn sm" data-act="logout">Sign out</button></div>
         ${S.source === 'monday' ? mondayDataNote() : ''}
         ${errs.length ? `<div class="src-err" role="alert">${errs.map(([k, v]) => `<div><b>${esc(k === 'all' ? 'Monday.com' : 'Monday ' + k)}:</b> ${esc(v)}</div>`).join('')}<div class="sub">No substitute data is shown for these.${S.srcErrors.viewings ? ' Without the Calendar board, AI Status uses Monday AI STATUS / status rules only, and Days in Stage starts from the inquiry date.' : ''}</div></div>` : ''}
-        ${S.source === 'monday' && S.rsInfo && S.rsInfo.error ? `<div class="src-err" role="alert"><b>respond.io:</b> ${esc(S.rsInfo.error)} <span class="sub">Reply state and Temperature for those leads stay unchecked (no substitute data).</span></div>` : ''}
+        ${S.source === 'monday' && S.rsInfo && S.rsInfo.error ? `<div class="src-err" role="alert"><b>respond.io:</b> ${esc(S.rsInfo.error)} <span class="sub">Reply state and Temperature for those leads stay unchecked (no substitute data).${S.rsInfo.retryAt ? ' Trying again at ' + esc(hhmm(new Date(S.rsInfo.retryAt).toISOString())) + '.' : ' Failed chats are tried again automatically.'}</span></div>` : ''}
         ${nc.length ? `<div class="src-note">Not configured: ${nc.map((k) => esc(k)).join(', ')} (set the board IDs in preview/.env).</div>` : ''}`;
     }
     return `<div class="demo-bar"><span class="demo-tag">Demo data</span>
@@ -237,7 +238,7 @@
   function sidebar() {
     const vis = visibleLeads();
     const cnt = { leads: vis.length, vaportal: vaPending().length, calendar: visibleViewings().filter((v) => v.status === 'Done' && !v.feedback).length,
-      renewals: vis.filter((l) => l.ai === 'For Renewal').length };
+      renewals: vis.filter((l) => l.ai === 'For Renewal').length, propreq: PR.sourcingLeads(vis).length };
     const hot = { vaportal: 1 };
     const by = (k) => { const m = {}; vis.forEach((l) => { m[l[k]] = (m[l[k]] || 0) + 1; }); return m; };
     const aiN = by('ai'), tempN = by('temp');
@@ -258,7 +259,7 @@
   }
   function viewHtml() {
     const fn = { leads: leadsView, vaportal: vaPortalView, monitor: monitorView, calendar: calendarView, invdash: invView, ldash: ldashView,
-      brokers: brokersView, renewals: renewalsView, daily: dailyView, team: settingsView }[S.view];
+      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, team: settingsView }[S.view];
     return fn ? fn() : laterView(S.view);
   }
   const laterBox = (title, what) => `<div class="later-box"><b>${esc(title)} isn't in this preview yet.</b><br>In the live portal: ${esc(what)}<br><span class="sub">It will be built in a later migration phase. Nothing here connects to the live system.</span></div>`;
@@ -272,8 +273,12 @@
   const vaPill = (va) => va ? `<span class="vpill" style="--h:${vaHue(va)}">${esc(va)}</span>` : '<span class="muted">Unassigned</span>';
   const bedsTxt = (b) => !b ? '' : b === 'Studio' ? 'Studio' : b + ' BR';
   const daysTxt = (l) => (l.daysInStage == null ? '' : l.daysInStage + ' d in stage');
+  // every linked lead ends in one state: a reply status, "Check failed" (retried by itself), "Checking…" while a round
+  // runs, or "Reply unchecked" when list checks are off / done without reaching it
   const replyBadge = (l) => l.onRespond && l.waiting ? `<span class="wait ${l.waiting}">${l.waiting === 'va' ? 'Needs VA Reply' : 'Waiting on Client'}</span>`
-    : l.onRespond && l.replyChecked === false ? '<span class="wait unk" title="respond.io chat not read yet. Open the Chat tab to check it.">Reply unchecked</span>' : '';
+    : l.onRespond && l.replyError ? `<span class="wait err" title="${esc('respond.io check failed: ' + l.replyError + ' It is tried again automatically; the Chat tab reads it now.')}">Check failed</span>`
+    : l.onRespond && l.replyChecked === false ? (S.rsInfo && S.rsInfo.busy ? '<span class="wait unk" title="Reading this lead\'s respond.io chat…">Checking…</span>'
+      : '<span class="wait unk" title="respond.io chat not read yet. Open the Chat tab to check it.">Reply unchecked</span>') : '';
   const COLS = [   // [key, header, sortable]
     ['id', 'Lead ID', 1], ['name', 'Client', 1], ['ai', 'AI Status', 1], ['temp', 'Temperature', 1], ['va', 'VA', 1], ['type', 'Type', 1],
     ['look', 'Looking For', 0], ['movein', 'Move-in', 1], ['source', 'Source', 1], ['added', 'Added', 1]];
@@ -493,8 +498,11 @@
     ['budget', 'Budget (₱)', 'number'], ['city', 'City', 'select', LISTS.cities], ['bedrooms', 'No. of Bedrooms', 'select', LISTS.bedrooms],
     ['occupants', 'No. of Occupants', 'select', LISTS.occupants], ['pets', 'Pets', 'select', LISTS.pets], ['moveIn', 'Target Move-in Date', 'date'],
     ['nationality', 'Nationality', 'text'], ['requirements', 'Client Requirements', 'textarea'],
+    ['building', 'Specific Building', 'text'], ['sqm', 'SQM', 'text'], ['bathrooms', 'No. of Bathrooms', 'select', [''].concat(LISTS.bathrooms)],
+    ['parking', 'Parking', 'select', [''].concat(LISTS.parking)], ['furnishing', 'Furnishing', 'select', [''].concat(LISTS.furnishing)],
   ];
-  const FIELD_GROUPS = [['', ['status', 'va', 'source', 'inquiry']], ['Contact', ['name', 'phone', 'email']], ['Requirements', ['budget', 'city', 'bedrooms', 'occupants', 'pets', 'moveIn', 'nationality', 'requirements']]];
+  const FIELD_GROUPS = [['', ['status', 'va', 'source', 'inquiry']], ['Contact', ['name', 'phone', 'email']], ['Requirements', ['budget', 'city', 'bedrooms', 'occupants', 'pets', 'moveIn', 'nationality', 'requirements']],
+    ['Unit Preferences', ['building', 'sqm', 'bathrooms', 'parking', 'furnishing']]];
   function openLead(id, tab) {
     const l = leadById(id); if (!l || !visibleLeads().includes(l)) return toast('You don\'t have access to this lead.', true);
     if (S.open && S.open !== id && Object.keys(S.draft).length && !confirm('Discard unsaved changes?')) return;
@@ -559,7 +567,7 @@
           <button class="btn ghost sm" data-act="prevlead" title="Previous lead ( [ )" aria-label="Previous lead">‹</button>
           <button class="btn ghost sm" data-act="nextlead" title="Next lead ( ] )" aria-label="Next lead">›</button>
           <button class="btn ghost" data-act="close" aria-label="Close (Esc)">${P('<path d="M18 6 6 18M6 6l12 12"/>')}</button></div></div>
-      <div class="tabs" role="tablist" aria-label="Lead sections">${tab('details', 'Details')}${tab('props', 'Properties')}${tab('asking', 'Asking for Availability', 1)}${tab('approval', 'For Client Approval', 1)}
+      <div class="tabs" role="tablist" aria-label="Lead sections">${tab('details', 'Details')}${tab('props', 'Properties')}${tab('asking', askTabLabel(l))}${tab('approval', 'For Client Approval', 1)}
         ${tab('viewings', 'For Scheduling' + (nS ? ` (${nS})` : ''))}${tab('confirmed', 'Confirmed Schedule' + (nC ? ` (${nC})` : ''))}${tab('done', 'Done' + (nD ? ` (${nD})` : ''))}
         ${Object.entries(DEAL_TABS).map(([k, v]) => tab(k, v, 1)).join('')}${tab('chat', 'Respond.io Chat')}</div>
       <div class="d-body" id="dbody" role="tabpanel"></div><div id="dfoot"></div>`;
@@ -568,8 +576,9 @@
   /** Redraws only the open tab's content and footer (header and tabs stay, so focus is kept). */
   function renderDrawerBody() {
     const l = leadById(S.open), body = $('#dbody'); if (!l || !body) return;
-    const panel = { details: detailsPanel, props: propsPanel, viewings: () => viewingsPanel(l, ['Proposed']), confirmed: () => viewingsPanel(l, ['Confirmed']), done: () => viewingsPanel(l, ['Done', 'Cancelled']), chat: chatPanel }[S.tab];
-    body.innerHTML = panel ? panel(l) : laterBox(DEAL_TABS[S.tab] || (S.tab === 'asking' ? 'Asking for Availability' : 'For Client Approval'), LATER_TAB[S.tab] || '');
+    const panel = { details: detailsPanel, props: propsPanel, asking: askingPanel, viewings: () => viewingsPanel(l, ['Proposed']), confirmed: () => viewingsPanel(l, ['Confirmed']), done: () => viewingsPanel(l, ['Done', 'Cancelled']), chat: chatPanel }[S.tab];
+    body.innerHTML = panel ? panel(l) : laterBox(DEAL_TABS[S.tab] || 'For Client Approval', LATER_TAB[S.tab] || '');
+    loadAsking(l);
     $('#dfoot').innerHTML = S.tab === 'details' ? footHtml()
       : S.tab === 'chat' ? `<div class="composer"><input disabled aria-label="Message" placeholder="Sending is switched off in the preview (read-only)"><button class="btn primary" disabled>Send</button></div>` : '';
     if (S.tab === 'chat' && !DEMO) loadChat(l);
@@ -594,7 +603,9 @@
   }
   function detailsPanel(l) {
     return `<div class="aicard">
-        <div><span class="d-lbl">AI Status</span>${l.ai ? aiPill(l, l.aiSource === 'rules') : '<span class="muted">—</span>'}<div class="sub" style="margin-top:4px">${esc(l.aiSub || '')}${l.aiSub && daysTxt(l) ? ' · ' : ''}${daysTxt(l)}${!l.aiSub && l.failReason ? ' · ' + esc(l.failReason) : ''}</div>${l.aiSource ? `<div class="sub" style="font-size:11px">${esc(AI_SRC[l.aiSource])}</div>` : ''}</div>
+        <div><span class="d-lbl">AI Status</span>${l.ai ? aiPill(l, l.aiSource === 'rules') : '<span class="muted">—</span>'}${l.override ? ' <span class="ovr-tag" title="Stored in the portal only; Monday.com still shows its own status">Portal override</span>' : ''}<div class="sub" style="margin-top:4px">${esc(l.aiSub || '')}${l.aiSub && daysTxt(l) ? ' · ' : ''}${daysTxt(l)}${!l.aiSub && l.failReason ? ' · ' + esc(l.failReason) : ''}</div>${l.aiSource ? `<div class="sub" style="font-size:11px">${esc(AI_SRC[l.aiSource])}</div>` : ''}
+          ${l.override ? `<div class="sub" style="font-size:11px">Set by ${esc(l.override.by || '—')} ${esc(ago(l.override.at))}. Monday.com is not changed.</div>${isManager() ? '<button class="linkbtn" data-act="unfail">Remove override</button>' : ''}`
+            : isManager() && l.ai !== 'Failed' ? '<button class="linkbtn" data-act="failmodal" style="margin-top:4px">Mark as Failed (portal override)…</button>' : ''}</div>
         <div><span class="d-lbl">Temperature</span>${tempChip(l.temp)}<div class="sub" style="margin-top:4px">${l.tempWhy ? esc(l.tempWhy) : l.onRespond ? (l.waiting === 'va' ? 'Needs VA reply' : l.waiting === 'client' ? 'Waiting on client' : 'Respond ID ' + esc(l.contactId || '')) : 'No respond.io chat'}</div>
           ${l.lastText ? `<div class="sub" style="font-size:11px">Last message: “${esc(l.lastText)}”</div>` : ''}</div>
         <div><span class="d-lbl">Lead Value</span><b style="font-size:16px">${esc(money(l.budget) || '—')}</b><div class="sub" style="margin-top:4px">Client's budget${countsInReports(l) ? '' : ' · below report minimum'}</div></div>
@@ -615,10 +626,11 @@
   }
 
   // Property matching: hard rules hide units; soft rules rank (budget band ±15%, per data-points.xlsx)
-  function matchListing(l, x) {
-    if (x.availability === 'Not Available' || x.type !== (l.inquiry === 'Rent' ? 'For Rent' : 'For Sale')) return null;
+  function matchListing(l, x, anyType) {
+    if (x.availability === 'Not Available' || (!anyType && x.type !== (l.inquiry === 'Rent' ? 'For Rent' : 'For Sale'))) return null;
     const chips = [];
-    chips.push(['Location', x.city === l.city]);
+    // "BGC", "Taguig" and "Taguig (BGC)" are the same place; a lead may name several areas
+    chips.push(['Location', x.city === l.city || SH.citiesIn(l.city + ' ' + (l.location || '')).includes(x.city)]);
     chips.push(['Bedrooms', x.bedrooms === l.bedrooms]);
     if (l.budget) chips.push(['Budget', x.price <= l.budget * 1.15]);
     if (l.pets === 'With Pets') chips.push(['Pets', x.petFriendly]);
@@ -641,14 +653,115 @@
         ${extra && extra.chips ? `<div class="mchips">${extra.chips.map(([k, hit]) => `<span class="mchip ${hit ? 'hit' : 'miss'}">${hit ? '✓' : '✗'} ${esc(k)}</span>`).join('')}</div>` : ''}
         ${extra && extra.action || ''}</div></div>`;
   }
+  // ---- Properties tab: the client's matches plus the VA's own search (filters kept per open lead) ----
+  const PF0 = () => ({ q: '', cities: [], beds: [], type: '', priceMin: '', priceMax: '', furnishing: '', pets: false, all: false });
+  function pfFor(l) { if (!S.pf || S.pf.lead !== l.id) { S.pf = { lead: l.id, f: PF0(), limit: 24 }; } return S.pf.f; }
+  const pfCount = (f) => f.cities.length + f.beds.length + ['q', 'type', 'priceMin', 'priceMax', 'furnishing'].filter((k) => f[k]).length + (f.pets ? 1 : 0) + (f.all ? 1 : 0);
+  /** Cities that listings are in, most listings first (Taguig (BGC) etc. are already one label each). */
+  function listingCities() { const n = {}; D.listings.forEach((x) => { n[x.city] = (n[x.city] || 0) + 1; }); return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b)); }
+  /** Matches for the lead, narrowed by the VA's filters. f.all = ignore the client's requirements (any available unit). */
+  function propResults(l) {
+    const f = pfFor(l);
+    const scored = D.listings.map((x) => [x, matchListing(l, x, f.all || !!f.type)]).filter(([, m]) => m);
+    const xs = SH.filterListings(scored.map(([x]) => x), { ...f, available: true }), keep = new Set(xs);
+    return scored.filter(([x]) => keep.has(x)).sort((a, b) => b[1].score - a[1].score);
+  }
   function propsPanel(l) {
-    const matches = D.listings.map((x) => [x, matchListing(l, x)]).filter(([, m]) => m).sort((a, b) => b[1].score - a[1].score);
-    const req = [l.inquiry, l.city, bedsTxt(l.bedrooms), l.budget ? 'up to ' + money(l.budget) : 'budget unknown', l.pets === 'With Pets' ? 'with pets' : ''].filter(Boolean);
-    const book = canEdit('calendar');
-    return `<div class="reqbar" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">${req.map((r) => `<span class="fchip" style="padding-right:10px">${esc(r)}</span>`).join('')}</div>
-      <div class="sub" style="margin-bottom:12px">${matches.length} matching ${DEMO ? 'demo ' : ''}listings, best match first. Hidden: not available, and ${l.inquiry === 'Rent' ? 'for sale' : 'for rent'} units. Ranked by location, budget (±15%), bedrooms and pets.${readOnlySource() ? ' Booking is off for read-only Monday data.' : ''}</div>
-      ${matches.length ? `<div class="lgrid">${matches.slice(0, 24).map(([x, m]) => listingCard(x, { score: m.score, chips: m.chips,
-        action: book ? `<button class="btn sm" data-act="book" data-id="${esc(x.id)}">📅 Book Viewing</button>` : '' })).join('')}</div>` : '<div class="empty">No matching listings.</div>'}`;
+    const f = pfFor(l), req = [l.inquiry, l.city, bedsTxt(l.bedrooms), l.budget ? 'up to ' + money(l.budget) : 'budget unknown', l.pets === 'With Pets' ? 'with pets' : ''].filter(Boolean);
+    const chip = (k, v, label) => `<button type="button" class="gchip ${f[k].includes(v) ? 'on' : ''}" data-act="pfchip" data-k="${k}" data-v="${esc(v)}" aria-pressed="${f[k].includes(v)}">${esc(label || v)}</button>`;
+    const n = pfCount(f);
+    return `<div class="reqbar" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"><b class="sub" style="align-self:center">Client wants:</b>${req.map((r) => `<span class="fchip" style="padding-right:10px">${esc(r)}</span>`).join('')}</div>
+      <details class="pfbox" ${n || S.pfOpen ? 'open' : ''}><summary>🔎 <b>Search properties yourself</b>${n ? ` <span class="pill" style="--c:var(--accent)">${n} filter${n === 1 ? '' : 's'} on</span>` : ''}</summary>
+        <div class="pf-row"><span class="pf-l">Search</span><input type="search" data-in="pfq" value="${esc(f.q)}" placeholder="Building, unit or listing ID…" aria-label="Search listings" autocomplete="off"></div>
+        <div class="pf-row"><span class="pf-l">City</span><div class="gchips">${listingCities().slice(0, 14).map((c) => chip('cities', c)).join('')}</div></div>
+        <div class="pf-row"><span class="pf-l">Bedrooms</span><div class="gchips">${LISTS.bedrooms.map((b) => chip('beds', b, b === 'Studio' ? 'Studio' : b + ' BR')).join('')}</div></div>
+        <div class="pf-row pf-g">
+          <label>Rent / sale<select data-ch="pftype"><option value="">Client's (${esc(l.inquiry === 'Rent' ? 'for rent' : 'for sale')})</option><option value="For Rent" ${f.type === 'For Rent' ? 'selected' : ''}>For rent</option><option value="For Sale" ${f.type === 'For Sale' ? 'selected' : ''}>For sale</option></select></label>
+          <label>Min price<input type="number" min="0" step="1000" inputmode="numeric" data-in="pfmin" value="${esc(f.priceMin)}" placeholder="₱"></label>
+          <label>Max price<input type="number" min="0" step="1000" inputmode="numeric" data-in="pfmax" value="${esc(f.priceMax)}" placeholder="₱"></label>
+          <label>Furnishing<select data-ch="pffurn"><option value="">Any</option>${LISTS.furnishing.map((x) => `<option ${f.furnishing === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label></div>
+        <div class="pf-row pf-ck"><label><input type="checkbox" data-ch="pfpets" ${f.pets ? 'checked' : ''}> Pet-friendly</label>
+          <label><input type="checkbox" data-ch="pfall" ${f.all ? 'checked' : ''}> Ignore the client's requirements</label>
+          ${n ? '<button type="button" class="btn sm" data-act="pfclear">Clear all filters</button>' : ''}</div>
+      </details>
+      <div id="propsResults">${propsResultsHtml(l)}</div>`;
+  }
+  function propsResultsHtml(l) {
+    const f = pfFor(l), matches = propResults(l), lim = S.pf.limit, book = canEdit('calendar'), ask = canAsk();
+    const asked = new Set((askState(l).list || []).map((a) => a.listingId));
+    return `<div class="sub" style="margin:10px 0 12px" role="status">${matches.length} ${f.all ? 'available' : 'matching'} ${DEMO ? 'demo ' : ''}listing${matches.length === 1 ? '' : 's'}${pfCount(f) ? ' with your filters' : ''}, best match first. Hidden: not available${f.all || f.type ? '' : `, and ${l.inquiry === 'Rent' ? 'for sale' : 'for rent'} units`}. Ranked by location, budget (±15%), bedrooms and pets.${readOnlySource() ? ' Booking is off for read-only Monday data.' : ''}</div>
+      ${matches.length ? `<div class="lgrid">${matches.slice(0, lim).map(([x, m]) => listingCard(x, { score: m.score, chips: m.chips,
+        action: [book ? `<button class="btn sm" data-act="book" data-id="${esc(x.id)}">📅 Book Viewing</button>` : '',
+          ask ? (asked.has(x.id) ? `<button class="btn sm ghost" data-act="tab" data-v="asking">✓ In Asking for Availability</button>` : `<button class="btn sm" data-act="askadd" data-id="${esc(x.id)}">❓ Ask availability</button>`) : ''].join(' ') })).join('')}</div>
+        ${matches.length > lim ? `<div style="text-align:center;margin-top:12px"><button class="btn" data-act="pfmore">Show more (${matches.length - lim} left)</button></div>` : ''}`
+        : `<div class="empty">No listings match.${pfCount(f) ? ' <button class="linkbtn" data-act="pfclear">Clear all filters</button>' : ''}</div>`}`;
+  }
+  const renderPropsResults = () => { const l = leadById(S.open), box = $('#propsResults'); if (l && box) box.innerHTML = propsResultsHtml(l); };
+  const PF_IN = { pfq: 'q', pfmin: 'priceMin', pfmax: 'priceMax' };
+  /** Redraws the Properties tab and puts focus back on the control that changed. */
+  function refreshPropsPanel(l, focusSel) {
+    if (S.open !== l.id || S.tab !== 'props') return;
+    const b = $('#dbody'), y = b ? b.scrollTop : 0;
+    renderDrawerBody(); if (b) b.scrollTop = y;
+    const el = focusSel && $('#dbody ' + focusSel); if (el) el.focus({ preventScroll: true });
+  }
+  /** One filter changed. Typed fields redraw only the results, so the cursor stays where it is. */
+  function pfSet(k, v, typed) {
+    const l = leadById(S.open); if (!l) return;
+    const f = pfFor(l); f[k] = v; S.pf.limit = 24; S.pfOpen = true;
+    if (typed) { renderPropsResults(); const s = $('#dbody .pfbox summary'); if (s) { const n = pfCount(f); s.innerHTML = `🔎 <b>Search properties yourself</b>${n ? ` <span class="pill" style="--c:var(--accent)">${n} filter${n === 1 ? '' : 's'} on</span>` : ''}`; } }
+    else refreshPropsPanel(l, `[data-ch="${{ type: 'pftype', furnishing: 'pffurn', pets: 'pfpets', all: 'pfall' }[k]}"]`);
+  }
+
+  // ---- Asking for Availability: units the VA is checking with owners (MongoDB / this browser; nothing is sent) ----
+  const canAsk = () => access('leads') === 'edit';
+  const leadSrc = () => (DEMO ? 'demo' : S.source === 'monday' ? 'monday' : 'mongo');
+  const askKey = (l) => leadSrc() + ':' + l.id;
+  function askState(l) { S.asking = S.asking || {}; return S.asking[askKey(l)] || {}; }
+  async function loadAsking(l, force) {
+    const k = askKey(l), cur = (S.asking = S.asking || {})[k];
+    // after an error only "Try again" (force) loads again; redraws never refetch in a loop. A forced load always runs and
+    // the newest one wins, so a slower earlier reply can't overwrite it
+    if (cur && !force && (cur.loading || cur.list || cur.error)) return;
+    const seqs = S.askSeq = S.askSeq || {}, seq = seqs[k] = (seqs[k] || 0) + 1;   // per lead
+    S.asking[k] = { loading: true, list: cur && cur.list };
+    let next;
+    try { next = { list: await backend.askList(l) }; } catch (e) { if (signedOut(e)) return; next = { error: e.message }; }
+    if (seq !== seqs[k]) return;
+    S.asking[k] = next;
+    if (S.open === l.id) { if (S.tab === 'asking') renderDrawerBody(); else if (S.tab === 'props') renderPropsResults(); updateAskTab(l); }
+  }
+  function updateAskTab(l) { const t = $('#drawer .tab[data-v="asking"]'); if (t) t.textContent = askTabLabel(l); }
+  const askTabLabel = (l) => { const n = (askState(l).list || []).filter((a) => a.status === 'asking').length; return 'Asking for Availability' + (n ? ` (${n})` : ''); };
+  const ASK_ST = { asking: ['Asking owner', '#d29922'], available: ['Owner confirmed available', '#3fb950'], unavailable: ['Not available', '#8b949e'] };
+  const VIA_LABEL = { call: 'Call', whatsapp: 'WhatsApp', viber: 'Viber' };
+  function askingPanel(l) {
+    const st = askState(l);
+    if (!st.list) return st.error ? `<div class="src-err" role="alert">${esc(st.error)} <button class="linkbtn" data-act="askreload">Try again</button></div>` : '<div class="muted">Loading…</div>';
+    const intro = `<div class="sub" style="margin-bottom:12px">Units you're checking with owners for this client. Saved ${DEMO ? 'in this browser (demo)' : 'in the portal (MongoDB)'}: nothing is written to Monday.com, and no message is sent. The Call / WhatsApp / Viber buttons open on your own device only when you tap them.</div>`;
+    if (!st.list.length) return intro + `<div class="empty">No units here yet. On the Properties tab, press <b>❓ Ask availability</b> on a unit.${canAsk() ? ' <button class="linkbtn" data-act="tab" data-v="props">Go to Properties</button>' : ''}</div>`;
+    const edit = canAsk();
+    return intro + `<div class="asklist">${st.list.map((a) => {
+      const x = listingById(a.listingId), links = x && SH.contactLinks(x.contactPhone), log = a.contacts || [], last = log[log.length - 1];
+      const [label, color] = ASK_ST[a.status] || ASK_ST.asking;
+      const via = (k, icon) => links ? `<a class="btn sm" href="${esc(links[k])}" ${k === 'whatsapp' ? 'target="_blank" rel="noopener noreferrer"' : ''} data-act="askcontact" data-rid="${esc(a.id)}" data-via="${k}" aria-label="${esc(VIA_LABEL[k] + ' the owner of ' + (x ? x.building : a.listingName))}">${icon} ${VIA_LABEL[k]}</a>` : '';
+      return `<div class="askcard"><div class="ask-h"><div style="min-width:0"><b>${esc(x ? x.building : a.listingName || 'Listing ' + a.listingId)}</b>
+          <div class="sub">${esc([x && x.code, x && x.city, x && money(x.price)].filter(Boolean).join(' · ') || 'This listing is no longer on the board')}</div></div>${pill(label, color)}</div>
+        <div class="ask-owner"><span class="sub">Owner: ${esc((x && x.contact) || '—')}${links ? ' · ' + esc(links.number) : ''}</span>
+          ${links ? `<div class="ask-links">${via('call', '📞')}${via('whatsapp', '💬')}${via('viber', '📳')}</div>` : '<div class="sub">No owner number on this listing, so there are no call / WhatsApp / Viber links. Add it on the Listings board.</div>'}
+          ${last ? `<div class="sub" style="font-size:11.5px">Last contact: ${esc(VIA_LABEL[last.via])} · ${esc(last.by || '')} · ${esc(ago(last.at))}</div>` : ''}</div>
+        ${edit ? `<div class="ask-act">${a.status !== 'available' ? `<button class="btn sm primary" data-act="askstatus" data-rid="${esc(a.id)}" data-v="available">✓ Owner confirmed available</button>` : ''}
+          ${a.status !== 'unavailable' ? `<button class="btn sm" data-act="askstatus" data-rid="${esc(a.id)}" data-v="unavailable">✕ Not available</button>` : ''}
+          ${a.status !== 'asking' ? `<button class="btn sm ghost" data-act="askstatus" data-rid="${esc(a.id)}" data-v="asking">↺ Still asking</button>` : ''}
+          <button class="linkbtn" data-act="askdel" data-rid="${esc(a.id)}">Remove</button></div>` : ''}</div>`; }).join('')}</div>
+      <div class="foot-note">Up to ${SH.ASK.maxPerLead} units per lead; each unit is listed once.</div>`;
+  }
+  async function askDo(l, fn, okMsg) {
+    const k = askKey(l);
+    try { await fn(); } catch (e) { if (!signedOut(e)) toast(e.message || 'Something went wrong.', true); return; }
+    if (okMsg) toast(okMsg);
+    if (S.open === l.id) { if (S.tab === 'asking') renderDrawerBody(); else if (S.tab === 'props') renderPropsResults(); updateAskTab(l); }
+    return S.asking[k];
   }
   function viewingsPanel(l, sts) {
     const list = leadViewings(l, sts), edit = canEdit('calendar');
@@ -765,17 +878,29 @@
   }
 
   // ---------- Inventory Dashboard (also the property browser) ----------
+  /**
+   * Cities for the inventory: the usual ones first, then any other city the listings are in, then "City not set".
+   * Each listing has exactly one city (set when it was read; BGC towers and "Taguig" are both "Taguig (BGC)"),
+   * so the rows add up to the total and nothing is counted twice.
+   */
+  function invCities() {
+    const n = {}; D.listings.forEach((x) => { const c = x.city || 'City not set'; n[c] = (n[c] || 0) + 1; });
+    const extra = Object.keys(n).filter((c) => !LISTS.cities.includes(c) && c !== 'City not set').sort((a, b) => n[b] - n[a] || a.localeCompare(b));
+    return LISTS.cities.concat(extra, n['City not set'] ? ['City not set'] : []);
+  }
   function invView() {
-    const L = D.listings, f = S.inv, opt = (v, cur) => `<option ${cur === v ? 'selected' : ''}>${esc(v)}</option>`;
-    const byCity = LISTS.cities.map((c) => { const xs = L.filter((x) => x.city === c); return [c, xs.length, xs.filter((x) => x.type === 'For Rent').length, xs.filter((x) => x.type === 'For Sale').length, xs.filter((x) => x.availability === 'Available').length]; });
+    const L = D.listings, f = S.inv, opt = (v, cur) => `<option ${cur === v ? 'selected' : ''}>${esc(v)}</option>`, cityOf = (x) => x.city || 'City not set';
+    const byCity = invCities().map((c) => { const xs = L.filter((x) => cityOf(x) === c); return [c, xs.length, xs.filter((x) => x.type === 'For Rent').length, xs.filter((x) => x.type === 'For Sale').length, xs.filter((x) => x.availability === 'Available').length]; });
+    const tg = L.filter((x) => x.city === 'Taguig (BGC)');
     return `<div class="cards"><div class="card"><div class="n">${L.length}</div><div class="l">Listings</div></div>
+        <div class="card" title="Listings whose City is Taguig or BGC, or with no City but a BGC building; each listing counted once"><div class="n">${tg.length}</div><div class="l">Taguig (BGC) · ${tg.filter((x) => x.availability === 'Available').length} available</div></div>
         ${LISTS.availability.map((a) => `<div class="card"><div class="n">${L.filter((x) => x.availability === a).length}</div><div class="l">${a}</div></div>`).join('')}
         <div class="card"><div class="n">${L.filter((x) => x.type === 'For Rent').length} / ${L.filter((x) => x.type === 'For Sale').length}</div><div class="l">For rent / for sale</div></div></div>
       <div class="panel"><h3>By city <span class="muted">${SRC}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>City</th><th class="num">Listings</th><th class="num">For rent</th><th class="num">For sale</th><th class="num">Available</th></tr></thead><tbody>
         ${byCity.map((r) => `<tr class="click" data-act="invcity" data-v="${esc(r[0])}"><td>${esc(r[0])}</td>${r.slice(1).map((n) => `<td class="num ${n ? '' : 'zero'}">${n}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>
       <div class="panel"><h3>Listings</h3><div class="pad">
         <div class="toolbar"><div class="search">${P('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>')}<input data-in="invq" value="${esc(f.q)}" placeholder="Search building or listing ID…" autocomplete="off"></div>
-          <select data-ch="invcity"><option value="">All cities</option>${LISTS.cities.map((c) => opt(c, f.city)).join('')}</select>
+          <select data-ch="invcity"><option value="">All cities</option>${invCities().map((c) => opt(c, f.city)).join('')}</select>
           <select data-ch="invtype"><option value="">Rent &amp; sale</option>${opt('For Rent', f.type)}${opt('For Sale', f.type)}</select>
           <select data-ch="invbeds"><option value="">Bedrooms</option>${LISTS.bedrooms.map((b) => opt(b, f.beds)).join('')}</select>
           <select data-ch="invavail"><option value="">Any availability</option>${LISTS.availability.map((a) => opt(a, f.avail)).join('')}</select></div>
@@ -783,10 +908,13 @@
   }
   function renderInventory() {
     const f = S.inv, q = f.q.trim().toLowerCase();
-    const xs = D.listings.filter((x) => (!q || (x.building + ' ' + x.code).toLowerCase().includes(q)) && (!f.city || x.city === f.city) && (!f.type || x.type === f.type) && (!f.beds || x.bedrooms === f.beds) && (!f.avail || x.availability === f.avail));
+    const xs = D.listings.filter((x) => (!q || (x.building + ' ' + x.code).toLowerCase().includes(q)) && (!f.city || (x.city || 'City not set') === f.city) && (!f.type || x.type === f.type) && (!f.beds || x.bedrooms === f.beds) && (!f.avail || x.availability === f.avail));
     const edit = canEdit('invdash');
     $('#invCount').textContent = `${xs.length} of ${D.listings.length} ${DEMO ? 'demo ' : ''}listings`;
-    $('#invGrid').innerHTML = xs.map((x) => listingCard(x, { action: edit ? `<select data-ch="avail" data-id="${esc(x.id)}" style="padding:5px 8px;font-size:12.5px" aria-label="Availability">${LISTS.availability.map((a) => `<option ${x.availability === a ? 'selected' : ''}>${a}</option>`).join('')}</select>` : '' })).join('') || '<div class="empty">No listings match.</div>';
+    // drawn in pages, so a board with thousands of listings doesn't ask for thousands of photos at once
+    const lim = S.inv.limit || 120;
+    $('#invGrid').innerHTML = (xs.slice(0, lim).map((x) => listingCard(x, { action: edit ? `<select data-ch="avail" data-id="${esc(x.id)}" style="padding:5px 8px;font-size:12.5px" aria-label="Availability">${LISTS.availability.map((a) => `<option ${x.availability === a ? 'selected' : ''}>${a}</option>`).join('')}</select>` : '' })).join('') || '<div class="empty">No listings match.</div>')
+      + (xs.length > lim ? `<div style="grid-column:1/-1;text-align:center"><button class="btn" data-act="invmore">Show more (${xs.length - lim} left)</button></div>` : '');
   }
 
   // ---------- Leads Report / Daily Report ----------
@@ -818,6 +946,30 @@
   function dailyView() {
     return `<div class="panel"><h3>Daily Report <span class="muted">for the broker group · lead IDs only, no client names or numbers</span><span class="spacer"></span><button class="btn sm" data-act="copydaily">Copy text</button></h3><pre class="report">${esc(dailyText())}</pre></div>
       <div class="sub">Posting to the broker group is not connected in the preview.</div>`;
+  }
+  // ---------- Property Requirements (read-only text for the broker channel; rules in prop-report.js) ----------
+  const PR = window.BH_PROPREPORT;
+  const prDate = () => (SH.isYmd(S.prDate) ? S.prDate : today());
+  const propReqText = () => PR.buildReport(visibleLeads(), prDate());
+  function propReqView() {
+    const list = PR.sourcingLeads(visibleLeads()), rent = list.filter((l) => l.inquiry === 'Rent').length, sale = list.filter((l) => l.inquiry === 'Buy').length;
+    return `<div class="cards"><div class="card"><div class="n">${list.length}</div><div class="l">Active leads in Property Matching</div></div>
+        <div class="card"><div class="n">${rent}</div><div class="l">Rent</div></div><div class="card"><div class="n">${sale}</div><div class="l">Sale</div></div></div>
+      <div class="panel"><h3>Property Requirements <span class="muted">preview of the text to paste in Viber · no client names, numbers or lead IDs</span></h3>
+        <div class="pr-bar"><label class="pr-date">Report date <input type="date" data-ch="prdate" value="${esc(prDate())}" required></label>
+          ${prDate() !== today() ? '<button type="button" class="btn" data-act="prtoday">Today</button>' : ''}<span class="spacer"></span>
+          <button type="button" class="btn primary" id="prCopy" data-act="copypropreq">Copy report</button></div>
+        <pre class="report" id="prText" aria-label="Report preview">${esc(propReqText())}</pre></div>
+      <div class="sub">Included: leads you can see whose stage is <b>Property Matching</b> (from the Calendar, Monday AI STATUS and Next Action/Status, with or without a respond.io chat), unless the Temperature is Lost or Dead or the Client Status says closed/failed. The date only sets the heading; the leads are today's records.
+        Missing details, including a pet preference that was never given, show “${esc(PR.NA)}”. Building, SQM, bathrooms, parking and furnishing are edited under <b>Unit Preferences</b> in each lead's details.${DEMO ? ' <b>This is fictional demo data.</b>' : ''} Nothing is sent to Viber.</div>`;
+  }
+  /** Copies with the Clipboard API; falls back to a hidden textarea where that API isn't available. */
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return; }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { if (!document.execCommand('copy')) throw new Error('copy refused'); } finally { ta.remove(); }
   }
 
   // ---------- Settings ----------
@@ -940,7 +1092,8 @@
     const pick = () => (prefer && root.querySelector(prefer)) || root.querySelector('[autofocus]') || root.querySelector(FOCUSABLE);
     const el = pick(); if (!el) return;
     el.focus();
-    if (document.activeElement !== el) setTimeout(() => { const again = pick(); if (again) again.focus(); }, 60);   // panel still sliding in
+    // panel still sliding in: try once more, unless something else has been focused meanwhile
+    if (document.activeElement !== el) setTimeout(() => { const a = document.activeElement; if (a && a !== document.body && a !== root) return; const again = pick(); if (again) again.focus(); }, 60);
   }
   function openModal(html, opts) {
     S.modalReturn = document.activeElement;
@@ -948,6 +1101,27 @@
     m.innerHTML = `<div class="box ${opts && opts.sheet ? 'sheet' : ''}" role="document">${opts && opts.form ? `<form id="modalForm" data-submit="${opts.form}" novalidate>${html}</form>` : html}</div>`;
     m.classList.add('open'); m.setAttribute('aria-labelledby', 'modalTitle');
     focusIn(m);
+  }
+  /** "Mark as Failed": a portal override with a reason; Monday's Client Status / AI STATUS stay as they are. */
+  function failModal() {
+    const l = leadById(S.open); if (!l) return;
+    S.modal = { kind: 'fail' };
+    const onMonday = !DEMO && S.source === 'monday';
+    openModal(`<h3 id="modalTitle">Mark ${esc(l.name)} as Failed</h3>
+      <p class="sub">This is a <b>portal override</b>: AI Status shows <b>Failed</b> in the portal, labelled as an override, and it's saved ${DEMO ? 'in this browser (demo)' : 'in MongoDB'}.${onMonday ? ' <b>Nothing is written to Monday.com</b>: its Client Status and AI STATUS stay as they are until someone changes them there.' : ''} You can remove the override at any time.</p>
+      <div class="grid"><label class="full">Reason<select id="failQuick"><option value="">Pick a reason…</option>${LISTS.failReasons.map((r) => `<option>${esc(r)}</option>`).join('')}</select></label>
+        <label class="full">Details (optional)<input id="failText" maxlength="200" placeholder="e.g. no reply after 3 follow-ups"></label></div>
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="submit" class="btn primary danger">Mark as Failed</button></div>`, { form: 'fail' });
+    focusIn($('#modal'), '#failQuick');
+  }
+  async function saveFail() {
+    const l = leadById(S.open); if (!l) return;
+    const reason = [$('#failQuick').value, $('#failText').value.trim()].filter(Boolean).join(' · ');
+    const { value, errors } = SH.validateFailOverride({ reason });
+    if (errors.length) return toast(errors[0] === 'Give a reason (300 characters max).' ? 'Pick or type a reason.' : errors[0], true);
+    if (!(await attempt(() => backend.setOverride(l, value.reason)))) return;
+    IDX.delete(l); S.modalReturn = null; closeModal(); renderDrawer(); rerenderMain();
+    toast('Marked as Failed in the portal (override).' + (!DEMO && S.source === 'monday' ? ' Monday.com was not changed.' : ''));
   }
   function closeModal() {
     const back = S.modalReturn; S.modal = null; S.modalReturn = null;
@@ -1029,15 +1203,39 @@
     async deleteUser(u) { D.users = D.users.filter((x) => x !== u); persist(); },
     async saveTemplate(id, value) { upsert(D.templates, { id: id || 'T' + Date.now(), ...value }); persist(); },
     async deleteTemplate(id) { D.templates = D.templates.filter((x) => x.id !== id); persist(); },
+    // Asking for Availability / overrides: the same rules as the API (one record per lead + listing, bounded), in this browser
+    async askList(l) { return (D.asking = D.asking || []).filter((a) => a.leadId === l.id); },
+    async askAdd(l, listingId) {
+      D.asking = D.asking || [];
+      const cur = D.asking.find((a) => a.leadId === l.id && a.listingId === listingId); if (cur) return { request: cur, already: true };
+      if (D.asking.filter((a) => a.leadId === l.id).length >= SH.ASK.maxPerLead) throw new Error(`This lead already has ${SH.ASK.maxPerLead} units in Asking for Availability. Remove some first.`);
+      const x = listingById(listingId), a = { id: 'A' + Date.now(), leadId: l.id, listingId, listingName: x ? x.building : '', status: 'asking', contacts: [], createdAt: nowIso() };
+      D.asking.push(a); persist(); return { request: a };
+    },
+    async askPatch(a, value) {
+      if (value.contacted) a.contacts = (a.contacts || []).concat([{ via: value.contacted, at: nowIso(), by: me().name }]).slice(-SH.ASK.logMax);
+      else a.status = value.status;
+      persist(); return a;
+    },
+    async askDel(a) { D.asking = (D.asking || []).filter((x) => x !== a); persist(); },
+    async setOverride(l, reason) {
+      if (!l.override) l.preOverride = { ai: l.ai, aiSub: l.aiSub, aiSource: l.aiSource, workStage: l.workStage };
+      SH.applyOverride(l, { failed: { reason, by: me().name, at: nowIso() } }); persist();
+    },
+    async clearOverride(l) { Object.assign(l, l.preOverride || {}); delete l.override; delete l.preOverride; persist(); },
   } : {
-    async saveLead(l, value) { const r = await API.patch('/api/leads/' + l.id, value); Object.assign(l, r.lead); if (r.note && l.notes) l.notes.push(r.note); },
+    async saveLead(l, value) {
+      const r = await API.patch('/api/leads/' + l.id, value), ov = l.override;
+      Object.assign(l, r.lead); if (ov) SH.applyOverride(l, { failed: ov });   // the portal override still applies
+      if (r.note && l.notes) l.notes.push(r.note);
+    },
     async addNote(l, text) { const r = await API.post(`/api/leads/${l.id}/notes`, { text }); if (l.notes) l.notes.push(r.note); },
     async book(l, listing, b) {
       const r = await API.post('/api/viewings', { leadId: l.id, listingId: listing.id, ...b });
       D.calendar.push(r.viewing); Object.assign(l, r.lead); if (l.notes) l.notes.push(r.note);
     },
     async patchViewing(v, value) { Object.assign(v, (await API.patch('/api/viewings/' + v.id, value)).viewing); },
-    async setAvailability(x, availability) { Object.assign(x, (await API.patch('/api/listings/' + x.id, { availability })).listing); },
+    async setAvailability(x, availability) { x.availability = (await API.patch('/api/listings/' + x.id, { availability })).listing.availability; },   // keeps the normalised city
     async saveUser(prev, value) {
       const r = prev ? await API.patch('/api/team/' + prev.id, value) : await API.post('/api/team', value);
       upsert(D.users, r.user); if (S.user && r.user.id === S.user.id) S.user = r.user;
@@ -1045,6 +1243,20 @@
     async deleteUser(u) { await API.del('/api/team/' + u.id); D.users = D.users.filter((x) => x !== u); },
     async saveTemplate(id, value) { upsert(D.templates, (id ? await API.patch('/api/templates/' + id, value) : await API.post('/api/templates', value)).template); },
     async deleteTemplate(id) { await API.del('/api/templates/' + id); D.templates = D.templates.filter((x) => x.id !== id); },
+    // portal records (MongoDB) for a lead from either source; Monday.com and respond.io are never written to
+    async askList(l) { return (await API.get(`/api/leads/${leadSrc()}/${encodeURIComponent(l.id)}/asking`)).requests; },
+    async askAdd(l, listingId) { return API.post(`/api/leads/${leadSrc()}/${encodeURIComponent(l.id)}/asking`, { listingId }); },
+    async askPatch(a, value) { return Object.assign(a, (await API.patch('/api/asking/' + a.id, value)).request); },
+    async askDel(a) { await API.del('/api/asking/' + a.id); },
+    async setOverride(l, reason) {
+      const r = await API.put(`/api/leads/${leadSrc()}/${encodeURIComponent(l.id)}/override`, { reason });
+      if (!l.override) l.preOverride = { ai: l.ai, aiSub: l.aiSub, aiSource: l.aiSource, workStage: l.workStage };
+      SH.applyOverride(l, r.override);
+    },
+    async clearOverride(l) {
+      const r = await API.del(`/api/leads/${leadSrc()}/${encodeURIComponent(l.id)}/override`);
+      Object.assign(l, r.lead || l.preOverride || {}); delete l.override; delete l.preOverride;
+    },
   };
   /** Runs a data-layer call; shows the error and returns false on failure. */
   async function attempt(fn) {
@@ -1147,26 +1359,49 @@
    * Needs VA Reply / Waiting on Client, Temperature and Days in Stage for Monday leads, from respond.io (read-only).
    * The server checks up to 60 chats per call (like the original); we ask again while some are pending.
    */
-  async function pollReplyStates(token) {
+  /**
+   * Rounds run until nothing is pending. respond.io slowing us down → wait what the server says; a failed request or a
+   * round that makes no progress → stop and try the whole check again later (30 s, 1, 2, 4, then every 5 min), so no
+   * lead is left on "Checking…". Leads whose own check failed show "Check failed"; the server retries those by itself.
+   */
+  async function pollReplyStates(token, attempt = 0) {
     const r0 = S.integ && S.integ.respond;
     // list-wide checks are off unless the server switches them on (RESPOND_LIST_CHECKS=on): chats are read per lead
     if (DEMO || S.source !== 'monday' || !r0 || !r0.configured || !r0.listChecks) { S.rsInfo = null; return; }
-    S.rsInfo = { busy: true, linked: 0, pending: 0, error: '' }; renderModeBar();
-    for (let round = 0; round < 40; round++) {
+    clearTimeout(S.rsRetryT);
+    const alive = () => token === S.srcToken && S.source === 'monday' && !!S.user;
+    const later = (why, ms) => {
+      const wait = ms || Math.min(300e3, 30e3 * 2 ** attempt);
+      S.rsInfo = { ...(S.rsInfo || {}), busy: false, error: why, retryAt: Date.now() + wait };
+      S.rsRetryT = setTimeout(() => { if (alive()) pollReplyStates(token, attempt + 1); }, wait);
+    };
+    S.rsInfo = { ...(S.rsInfo || {}), busy: true, error: '', retryAt: 0 }; renderModeBar(); refreshLeadRows();
+    let lastPending = -1, stuck = 0;
+    for (let round = 0; ; round++) {
       let r;
-      try { r = await API.get('/api/respond/reply-states'); } catch (e) { if (signedOut(e)) return; if (token === S.srcToken) S.rsInfo = { busy: false, error: e.message }; break; }
-      if (token !== S.srcToken || S.source !== 'monday') return;   // source changed or reloaded meanwhile
+      try { r = await API.get('/api/respond/reply-states'); } catch (e) { if (signedOut(e) || !alive()) return; later(e.message); break; }
+      if (!alive()) return;   // source changed or reloaded meanwhile
       Object.entries(r.leads || {}).forEach(([id, v]) => { const l = leadById(id); if (l) { Object.assign(l, v); IDX.delete(l); } });
-      const errs = Object.entries(r.errors || {});
-      S.rsInfo = { busy: r.pending > 0, linked: r.linked, pending: r.pending, error: errs.length ? (r.errors._ || errs.length + ' chat' + (errs.length > 1 ? 's' : '') + ' could not be read: ' + errs[0][1]) : '', at: r.checkedAt };
-      if (S.view === 'leads' && $('#list')) { refreshLeads(false); renderSide(); }
-      renderModeBar();
-      if (!r.pending || (r.errors && r.errors._)) break;
-      await new Promise((res) => setTimeout(res, 1500));
+      const errs = Object.entries(r.errors || {}).filter(([k]) => k !== '_');
+      S.rsInfo = { busy: r.pending > 0, linked: r.linked, pending: r.pending, at: r.checkedAt, retryAt: 0,
+        error: r.errors && r.errors._ ? r.errors._ : errs.length ? errs.length + ' chat' + (errs.length > 1 ? 's' : '') + ' could not be read: ' + errs[0][1] : '' };
+      refreshLeadRows(); renderModeBar();
+      if (!r.pending) break;
+      if (r.retryAfterMs > 120e3) { later(S.rsInfo.error || 'respond.io refused the request.', r.retryAfterMs); break; }   // e.g. a rejected token: much later
+      stuck = r.pending >= lastPending && lastPending >= 0 && !r.checked ? stuck + 1 : 0; lastPending = r.pending;
+      if ((r.errors && r.errors._ && !r.retryAfterMs) || stuck >= 3 || round >= 60) { later(S.rsInfo.error || 'respond.io checks are not progressing.'); break; }
+      await new Promise((res) => setTimeout(res, r.retryAfterMs || 1500));
+      if (!alive()) return;
     }
-    if (S.rsInfo && token === S.srcToken) { S.rsInfo.busy = false; renderModeBar(); }
+    if (S.rsInfo && alive() && !S.rsInfo.retryAt) {
+      S.rsInfo.busy = false;
+      // leads whose own check failed: the server waits 2 min before trying them again, so come back for them then
+      if (D.leads.some((l) => l.replyError)) { S.rsInfo.retryAt = Date.now() + 130e3; S.rsRetryT = setTimeout(() => { if (alive()) pollReplyStates(token, 0); }, 130e3); }
+    }
+    refreshLeadRows(); renderModeBar();
     refreshStatus();
   }
+  function refreshLeadRows() { if (S.view === 'leads' && $('#list')) { refreshLeads(false); renderSide(); } }
   // why a Google sign-in was refused (codes from the API's /api/auth/google/callback; never details of the account)
   const SIGNIN_ERRORS = {
     not_member: 'That Google account isn\'t on the team. Ask a Manager to add your email address in Settings → Team & Access, then try again.',
@@ -1263,7 +1498,8 @@
     viewing: (el) => viewingModal(el.dataset.id),
     mclose: closeModal,
     calmove: (el) => { const d = +el.dataset.v, m = S.calMonth; S.calMonth = d === 0 ? null : new Date(m.getFullYear(), m.getMonth() + d, 1); renderView(); },
-    invcity: (el) => { S.inv.city = el.dataset.v; renderView(); const g = $('#invGrid'); if (g) g.scrollIntoView({ behavior: 'smooth' }); },
+    invmore: () => { S.inv.limit = (S.inv.limit || 120) + 120; renderInventory(); },
+    invcity: (el) => { S.inv.city = el.dataset.v; S.inv.limit = 120; renderView(); const g = $('#invGrid'); if (g) g.scrollIntoView({ behavior: 'smooth' }); },
     filterva: (el) => { if (!isManager()) return; S.view = 'leads'; S.va = el.dataset.v; S.wait = ''; savePrefs(); render(); },
     settab: (el) => { S.setTab = el.dataset.v; renderView(); if (S.setTab === 'integ') refreshStatus().then(() => { if (S.view === 'team' && S.setTab === 'integ') renderView(); }); },
     integstatus: async () => { await refreshStatus(); renderView(); },
@@ -1295,6 +1531,13 @@
       const done = () => toast('Copied. Paste it wherever you like; nothing was posted.');
       if (navigator.clipboard) navigator.clipboard.writeText(dailyText()).then(done, () => toast('Copy was blocked by the browser.', true)); else toast('Copy isn\'t available here.', true);
     },
+    copypropreq: async (el) => {
+      const text = propReqText(), n = PR.sourcingLeads(visibleLeads()).length;
+      try { await copyText(text); } catch (e) { return toast('Copy was blocked by the browser. Select the preview text and copy it by hand.', true); }
+      toast(`Report copied (${n} requirement${n === 1 ? '' : 's'}). Paste it in the Viber channel; nothing was posted.`);
+      el.textContent = 'Copied ✓'; clearTimeout(el.t); el.t = setTimeout(() => { el.textContent = 'Copy report'; }, 2000);
+    },
+    prtoday: () => { S.prDate = ''; renderView(); },
     refresh: async () => {
       if (DEMO) return toast('Demo data doesn\'t change on its own. In the live portal, Refresh reloads from Monday.com.');
       if (S.open && Object.keys(S.draft).length) return toast('Save or discard your changes first.', true);
@@ -1328,6 +1571,41 @@
       if (cnt) cnt.textContent = (i + 1) + '/' + x.photos.length;
     },
     notwired: (el) => toast(el.dataset.v + ' is switched off in the preview (read-only; no messages are sent).'),
+    // Properties tab filters
+    pfchip: (el) => { const l = leadById(S.open); if (!l) return; const f = pfFor(l); toggle(f[el.dataset.k], el.dataset.v); S.pf.limit = 24; S.pfOpen = true; refreshPropsPanel(l, `[data-act="pfchip"][data-k="${el.dataset.k}"][data-v="${CSS.escape(el.dataset.v)}"]`); },
+    pfclear: () => { const l = leadById(S.open); if (!l) return; S.pf = { lead: l.id, f: PF0(), limit: 24 }; S.pfOpen = true; refreshPropsPanel(l, '[data-in="pfq"]'); },
+    pfmore: () => { S.pf.limit += 48; renderPropsResults(); },
+    // Asking for Availability
+    askadd: async (el) => {
+      const l = leadById(S.open); if (!l || !canAsk()) return toast('You need edit access to Leads.', true);
+      el.disabled = true;   // one request per press; the server also keeps one record per lead + listing
+      let already = false;
+      try { already = !!(await backend.askAdd(l, el.dataset.id)).already; } catch (e) { el.disabled = false; if (!signedOut(e)) toast(e.message || 'Something went wrong.', true); return; }
+      toast(already ? 'Already in Asking for Availability.' : 'Added to Asking for Availability. Nothing was sent to the owner.');
+      await loadAsking(l, true);   // the saved list (also replaces a load that was still running or had failed)
+    },
+    askcontact: (el) => {   // the link opens on the user's device (call / WhatsApp / Viber); the portal only logs that it was tapped
+      const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.rid); if (!a || !canAsk()) return;
+      backend.askPatch(a, { contacted: el.dataset.via }).then(() => { if (S.open === l.id && S.tab === 'asking') renderDrawerBody(); }).catch((e) => { if (!signedOut(e)) toast('Opened, but the contact wasn\'t logged: ' + e.message, true); });
+    },
+    askstatus: (el) => {
+      const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.rid); if (!a) return;
+      el.disabled = true;
+      askDo(l, () => backend.askPatch(a, { status: el.dataset.v }), el.dataset.v === 'available' ? 'Marked owner-confirmed. Nothing was sent.' : 'Updated.');
+    },
+    askdel: (el) => {
+      const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.rid); if (!a) return;
+      askDo(l, async () => { await backend.askDel(a); S.asking[askKey(l)] = { list: askState(l).list.filter((x) => x !== a) }; }, 'Removed from Asking for Availability.');
+    },
+    askreload: () => { const l = leadById(S.open); if (l) loadAsking(l, true); },
+    // Failed (portal override)
+    failmodal: () => { if (!isManager()) return toast('Only Managers can mark a lead as Failed.', true); failModal(); },
+    unfail: async () => {
+      if (!isManager()) return toast('Only Managers can remove a Failed override.', true);
+      const l = leadById(S.open); if (!l || !confirm('Remove the Failed override? The lead goes back to the status ' + (DEMO ? 'it had before.' : S.source === 'monday' ? 'worked out from Monday.com.' : 'saved in MongoDB.'))) return;
+      if (!(await attempt(() => backend.clearOverride(l)))) return;
+      IDX.delete(l); renderDrawer(); rerenderMain(); toast('Override removed.');
+    },
     theme: () => { S.theme = S.theme === 'dark' ? 'light' : 'dark'; savePrefs(); document.documentElement.dataset.theme = S.theme; renderSide(); },
     reset: () => {
       if (!DEMO) return;
@@ -1345,8 +1623,11 @@
     from: (el) => { S.from = el.value; filtersChanged(); },
     sort: (el) => { if (!el.value) return; S.sort = el.value; S.sortCol = ''; refreshLeads(true); },
     calbroker: (el) => { S.calBroker = el.value; renderView(); },
+    prdate: (el) => { S.prDate = SH.isYmd(el.value) ? el.value : ''; renderView(); const d = $('[data-ch="prdate"]'); if (d) d.focus(); },
     invcity: (el) => { S.inv.city = el.value; renderInventory(); }, invtype: (el) => { S.inv.type = el.value; renderInventory(); },
     invbeds: (el) => { S.inv.beds = el.value; renderInventory(); }, invavail: (el) => { S.inv.avail = el.value; renderInventory(); },
+    pftype: (el) => pfSet('type', el.value), pffurn: (el) => pfSet('furnishing', el.value),
+    pfpets: (el) => pfSet('pets', el.checked), pfall: (el) => pfSet('all', el.checked),
     avail: async (el) => {
       if (!canEdit('invdash')) return toast('You have view-only access.', true);
       const x = listingById(el.dataset.id); if (!x || !LISTS.availability.includes(el.value)) return;
@@ -1381,6 +1662,7 @@
     if (el.dataset && el.dataset.ch && CH[el.dataset.ch]) return CH[el.dataset.ch](el);
     if (el.dataset && el.dataset.field) onField(el);
   });
+  document.addEventListener('toggle', (e) => { if (e.target.classList && e.target.classList.contains('pfbox')) S.pfOpen = e.target.open; }, true);
   // a listing photo that can't be loaded falls back to the coloured placeholder (no inline handlers: CSP blocks them)
   document.addEventListener('error', (e) => { const t = e.target; if (t && t.classList && t.classList.contains('lphoto')) t.closest('.lph').classList.add('ph-err'); }, true);
   let searchT = null;
@@ -1388,6 +1670,7 @@
     const el = e.target;
     if (el.dataset.in === 'q') { clearTimeout(searchT); searchT = setTimeout(() => { S.q = el.value; refreshLeads(true); }, 120); }
     else if (el.dataset.in === 'invq') { clearTimeout(searchT); searchT = setTimeout(() => { S.inv.q = el.value; renderInventory(); }, 120); }
+    else if (PF_IN[el.dataset.in]) { const k = PF_IN[el.dataset.in], v = el.value; clearTimeout(searchT); searchT = setTimeout(() => pfSet(k, v, true), 200); }
     else if (el.dataset.field) onField(el);
   });
   /** Edits in the lead form only update the field and the footer, so typing and focus are never interrupted. */
@@ -1409,6 +1692,7 @@
       else if (f.dataset.submit === 'viewing') { const id = S.modal.id; setViewing(id, $('#vStatus').value, $('#vFeedback').value).then(() => closeModal()); }
       else if (f.dataset.submit === 'user') saveUser();
       else if (f.dataset.submit === 'tpl') saveTpl();
+      else if (f.dataset.submit === 'fail') saveFail();
     }
   });
 

@@ -97,10 +97,13 @@
         id: String(9001 + i), code: 'DEMO-' + (1001 + i),
         name: first + ' ' + last, phone: fakePhone(), email: (first + '.' + last).toLowerCase() + '@example.com',
         status: pick(STATUS_FOR_AI[ai]), ai, temp, inquiry,
+        // no respond.io chat, but the Monday record (New Inquiry) still puts the lead in property sourcing
+        ...(ai === 'Not on Respond.io' ? { workStage: 'Property Matching' } : {}),
         va: r() < 0.9 ? pick(LISTS.vas) : '', salesperson: pick(LISTS.brokers),
         source, origin: source === 'Respond IO' ? 'respond.io' : 'Monday',
         budget: r() < 0.08 ? 0 : inquiry === 'Rent' ? int(8, 120) * 5000 : int(8, 90) * 1e6,
-        city: pick(LISTS.cities), bedrooms: pick(LISTS.bedrooms), occupants: pick(LISTS.occupants), pets: r() < 0.3 ? 'With Pets' : 'No Pets',
+        // pets: '' = the client never said (Monday column left empty)
+        city: pick(LISTS.cities), bedrooms: pick(LISTS.bedrooms), occupants: pick(LISTS.occupants), pets: ((x) => (x < 0.3 ? 'With Pets' : x < 0.65 ? 'No Pets' : ''))(r()),
         requirements: [pick(REQS), r() < 0.5 ? pick(REQS) : ''].filter(Boolean).filter((v, k, a) => a.indexOf(v) === k).join('; '),
         nationality: pick(LISTS.nationalities),
         moveIn: inquiry === 'Rent' ? ymd(t0 + int(-10, 90) * DAY) : '',
@@ -113,6 +116,16 @@
       };
       leads.push(lead);
     }
+    // unit specifics for the Property Requirements report, from their own seed so the leads above stay the same
+    const r2 = rng(20261026), pick2 = (a) => a[Math.floor(r2() * a.length)];
+    leads.forEach((l) => {
+      const bi = Math.max(0, LISTS.bedrooms.indexOf(l.bedrooms));
+      l.building = r2() < 0.35 ? pick2(BUILDINGS) : '';
+      l.sqm = r2() < 0.7 ? String([30, 45, 70, 110, 160][bi] + Math.floor(r2() * 4) * 5) + '+' : '';
+      l.bathrooms = r2() < 0.75 ? LISTS.bathrooms[Math.min(3, Math.max(0, bi - 1))] : '';
+      l.parking = r2() < 0.8 ? pick2(LISTS.parking) : '';
+      l.furnishing = l.inquiry === 'Rent' && r2() < 0.8 ? pick2(LISTS.furnishing) : '';
+    });
 
     const calendar = [];
     const viewers = leads.filter((l) => ['Scheduling', 'LOI', 'Contract', 'Collection', 'Active', 'For Renewal', 'Failed'].includes(l.ai));

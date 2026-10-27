@@ -108,10 +108,12 @@ test('demo server: static app, demo config, API off, no network allowed', async 
 });
 
 test('front-end scripts parse; only api-client.js makes requests, and only to /api/', () => {
-  for (const f of ['app.js', 'demo-data.js', 'shared.js', 'api-client.js']) {
+  for (const f of ['app.js', 'demo-data.js', 'shared.js', 'prop-report.js', 'api-client.js']) {
     const src = fs.readFileSync(path.join(PUB, f), 'utf8');
     assert.doesNotThrow(() => new vm.Script(src, { filename: f }));
-    assert.doesNotMatch(src, /XMLHttpRequest|google\.script\.run|WebSocket|sendBeacon|https?:\/\//, f);
+    // the one allowed address: the WhatsApp link a user can tap on an owner's card (opened by the user's device, never fetched)
+    const allowed = f === 'shared.js' ? src.replace("'https://wa.me/'", "''") : src;
+    assert.doesNotMatch(allowed, /XMLHttpRequest|google\.script\.run|WebSocket|sendBeacon|https?:\/\//, f);
     if (f !== 'api-client.js') assert.doesNotMatch(src, /\bfetch\(/, f);
   }
   assert.match(fs.readFileSync(path.join(PUB, 'api-client.js'), 'utf8'), /\^\\\/api\\\//);

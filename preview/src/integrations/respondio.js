@@ -82,16 +82,24 @@ function createRespond(cfg, status) {
     const idleH = (now - (st.lastAt || 0)) / 3600e3;
     return st.waiting === 'va' && idleH < 24 ? 10 * 60e3 : idleH < 24 ? 15 * 60e3 : idleH < 72 ? 30 * 60e3 : 2 * 3600e3;
   };
-  /** Cached state only (no network): { st } when known, null when never checked. */
+  /**
+   * Cached state only (no network): { st } when known, { st: null, error } after a failed check (until its retry time),
+   * null when never checked or due again.
+   */
   const cachedState = (cid) => { const h = rsCache.get(cid); return h && h.until > Date.now() ? h : null; };
+  // a failed check is remembered so each lead settles on "check failed" instead of being retried every round:
+  // 2, 4, 8, 16, then every 30 minutes; the next successful read replaces it
+  // a rate limit passes in a minute; a rejected token won't fix itself, so the page waits much longer before asking again
+  const ERR_BACKOFF = [2, 4, 8, 16, 30].map((m) => m * 60e3), RATE_LIMIT_WAIT = 60e3, REJECTED_WAIT = 30 * 60e3;
   /**
    * Checks up to `max` contacts that aren't cached yet, `concurrency` at a time. Like the original, a call answers
    * in bounded time and reports how many are still pending, so the page can ask again for the rest.
+   * retryAfterMs > 0 means respond.io asked us to slow down (or rejected the token): ask again only after that.
    */
   async function replyStates(cids, { max = 60, concurrency = 5, compute } = {}) {
     const todo = [...new Set(cids)].filter((c) => !cachedState(c));
     const batch = todo.slice(0, max), errors = {};
-    let i = 0, stop = false;
+    let i = 0, stop = '', read = 0;
     async function worker() {
       while (!stop && i < batch.length) {
         const cid = batch[i++];
@@ -99,11 +107,13 @@ function createRespond(cfg, status) {
           const body = await get(`/contact/id:${cid}/message/list?limit=15`);
           const msgs = (body.items || []).map(shapeMessage).filter(Boolean);
           const now = Date.now(), st = msgs.length ? compute(msgs, now) : null;
-          rsCache.set(cid, { until: now + ttlFor(st, now), st });
+          rsCache.set(cid, { until: now + ttlFor(st, now), st }); read++;
         } catch (err) {
-          if (err.httpStatus === 404) { rsCache.set(cid, { until: Date.now() + 10 * 60e3, st: null, missing: true }); continue; }
+          if (err.httpStatus === 404) { rsCache.set(cid, { until: Date.now() + 10 * 60e3, st: null, missing: true }); read++; continue; }
           errors[cid] = err.message;
-          if (/rejected|rate-limiting/.test(err.message)) stop = true;   // bad token or rate limit: stop this round
+          if (/rejected|rate-limiting/.test(err.message)) { stop = err.message; continue; }   // not this contact's fault: stop this round, don't mark it
+          const prev = rsCache.get(cid), n = prev && prev.error ? (prev.attempts || 1) + 1 : 1;
+          rsCache.set(cid, { until: Date.now() + ERR_BACKOFF[Math.min(n, ERR_BACKOFF.length) - 1], st: null, error: err.message, attempts: n });
         }
       }
     }
@@ -112,7 +122,9 @@ function createRespond(cfg, status) {
       const errs = Object.values(errors);
       if (errs.length && errs.length === batch.length) throw new IntegrationError('respond', errs[0]);
     }).catch((err) => { if (!(err instanceof IntegrationError)) throw err; errors._ = err.message; });
-    return { checked: batch.length - Object.keys(errors).filter((k) => k !== '_').length, pending: Math.max(0, todo.length - batch.length) + (stop ? batch.length - i : 0), errors };
+    // checked = contacts actually read this round (not the ones skipped after a stop), so the page can tell when it's stuck
+    return { checked: read, pending: todo.filter((c) => !cachedState(c)).length,
+      errors, retryAfterMs: !stop ? 0 : /rejected/.test(stop) ? REJECTED_WAIT : RATE_LIMIT_WAIT };
   }
 
   /** Stores the reply state worked out from a chat someone opened, so that lead shows it (no extra request). */

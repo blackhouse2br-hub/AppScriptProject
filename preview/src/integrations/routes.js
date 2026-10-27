@@ -7,6 +7,7 @@ const { createStatus } = require('./status');
 const { createMonday } = require('./monday');
 const { createRespond } = require('./respondio');
 const { computeLead, replyState } = require('./pipeline');
+const { LeadOverride } = require('../models');
 
 /** One set of clients + status per server (shared by the integration routes and Team & Access). */
 function createIntegrations(config) {
@@ -32,17 +33,44 @@ function createIntegrations(config) {
     const t = await teamLabels().catch(() => ({ va: [] }));
     return [...new Set(SH.LISTS.vas.concat(t.va || []))];
   }
-  const rsFor = (l) => { if (!respond) return null; const h = respond.cachedState(String(l.contactId || '').replace(/\D/g, '')); return h ? h.st : null; };
-  /** Adds AI Status / Temperature / reply state / Days in Stage (pipeline.js) to Monday leads. */
-  function enrich(all, leads) {
+  const rsFor = (l) => (respond ? respond.cachedState(String(l.contactId || '').replace(/\D/g, '')) : null);
+  /**
+   * Adds AI Status / Temperature / reply state / Days in Stage (pipeline.js) to Monday leads, then any portal override
+   * (MongoDB, e.g. "Failed"), which is labelled as an override and never written back to Monday.
+   */
+  function enrich(all, leads, overrides) {
     const now = Date.now();
-    return leads.map((l) => ({ ...l, ...computeLead(l, all.lm[l.id], rsFor(l), now) }));
+    return leads.map((l) => {
+      const h = rsFor(l), out = { ...l, ...computeLead(l, all.lm[l.id], h && h.st, now, h && h.error) };
+      // read, but nothing to go on: an empty chat, or no such contact on respond.io; checked all the same (not "unchecked")
+      // (no reply state is invented: waiting stays empty; a missing contact is what respond.io said, so Temperature says so too)
+      if (h && !h.st && !h.error) Object.assign(out, h.missing && out.temp === 'Unchecked' ? { replyChecked: true, temp: 'Not on Respond.io', tempWhy: 'respond.io has no contact with this Respond ID.' }
+        : { replyChecked: true, ...(out.temp === 'Unchecked' ? { tempWhy: 'No messages in the respond.io chat yet.' } : {}) });
+      return SH.applyOverride(out, overrides && overrides.get(l.id));
+    });
   }
-  return { status, monday, respond, ic, teamLabels, allowedVaLabels, enrich };
+  /** Portal overrides for Monday leads, by lead ID. */
+  async function mondayOverrides() {
+    const rows = await LeadOverride.find({ source: 'monday', failed: { $ne: null } }).limit(20000).lean();
+    return new Map(rows.map((o) => [o.leadId, o]));
+  }
+  /** A Monday lead (and its listings) this user may see, or null. Throws when the leads board can't be read. */
+  async function visibleMondayLead(user, id) {
+    if (!monday || !/^\d{1,20}$/.test(String(id))) return null;
+    const all = await monday.loadAll(false);
+    if (all.errors.leads) { const e = new Error(all.errors.leads); e.integration = 'monday'; throw e; }
+    return scopeExternal(user, all).leads.find((l) => l.id === id) || null;
+  }
+  async function mondayListing(id) {
+    if (!monday) return null;
+    const all = await monday.loadAll(false);
+    return all.listings.find((x) => x.id === String(id)) || null;
+  }
+  return { status, monday, respond, ic, teamLabels, allowedVaLabels, enrich, mondayOverrides, visibleMondayLead, mondayListing, statusFields };
 }
 
-const STATUS_FIELDS = ['ai', 'aiSub', 'aiSource', 'temp', 'tempWhy', 'waiting', 'since', 'lastText', 'replyChecked', 'onRespond', 'daysInStage', 'stageDays'];
-const statusFields = (l) => Object.fromEntries(STATUS_FIELDS.map((k) => [k, l[k]]));
+const STATUS_FIELDS = ['ai', 'aiSub', 'aiSource', 'workStage', 'temp', 'tempWhy', 'waiting', 'since', 'lastText', 'replyChecked', 'replyError', 'onRespond', 'daysInStage', 'stageDays', 'override'];
+function statusFields(l) { return Object.fromEntries(STATUS_FIELDS.map((k) => [k, l[k]])); }
 
 function integrationRoutes(r, integ) {
   const { status, monday, respond, ic } = integ;
@@ -66,7 +94,7 @@ function integrationRoutes(r, integ) {
   r.get('/monday/bootstrap', need('leads', 'view'), async (req, res) => {
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
     const all = await monday.loadAll(req.query.refresh === '1');
-    const scoped = scopeExternal(req.user, { leads: integ.enrich(all, all.leads), viewings: all.viewings, listings: all.listings });
+    const scoped = scopeExternal(req.user, { leads: integ.enrich(all, all.leads, await integ.mondayOverrides()), viewings: all.viewings, listings: all.listings });
     res.json({ ...scoped, errors: all.errors, notConfigured: all.notConfigured, calendarOk: all.calendarOk,
       fetchedAt: all.fetchedAt, boards: all.boards, refreshing: all.refreshing, staleAfterMs: all.staleAfterMs });
   });
@@ -77,12 +105,7 @@ function integrationRoutes(r, integ) {
     res.json(monday.freshness());
   });
 
-  async function visibleMondayLead(user, id) {
-    if (!/^\d{1,20}$/.test(String(id))) return null;
-    const all = await monday.loadAll(false);
-    if (all.errors.leads) { const e = new Error(all.errors.leads); e.integration = 'monday'; throw e; }
-    return scopeExternal(user, all).leads.find((l) => l.id === id) || null;
-  }
+  const visibleMondayLead = integ.visibleMondayLead;
 
   r.get('/monday/leads/:id/notes', need('leads', 'view'), async (req, res) => {
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
@@ -116,9 +139,9 @@ function integrationRoutes(r, integ) {
       const visible = scopeExternal(req.user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads;
       const cids = visible.map((l) => String(l.contactId || '').replace(/\D/g, '')).filter(Boolean);
       const run = await respond.replyStates(cids, { compute: replyState });
-      const enriched = integ.enrich(all, visible);
+      const enriched = integ.enrich(all, visible, await integ.mondayOverrides());
       res.json({ leads: Object.fromEntries(enriched.map((l) => [l.id, statusFields(l)])),
-        checked: run.checked, pending: run.pending, errors: run.errors, linked: cids.length, checkedAt: new Date().toISOString() });
+        checked: run.checked, pending: run.pending, errors: run.errors, retryAfterMs: run.retryAfterMs || 0, linked: cids.length, checkedAt: new Date().toISOString() });
     } catch (err) { failed(res, err); }
   });
 
@@ -137,7 +160,7 @@ function integrationRoutes(r, integ) {
       // the chat just read also gives this one lead its reply state and Temperature (newest 15, as the original used)
       respond.remember(cid, chat.messages.length ? replyState(chat.messages.slice(-15), Date.now()) : null);
       const all = await monday.loadAll(false);
-      res.json({ ...chat, lead: statusFields(integ.enrich(all, [lead])[0]) });
+      res.json({ ...chat, lead: statusFields(integ.enrich(all, [lead], await integ.mondayOverrides())[0]) });
     } catch (err) { failed(res, err); }
   });
 

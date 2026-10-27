@@ -125,15 +125,15 @@ function replyState(msgs, now) {
   return st;
 }
 
-/** Temperature (Code.gs temperature_; the no-chat fallback uses lead start only, since portal activity isn't available). */
-function temperature(stage, r, l, now) {
+/** Temperature (Code.gs temperature_; the no-chat fallback uses lead start only, since portal activity isn't available). rsErr: why the last chat check failed. */
+function temperature(stage, r, l, now, rsErr) {
   if (stage === 'Active' || stage === 'For Renewal') return { temp: 'Active', tempWhy: 'Closed client' };
   if (stage === 'Not on Respond.io') return { temp: 'Not on Respond.io', tempWhy: 'No respond.io chat linked' };
   if (stage === 'Failed') return { temp: 'Dead', tempWhy: 'Lead marked as failed' };
   // chat not read: no guessed temperature (the original guessed from the lead's age; that looked like a real status)
   if (!r) {
     return String(l.contactId || '').replace(/\D/g, '')
-      ? { temp: 'Unchecked', tempWhy: 'respond.io chat not checked yet. Open the Chat tab to check it.' }
+      ? { temp: 'Unchecked', tempWhy: rsErr ? 'respond.io check failed: ' + rsErr + ' It is tried again automatically.' : 'respond.io chat not checked yet. Open the Chat tab to check it.' }
       : { temp: 'Not on Respond.io', tempWhy: 'No respond.io chat linked' };
   }
   const lastIn = r.lastInAt || 0;
@@ -160,46 +160,52 @@ function temperature(stage, r, l, now) {
 /**
  * Full status for one Monday lead.
  * lm: Calendar LOI/contract evidence for the lead ({ ds, dc, cd, files, cfiles, sfiles, paid, booked }); rs: reply state or null.
- * Returns { ai, aiSub, aiSource: 'proof'|'monday'|'rules', temp, tempWhy, waiting, daysInStage, stageDays, ... }.
+ * Returns { ai, aiSub, aiSource: 'proof'|'monday'|'rules', workStage, temp, tempWhy, waiting, daysInStage, stageDays, ... }.
+ * workStage: the stage from the same evidence, ignoring whether a respond.io chat is linked (ai says 'Not on Respond.io' then).
  */
-function computeLead(l, lm, rs, now) {
+function computeLead(l, lm, rs, now, rsErr) {
   const cid = String(l.contactId || '').replace(/\D/g, '');
-  let ai = aiStatus(l, now);
-  if (!cid) ai = { stage: 'Not on Respond.io', sub: 'No respond.io chat linked' };
+  const rules = aiStatus(l, now);
+  const ai = cid ? rules : { stage: 'Not on Respond.io', sub: 'No respond.io chat linked' };
   // Calendar Contract Date can also come from the Direct Clients "Contract Date" column
   const cdLead = ymd(l.contractDate);
   if (cdLead && !(lm && lm.cd)) lm = Object.assign({ files: 0, cfiles: 0, sfiles: 0 }, lm || {}, { cd: cdLead });
   const paid = lm ? lm.paid || 0 : 0;
-  // 1) proof: failed by hand · signed contract / Total Paid / Contract Date / LOI on the Calendar board
-  let hard = null;
   const cs = String(l.clientStatus || '').trim(), label = String(l.aiStatusLabel || '').trim();
   const reopened = /^(active|qualified|late move-in|closed)$/i.test(cs);
-  const failedHand = /^(failed|disqualified|called - failed)$/i.test(cs) || (!reopened && /^failed$/i.test(label));
-  if (failedHand) hard = { stage: 'Failed', sub: String(l.failReason || (/^failed$/i.test(label) && !/fail|disqualif/i.test(cs) ? 'Set to Failed on Monday' : cs) || '').slice(0, 80) };
-  else if (ai.stage === 'Failed' || ai.stage === 'For Renewal') hard = ai;
-  else if (lm && lm.sfiles) hard = paid > 0 ? { stage: 'Active', sub: 'Collected ' + peso(paid) } : { stage: 'Collection', sub: 'Signed contract on file — Total Paid empty on the Calendar' };
-  else if (paid > 0) hard = { stage: 'Active', sub: 'Collected ' + peso(paid) };
-  else if (lm && lm.cd) hard = now - msOf(lm.cd) > 5 * DAY ? { stage: 'Property Matching', sub: 'Contract ' + fmtD(lm.cd) + ' not signed after 5 days — back to matching' } : { stage: 'Contract', sub: 'Contract date ' + fmtD(lm.cd) };
-  else if (lm && (lm.ds || lm.dc || lm.files || lm.cfiles)) {
-    const d0 = lm.ds || lm.dc || '';
-    hard = lm.cfiles ? { stage: 'Contract', sub: 'Contract file on the Calendar — LOI signed by the owner' }
-      : d0 && now - msOf(d0) > 5 * DAY ? { stage: 'Property Matching', sub: 'LOI ' + fmtD(d0) + ' not signed by the owner after 5 days — back to matching' }
-      : { stage: 'LOI', sub: d0 ? 'LOI ' + fmtD(d0) + ' · waiting for the owner to sign' : 'LOI on file' };
+  const failedHand = /^(failed|disqualified|called - failed|unresponsive)$/i.test(cs) || (!reopened && /^failed$/i.test(label));
+  /** Stage from the evidence, in order; `a` is the rules stage and `linked` whether the Monday AI STATUS may be used. */
+  function pick(a, linked) {
+    // 1) proof: failed by hand · signed contract / Total Paid / Contract Date / LOI on the Calendar board
+    let hard = null;
+    if (failedHand) hard = { stage: 'Failed', sub: String(l.failReason || (/^failed$/i.test(label) && !/fail|disqualif|unresponsive/i.test(cs) ? 'Set to Failed on Monday' : cs) || '').slice(0, 80) };
+    else if (a.stage === 'Failed' || a.stage === 'For Renewal') hard = a;
+    else if (lm && lm.sfiles) hard = paid > 0 ? { stage: 'Active', sub: 'Collected ' + peso(paid) } : { stage: 'Collection', sub: 'Signed contract on file — Total Paid empty on the Calendar' };
+    else if (paid > 0) hard = { stage: 'Active', sub: 'Collected ' + peso(paid) };
+    else if (lm && lm.cd) hard = now - msOf(lm.cd) > 5 * DAY ? { stage: 'Property Matching', sub: 'Contract ' + fmtD(lm.cd) + ' not signed after 5 days — back to matching' } : { stage: 'Contract', sub: 'Contract date ' + fmtD(lm.cd) };
+    else if (lm && (lm.ds || lm.dc || lm.files || lm.cfiles)) {
+      const d0 = lm.ds || lm.dc || '';
+      hard = lm.cfiles ? { stage: 'Contract', sub: 'Contract file on the Calendar — LOI signed by the owner' }
+        : d0 && now - msOf(d0) > 5 * DAY ? { stage: 'Property Matching', sub: 'LOI ' + fmtD(d0) + ' not signed by the owner after 5 days — back to matching' }
+        : { stage: 'LOI', sub: d0 ? 'LOI ' + fmtD(d0) + ' · waiting for the owner to sign' : 'LOI on file' };
+    }
+    if (hard) return { out: hard, source: 'proof' };
+    if (linked && AI_STAGES.includes(label) && label !== 'Not on Respond.io') {
+      // 2) no proof: the AI STATUS the live portal last wrote to Monday (it includes the AI chat reading and human checks)
+      const detail = String(l.aiStatusText || ''), i = detail.indexOf(' — ');
+      return { out: { stage: label, sub: i > 0 && detail.slice(0, i) === label ? detail.slice(i + 3) : 'From Monday AI STATUS (set by the live portal)' }, source: 'monday' };
+    }
+    return { out: a, source: 'rules' };   // 3) rules on the Next Action / Status text
   }
-  let out, source;
-  if (hard) { out = hard; source = 'proof'; }
-  else if (cid && AI_STAGES.includes(label) && label !== 'Not on Respond.io') {
-    // 2) no proof: the AI STATUS the live portal last wrote to Monday (it includes the AI chat reading and human checks)
-    const detail = String(l.aiStatusText || ''), i = detail.indexOf(' — ');
-    out = { stage: label, sub: i > 0 && detail.slice(0, i) === label ? detail.slice(i + 3) : 'From Monday AI STATUS (set by the live portal)' };
-    source = 'monday';
-  } else { out = ai; source = 'rules'; }   // 3) rules on the Next Action / Status text
+  const { out, source } = pick(ai, !!cid);
+  // the same evidence without the respond.io link check: a lead with no Respond ID can still be in property sourcing
+  const work = cid ? out : pick(rules, true).out;
   const seg = segments(l, lm, now);
-  const t = temperature(out.stage, rs, l, now);
+  const t = temperature(out.stage, rs, l, now, rs ? '' : rsErr);
   return {
-    ai: out.stage, aiSub: out.sub || '', aiSource: source,
+    ai: out.stage, aiSub: out.sub || '', aiSource: source, workStage: work.stage,
     temp: t.temp, tempWhy: t.tempWhy,
-    waiting: rs ? rs.waiting : '', since: rs ? rs.since : 0, lastText: rs ? rs.lastText : '', replyChecked: !!rs,
+    waiting: rs ? rs.waiting : '', since: rs ? rs.since : 0, lastText: rs ? rs.lastText : '', replyChecked: !!rs, replyError: !rs && cid ? rsErr || '' : '',
     onRespond: !!cid && (rs ? rs.total > 0 : true),
     daysInStage: seg.days[out.stage] != null ? Math.round(seg.days[out.stage]) : TRACKED.includes(out.stage) ? 0 : null,
     stageDays: seg.days,

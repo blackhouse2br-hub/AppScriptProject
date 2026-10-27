@@ -3,14 +3,14 @@
 // and every handler checks module access and lead visibility for the signed-in user.
 const express = require('express');
 const SH = require('../public/shared');
-const { Lead, Listing, Viewing, Note, User, Template } = require('./models');
+const { Lead, Listing, Viewing, Note, User, Template, AvailabilityRequest, LeadOverride } = require('./models');
 const { authRoutes, requireUser, hashPassword, revokeSessions } = require('./auth');
 const { dbReady } = require('./db');
 const { isId, need, leadScope, viewingScope, findVisibleLead } = require('./access');
 const { integrationRoutes, createIntegrations } = require('./integrations/routes');
 
 const bad = (res, errors) => res.status(400).json({ error: errors[0], errors });
-const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'brokers'];
+const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'propreq', 'brokers'];
 const LISTING_SCREENS = ['leads', 'invdash', 'calendar'];
 
 function apiRouter(config) {
@@ -45,7 +45,100 @@ function apiRouter(config) {
       SH.access(u, 'team') !== 'none' ? User.find().sort({ role: 1, name: 1 }) : [],
       SH.access(u, 'team') !== 'none' ? Template.find().sort({ name: 1 }) : [],
     ]);
-    res.json({ user: u.toJSON(), leads, listings, viewings, users, templates });
+    const ovs = new Map((await LeadOverride.find({ source: 'mongo', failed: { $ne: null } }).limit(20000).lean()).map((o) => [o.leadId, o]));
+    // listings get the same one-city label as Monday listings ("Taguig", "BGC" → "Taguig (BGC)"); the stored record is unchanged
+    const shown = listings.map((x) => { const j = x.toJSON(); return { ...j, city: SH.canonCity(j.city, j.building) || j.city || '', cityRaw: j.city }; });
+    res.json({ user: u.toJSON(), leads: leads.map((l) => SH.applyOverride(l.toJSON(), ovs.get(String(l._id)))), listings: shown, viewings, users, templates });
+  });
+
+  // ----- portal-only records for a lead from either source (MongoDB, or Monday.com which stays read-only) -----
+  /** The lead if this user may see it: { id }. Monday leads are checked against the live (read-only) board. */
+  async function leadFor(req, res) {
+    const { source, id } = req.params;
+    let lead = null;
+    try {
+      if (source === 'mongo') { const l = await findVisibleLead(req.user, id); if (l) lead = { id: String(l._id) }; }
+      else if (source === 'monday') { const l = await integ.visibleMondayLead(req.user, id); if (l) lead = { id: l.id }; }
+    } catch (err) { if (!err.integration) throw err; res.status(502).json({ error: err.message }); return null; }
+    if (!lead) res.status(404).json({ error: 'Lead not found.' });
+    return lead;
+  }
+  async function listingFor(source, id) {
+    if (source === 'mongo') { const x = isId(id) ? await Listing.findById(id) : null; return x && { id: String(x._id), name: `${x.building} · ${x.code}` }; }
+    const x = await integ.mondayListing(id); return x && { id: x.id, name: x.building + (x.tower ? ' · ' + x.tower : '') };
+  }
+  const who = (req) => ({ name: req.user.name, userId: req.user._id });
+
+  // Asking for Availability: the VA's own record of units they're checking with owners. Nothing is sent to anyone.
+  r.get('/leads/:source/:id/asking', need('leads', 'view'), async (req, res) => {
+    const lead = await leadFor(req, res); if (!lead) return;
+    res.json({ requests: await AvailabilityRequest.find({ source: req.params.source, leadId: lead.id }).sort({ createdAt: 1 }).limit(SH.ASK.maxPerLead) });
+  });
+  r.post('/leads/:source/:id/asking', need('leads', 'edit'), async (req, res) => {
+    const { value, errors } = SH.validateAsk(req.body);
+    if (errors.length) return bad(res, errors);
+    const lead = await leadFor(req, res); if (!lead) return;
+    await AvailabilityRequest.init();   // the unique index must exist before inserting, or two presses at once could both insert
+    const key = { source: req.params.source, leadId: lead.id, listingId: value.listingId };
+    const existing = await AvailabilityRequest.findOne(key);
+    if (existing) return res.json({ request: existing, already: true });
+    const listing = await listingFor(req.params.source, value.listingId);
+    if (!listing) return res.status(404).json({ error: 'Listing not found.' });
+    if ((await AvailabilityRequest.countDocuments({ source: key.source, leadId: lead.id })) >= SH.ASK.maxPerLead) return bad(res, [`This lead already has ${SH.ASK.maxPerLead} units in Asking for Availability. Remove some first.`]);
+    try {
+      const request = await AvailabilityRequest.create({ ...key, listingName: listing.name.slice(0, 160), createdBy: who(req), updatedBy: who(req) });
+      res.status(201).json({ request });
+    } catch (err) {
+      if (err.code !== 11000) throw err;   // pressed twice / two people at once: the unique index keeps one record
+      res.json({ request: await AvailabilityRequest.findOne(key), already: true });
+    }
+  });
+  /** An Asking record and its lead, if the user may see the lead. */
+  async function askFor(req, res) {
+    const a = isId(req.params.rid) ? await AvailabilityRequest.findById(req.params.rid) : null;
+    if (!a) { res.status(404).json({ error: 'Request not found.' }); return null; }
+    req.params.source = a.source; req.params.id = a.leadId;
+    return (await leadFor(req, res)) ? a : null;
+  }
+  r.patch('/asking/:rid', need('leads', 'edit'), async (req, res) => {
+    const { value, errors } = SH.validateAskPatch(req.body);
+    if (errors.length) return bad(res, errors);
+    const a = await askFor(req, res); if (!a) return;
+    // contact taps are logged only (the link itself opens on the user's device); the newest SH.ASK.logMax are kept
+    const update = value.contacted
+      ? { $push: { contacts: { $each: [{ via: value.contacted, by: req.user.name }], $slice: -SH.ASK.logMax } }, $set: { updatedBy: who(req) } }
+      : { $set: { status: value.status, updatedBy: who(req) } };
+    res.json({ request: await AvailabilityRequest.findByIdAndUpdate(a._id, update, { returnDocument: 'after', runValidators: true }) });
+  });
+  r.delete('/asking/:rid', need('leads', 'edit'), async (req, res) => {
+    const a = await askFor(req, res); if (!a) return;
+    await a.deleteOne();
+    res.json({ ok: true });
+  });
+
+  // Failed override: stored in MongoDB and labelled "Portal override"; Monday's Client Status / AI STATUS are not changed.
+  // Managers only (setting and removing).
+  const managerOnly = (req, res, next) => (req.user.role === 'Manager' ? next() : res.status(403).json({ error: 'Only Managers can set or remove a Failed override.' }));
+  r.put('/leads/:source/:id/override', managerOnly, async (req, res) => {
+    const { value, errors } = SH.validateFailOverride(req.body);
+    if (errors.length) return bad(res, errors);
+    const lead = await leadFor(req, res); if (!lead) return;
+    await LeadOverride.init();   // unique index first, so concurrent saves update one record
+    const override = await LeadOverride.findOneAndUpdate({ source: req.params.source, leadId: lead.id },
+      { $set: { failed: { reason: value.reason, at: new Date(), by: req.user.name, byUserId: req.user._id } } },
+      { upsert: true, returnDocument: 'after', runValidators: true, setDefaultsOnInsert: true });
+    res.json({ override });
+  });
+  r.delete('/leads/:source/:id/override', managerOnly, async (req, res) => {
+    const lead = await leadFor(req, res); if (!lead) return;
+    await LeadOverride.deleteOne({ source: req.params.source, leadId: lead.id });
+    // the lead's own status again: recomputed from Monday (read-only) or the MongoDB record
+    let fields;
+    if (req.params.source === 'monday') {
+      const all = await integ.monday.loadAll(false), l = all.leads.find((x) => x.id === lead.id);
+      fields = l ? integ.statusFields(integ.enrich(all, [l], new Map())[0]) : null;
+    } else fields = (await Lead.findById(lead.id)).toJSON();
+    res.json({ ok: true, lead: fields });
   });
 
   // ----- leads + notes -----

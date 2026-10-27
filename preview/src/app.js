@@ -29,7 +29,7 @@ function portalCors(web) {
     res.setHeader('Access-Control-Allow-Origin', web.portalOrigin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     if (req.method !== 'OPTIONS') return next();
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Access-Control-Max-Age', '600');
     res.status(204).end();

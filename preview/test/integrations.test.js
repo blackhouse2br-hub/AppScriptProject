@@ -201,7 +201,8 @@ test('reply states from respond.io (RESPOND_LIST_CHECKS=on): human replies only,
   assert.deepStrictEqual([s['9001'].waiting, s['9001'].temp], ['client', 'Lost']);           // VA answered; client quiet for 3 days
   assert.deepStrictEqual([s['9006'].waiting, s['9006'].temp], ['va', 'Hot']);                // workflow auto-reply is not a human reply
   assert.match(s['9006'].lastText, /Auto-reply/);
-  assert.strictEqual(s['9003'].replyChecked, false);                                         // contact 404 → unchecked, not invented
+  // contact 404 → nothing invented (no reply state); it settles as checked, with respond.io's answer as the reason
+  assert.deepStrictEqual([s['9003'].waiting, s['9003'].replyChecked, s['9003'].temp, s['9003'].tempWhy], ['', true, 'Not on Respond.io', 'respond.io has no contact with this Respond ID.']);
   assert.ok(calls.respond.every((c) => c.method === 'GET' && /message\/list\?limit=15$/.test(c.path)));
   // second call is served from the cache (no new respond.io requests), and the bootstrap now carries the states
   const n = calls.respond.length;

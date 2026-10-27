@@ -28,6 +28,9 @@ test('proof beats Monday AI STATUS, which beats rules; 5-day owner-signing rule'
   assert.strictEqual(P.computeLead(l, { sfiles: 1, paid: 50000, cd: '2026-10-01' }, null, NOW).ai, 'Active');
   assert.strictEqual(P.computeLead(l, { sfiles: 1, paid: 0, cd: '2026-10-01' }, null, NOW).ai, 'Collection');
   assert.strictEqual(P.computeLead(lead({ clientStatus: 'Disqualified' }), null, null, NOW).ai, 'Failed');
+  const unresp = P.computeLead(lead({ clientStatus: 'Unresponsive' }), null, null, NOW);
+  assert.strictEqual(unresp.ai, 'Failed');
+  assert.strictEqual(unresp.aiSub, 'Unresponsive');
   assert.strictEqual(P.computeLead(lead({ contactId: '' }), null, null, NOW).ai, 'Not on Respond.io');
   assert.strictEqual(P.computeLead(lead({ contactId: '', contractDate: '2026-10-20' }), null, null, NOW).ai, 'Contract');   // proof wins even without a chat
 });
