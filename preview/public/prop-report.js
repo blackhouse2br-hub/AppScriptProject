@@ -4,15 +4,16 @@
  * Shared by the browser (window.BH_PROPREPORT) and the tests (require).
  */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory();
-  else root.BH_PROPREPORT = factory();
-})(typeof self !== 'undefined' ? self : this, function () {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./shared'));
+  else root.BH_PROPREPORT = factory(root.BH_SHARED);
+})(typeof self !== 'undefined' ? self : this, function (SH) {
   'use strict';
 
   const NA = 'Not specified';
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  // Client Status / Next Action text that means the lead is no longer active (Mongo: 'Closed', 'Failed'; Monday: free labels)
-  const INACTIVE_STATUS = /\b(fail(ed)?|lost|dead|closed|disqualified|cancell?ed|not interested|junk)\b/i;
+  // Client Status / Next Action text that means the lead is no longer active (Mongo: 'Closed', 'Failed'; Monday: free labels).
+  // "Unresponsive" counts as inactive here too, as it does everywhere else in the app (pipeline failedHand, VA Portal, reports).
+  const INACTIVE_STATUS = /\b(fail(ed)?|lost|dead|closed|disqualified|cancell?ed|not interested|junk|unresponsive)\b/i;
   // Temperature values that mean the conversation went quiet (pipeline.temperature: 3+ / 7+ days without a reply)
   const INACTIVE_TEMPS = ['Lost', 'Dead'];
 
@@ -42,8 +43,8 @@
     const n = Number(l.budget);
     return n > 0 ? pesos(n) + (l.inquiry === 'Rent' ? '/month' : '') : NA;
   }
-  // only an explicit choice is reported; an unset value ('' — the default) is "Not specified", never "No Pets"
-  const pets = (p) => (p === 'With Pets' ? 'Pet Friendly' : p === 'No Pets' ? 'No Pets' : NA);
+  // shared wording (shared.js petWords): Pet Friendly / Not Pet Friendly for a clear answer, otherwise "Not specified"
+  const pets = (p) => SH.petWords(p);
   /** "2026-10-26" → "October 26, 2026" (no locale or time zone involved). */
   function dateLabel(ymd) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
@@ -54,13 +55,14 @@
     const k = kind(l);
     const lines = [`${i + 1}. ${k || 'RENT/SALE: ' + NA}`,
       `Price: ${price(l)}`,
-      `Location: ${val(l.city || l.location)}`,
+      // the structured City only: the free-text "Client Requirements" text (lead.location) can hold personal details
+      `Location: ${val(l.city)}`,
       `Specific Building: ${val(l.building)}`,
       `SQM: ${val(l.sqm)}`,
       `Bedroom: ${val(l.bedrooms)}`,
       `Bathroom: ${val(l.bathrooms)}`,
       `Parking: ${val(l.parking)}`];
-    if (k === 'RENT') lines.push(`Furnished/Unfurnished: ${val(l.furnishing)}`, `Pet Friendly/No Pets: ${pets(l.pets)}`);
+    if (k === 'RENT') lines.push(`Furnished/Unfurnished: ${val(l.furnishing)}`, `Pet Friendly/Not Pet Friendly: ${pets(l.pets)}`);
     return lines.join('\n');
   }
 

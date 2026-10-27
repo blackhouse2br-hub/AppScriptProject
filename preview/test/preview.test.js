@@ -108,7 +108,7 @@ test('demo server: static app, demo config, API off, no network allowed', async 
 });
 
 test('front-end scripts parse; only api-client.js makes requests, and only to /api/', () => {
-  for (const f of ['app.js', 'demo-data.js', 'shared.js', 'prop-report.js', 'api-client.js']) {
+  for (const f of ['app.js', 'demo-data.js', 'shared.js', 'prop-report.js', 'client-req.js', 'daily-report.js', 'api-client.js']) {
     const src = fs.readFileSync(path.join(PUB, f), 'utf8');
     assert.doesNotThrow(() => new vm.Script(src, { filename: f }));
     // the one allowed address: the WhatsApp link a user can tap on an owner's card (opened by the user's device, never fetched)

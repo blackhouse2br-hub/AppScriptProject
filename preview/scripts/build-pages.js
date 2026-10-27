@@ -21,7 +21,7 @@ const { siteOf } = require('../src/deploy');
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 // the page's own files only (no server code, tests or configuration)
-const FILES = ['index.html', 'styles.css', 'app.js', 'shared.js', 'demo-data.js', 'prop-report.js', 'api-client.js'];
+const FILES = ['index.html', 'styles.css', 'app.js', 'shared.js', 'demo-data.js', 'prop-report.js', 'client-req.js', 'daily-report.js', 'api-client.js'];
 // shapes of credentials that must never be in the page
 const SECRET_PATTERNS = [/mongodb(\+srv)?:\/\//i, /GOCSPX-/, /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./, /client_secret/i,
   /(MONDAY|RESPOND)_TOKEN\s*[=:]\s*["']?[A-Za-z0-9]/, /GOOGLE_CLIENT_SECRET\s*[=:]\s*["']?[A-Za-z0-9]/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/];

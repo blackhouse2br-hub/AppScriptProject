@@ -101,12 +101,13 @@ test('active sourcing leads qualify with or without a respond.io ID; closed/fail
   assert.strictEqual(SH.bookingLeadChanges(nr).ai, undefined, 'the AI Status stays Not on Respond.io');
 });
 
-test('pets: never specified → "Not specified"; an explicit No Pets is kept', () => {
-  const line = (l) => PR.buildReport([l], DATE).match(/^Pet Friendly\/No Pets: .*$/m)[0];
-  for (const p of ['', undefined, null, '  ']) assert.strictEqual(line(lead({ pets: p })), 'Pet Friendly/No Pets: Not specified', JSON.stringify(p));
-  assert.strictEqual(line(lead({})), 'Pet Friendly/No Pets: Not specified', 'field missing');
-  assert.strictEqual(line(lead({ pets: 'No Pets' })), 'Pet Friendly/No Pets: No Pets');
-  assert.strictEqual(line(lead({ pets: 'With Pets' })), 'Pet Friendly/No Pets: Pet Friendly');
+test('pets: only a clear answer is reported; Not Applicable, N/A, Any, blank and unknown → "Not specified"', () => {
+  const line = (l) => PR.buildReport([l], DATE).match(/^Pet Friendly\/Not Pet Friendly: .*$/m)[0];
+  for (const p of ['', undefined, null, '  ', 'Not Applicable', 'N/A', 'Any', 'Not specified', 'Small pets only', 'Dog'])
+    assert.strictEqual(line(lead({ pets: p })), 'Pet Friendly/Not Pet Friendly: Not specified', JSON.stringify(p));
+  assert.strictEqual(line(lead({})), 'Pet Friendly/Not Pet Friendly: Not specified', 'field missing');
+  for (const p of ['No Pets', 'Not Pet Friendly', 'no pets allowed']) assert.strictEqual(line(lead({ pets: p })), 'Pet Friendly/Not Pet Friendly: Not Pet Friendly', p);
+  for (const p of ['With Pets', 'Pet Friendly', 'pets allowed']) assert.strictEqual(line(lead({ pets: p })), 'Pet Friendly/Not Pet Friendly: Pet Friendly', p);
   // MongoDB: a new lead's default is unset, not "No Pets"; a chosen value is stored as is
   const { Lead } = require('../src/models');
   assert.strictEqual(new Lead({ code: 'X', name: 'X' }).pets, '');
@@ -115,9 +116,10 @@ test('pets: never specified → "Not specified"; an explicit No Pets is kept', (
   const { shapeLead } = require('../src/integrations/monday');
   const cols = { contactId: 'c', pets: 'p', nextAction: 'n', inquiry: 'i' };
   const monday = (text) => shapeLead({ id: 1, name: 'BH-1', column_values: [{ id: 'p', text }, { id: 'i', text: 'Rent' }] }, cols).pets;
-  for (const t of ['', 'N/A', 'Not specified', 'Any', '-']) assert.strictEqual(monday(t), '', JSON.stringify(t));
-  for (const t of ['No', 'None', 'No pets', 'Wala']) assert.strictEqual(monday(t), 'No Pets', t);
-  for (const t of ['Yes', 'Dog', '1 cat']) assert.strictEqual(monday(t), 'With Pets', t);
+  // the live board's labels are "With Pets", "No Pets" and "Not Applicable"; Not Applicable must never become Pet Friendly
+  for (const t of ['', 'N/A', 'Not specified', 'Any', '-', 'Not Applicable', 'not applicable', 'Dog', '1 cat', 'Small pets only']) assert.strictEqual(monday(t), '', JSON.stringify(t));
+  for (const t of ['No', 'None', 'No pets', 'No Pets', 'Wala', 'Not pet friendly']) assert.strictEqual(monday(t), 'No Pets', t);
+  for (const t of ['Yes', 'With Pets', 'Pet friendly', 'Pets allowed']) assert.strictEqual(monday(t), 'With Pets', t);
   // demo data has both explicit and unset preferences
   const pets = generate(new Date('2026-10-22T09:00:00Z')).leads.map((l) => l.pets);
   assert.ok(pets.includes('') && pets.includes('No Pets') && pets.includes('With Pets'));
@@ -137,8 +139,8 @@ test('RENT block: every field in order, monthly price, furnishing and pets lines
     'Bathroom: 1',
     'Parking: 1 Slot',
     'Furnished/Unfurnished: Fully Furnished',
-    'Pet Friendly/No Pets: Pet Friendly'].join('\n'));
-  assert.match(PR.buildReport([lead({ pets: 'No Pets' })], DATE), /^Pet Friendly\/No Pets: No Pets$/m);
+    'Pet Friendly/Not Pet Friendly: Pet Friendly'].join('\n'));
+  assert.match(PR.buildReport([lead({ pets: 'No Pets' })], DATE), /^Pet Friendly\/Not Pet Friendly: Not Pet Friendly$/m);
 });
 
 test('SALE block: no furnishing or pet lines, price without /month', () => {
@@ -154,9 +156,11 @@ test('missing values show "Not specified" and nothing is made up', () => {
   const l = lead({ budget: 0, city: '', location: '', building: '', sqm: '  ', bedrooms: '', bathrooms: undefined, parking: null, furnishing: '', pets: '' });
   assert.strictEqual(blocks(PR.buildReport([l], DATE))[0], ['1. RENT', 'Price: Not specified', 'Location: Not specified',
     'Specific Building: Not specified', 'SQM: Not specified', 'Bedroom: Not specified', 'Bathroom: Not specified', 'Parking: Not specified',
-    'Furnished/Unfurnished: Not specified', 'Pet Friendly/No Pets: Not specified'].join('\n'));
-  // Monday's preferred-location text is used when there's no city
-  assert.match(PR.buildReport([lead({ city: '', location: 'Salcedo Village' })], DATE), /^Location: Salcedo Village$/m);
+    'Furnished/Unfurnished: Not specified', 'Pet Friendly/Not Pet Friendly: Not specified'].join('\n'));
+  // Location is the structured City only: with no City it says so, and the free-text location / requirements never appear
+  const freeText = PR.buildReport([lead({ city: '', location: 'Salcedo Village, c/o Maria 0900 555 0161', requirements: 'call Maria' })], DATE);
+  assert.match(freeText, /^Location: Not specified$/m);
+  assert.doesNotMatch(freeText, /Salcedo|Maria|0900 555 0161|call/);
   // unknown Rent/Sale: said so, and the rent-only lines are left out
   const unknown = blocks(PR.buildReport([lead({ inquiry: '' })], DATE))[0];
   assert.match(unknown, /^1\. RENT\/SALE: Not specified$/m);
@@ -190,7 +194,7 @@ test('copy-ready output: plain text, chosen date in the heading, no client detai
   assert.match(text, /^Specific Building: Tower <A> & "B"$/m, 'plain text, not HTML-escaped');
   assert.match(text, /^SQM: 50 \+$/m);
   assert.match(text, /^Bedroom: Studio$/m);
-  assert.ok(text.includes('Pet Friendly/No Pets: Not specified\n\n2. SALE\n'), 'one blank line between requirements');
+  assert.ok(text.includes('Pet Friendly/Not Pet Friendly: Not specified\n\n2. SALE\n'), 'one blank line between requirements');
   assert.doesNotMatch(text, /Maria|Secret|555 1234|maria@|BH-777/, 'no names, phone numbers, emails or lead IDs');
   assert.doesNotMatch(text, /\r|\t|&amp;|&lt;|<br|undefined|null|NaN/);
   for (const line of text.split('\n')) assert.strictEqual(line, line.trimEnd(), 'no trailing spaces: ' + JSON.stringify(line));

@@ -3,7 +3,7 @@
 // columns are found by TITLE on each board, so no column IDs are hard-coded.
 // Only GraphQL `query` operations can be sent; mutations are refused before any request is made.
 const { IntegrationError, tracked } = require('./status');
-const { canonCity } = require('../../public/shared');
+const { canonCity, normPets } = require('../../public/shared');
 
 // from Code.gs CONFIG.HIDE and CONFIG.LISTING_SKIP_GROUPS
 const HIDE = ['Archive', 'Archived', 'For Validation', 'Broker Inquiries', 'Messaged Brokers for Viber', 'Copied to Broker Partnerships',
@@ -149,9 +149,8 @@ function shapeLead(it, cols) {
     inquiry, va: v.va, salesperson: v.salesperson, source: v.leadsFrom,
     origin: /respond/i.test(v.leadsFrom) ? 'respond.io' : 'Monday',
     budget: money(v.budget), city: v.city || '', bedrooms: beds(v.bedrooms), occupants: v.occupancy,
-    // empty or a "not stated" label stays '' (Not specified); only an actual answer becomes No Pets / With Pets
-    pets: !v.pets || /^(n\/?a|not (specified|sure|stated)|unspecified|unknown|any|either|tbd|-+|\?)$/i.test(v.pets.trim()) ? ''
-      : /^(no|none|wala|0)\b/i.test(v.pets) ? 'No Pets' : 'With Pets',
+    // only a clear answer becomes No Pets / With Pets; "Not Applicable", N/A, blanks and anything else stay '' (Not specified)
+    pets: normPets(v.pets),
     requirements: [v.location, v.otherReqs].filter(Boolean).join('; ').slice(0, 500),
     location: v.location, building: v.building, sqm: v.sqm, bathrooms: v.bathrooms, parking: v.parking, furnishing: v.furnishing,
     nationality: v.nationality, moveIn: ymdIn(v.moveIn), leaseTerm: v.leaseTerm, failReason: v.failReason, leaseEnd: '',

@@ -29,6 +29,12 @@ B.items[0].v.ph = '+63 900 555 0101';
 B.items.push({ id: '7004', name: 'Owner D', group: 'Available Units', v: { bn: 'Grand Hyatt Residences', loc: '', lt: 'For Rent', bed: '2 BR', pr: '210000', av: 'Available', ph: '0900 555 0104' }, assets: [['30011', 'png']] },
   { id: '7005', name: 'Owner E', group: 'Available Units', v: { bn: 'Demo Taguig Tower', loc: 'Taguig', lt: 'For Rent', bed: '2 BR', pr: '190000', av: 'Available' } });
 fx.BOARDS['1111111'].items.push({ id: '9007', name: 'BH-T7', group: 'ALL CLIENTS', v: { cn: 'Check Fails Client', va1: 'Ana', inq: 'Rent', rid: '555777', dq: '2026-10-20', na: 'Unresponsive' } });
+// Client Requirements: two active Property Sourcing clients without a respond.io ID (Ana's rental, Bea's sale with a building)
+fx.BOARDS['1111111'].columns.push({ id: 'bldg', title: 'Building Name', type: 'text', settings_str: '{}' },
+  { id: 'pets', title: 'Pets', type: 'status', settings_str: JSON.stringify({ labels: { 0: 'No Pets', 1: 'With Pets', 2: 'Not Applicable' } }) },
+  { id: 'creq', title: 'Client Requirements', type: 'text', settings_str: '{}' });
+fx.BOARDS['1111111'].items.push({ id: '9008', name: 'BH-T8', group: 'ALL CLIENTS', v: { cn: 'Sourcing Client Rent', ph: '+63 900 555 0008', va1: 'Ana', inq: 'Rent', na: 'New Inquiry', city: 'Makati', bud: '₱150k', br: '2', dq: '2026-10-22', pets: 'Not Applicable', creq: 'Fake requirements note near BGC c/o Demo Person 0900 555 0199' } },
+  { id: '9009', name: 'BH-T9', group: 'ALL CLIENTS', v: { cn: 'Sourcing Client Sale', ph: '+63 900 555 0009', va1: 'Bea', inq: 'Buy', na: 'New Inquiry', city: '', bud: '25M', br: '3', bldg: 'Demo Sale Tower', dq: '2026-10-23', creq: 'Fake requirements note: Taguig, ask Demo Person' } });
 
 async function cdp(wsUrl) {
   const ws = new WebSocket(wsUrl); let id = 0; const wait = new Map();
@@ -61,7 +67,8 @@ async function cdp(wsUrl) {
     MONDAY_API_URL: fake + '/monday', RESPOND_TOKEN: 'rtest', RESPOND_API_URL: fake + '/respond', RESPOND_LIST_CHECKS: 'on' }, ['node', 'server.js']);
   const base = `http://127.0.0.1:${server.address().port}`;
   await User.create([{ email: 'boss@example.com', name: 'Demo Manager', role: 'Manager', passwordHash: await hashPassword(PW) },
-    { email: 'ana@example.com', name: 'Ana Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit' }, passwordHash: await hashPassword(PW) }]);
+    { email: 'ana@example.com', name: 'Ana Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit', propreq: 'view' }, passwordHash: await hashPassword(PW) },
+    { email: 'cora@example.com', name: 'Cora Demo', role: 'VA', vaLabel: 'Cora Fake', modules: { leads: 'edit' }, passwordHash: await hashPassword(PW) }]);
 
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'bhui-'));
   const port = 9300 + Math.floor(Math.random() * 500);
@@ -177,6 +184,47 @@ async function cdp(wsUrl) {
       check(`${label}: listing photos preview in the Inventory Dashboard; an unsafe file falls back to the placeholder`, ph['7001'] === 'shown' && ph['7004'] === 'shown' && ph['7003'] === 'placeholder', JSON.stringify(ph));
       check(`${label}: no sideways scrolling on the inventory`, await noSideScroll());
       await c.ev(`window.scrollTo(0, 0)`); await shot(`${label}-5-inventory`);
+
+      // Client Requirements: generated from the loaded leads, numbered clients only, Copy message (clipboard stubbed)
+      if (mobile) { await c.ev(`(() => { const b = document.querySelector('.nav-burger'); b && b.click(); })()`); await sleep(250); }
+      await c.ev(`document.querySelector('[data-act="nav"][data-v="clientreq"]').click()`);
+      await until(`!!document.querySelector('#crText')`);
+      const cr = await text('#crText');
+      const crRaw = await c.ev(`document.querySelector('#crText').textContent`);
+      check(`${label}: Client Requirements lists the two sourcing clients (no respond.io ID needed)`, /^Client Requirements for [A-Z][a-z]+ \d{1,2}, \d{4}/.test(crRaw) && (crRaw.match(/^\d+\. Client \d+$/gm) || []).length === 2, crRaw.split('\n').filter((x) => /Client \d|RENT|SALE|Building/.test(x)).join(' | '));
+      check(`${label}: rent first with furnishing/pets lines; sale has Building Name and no rent-only lines`,
+        /1\. Client 1\nRENT\nLocation: Makati[\s\S]*Furnished\/Unfurnished: Not specified\nPet Friendly\/Not Pet Friendly: Not specified\nBudget: ₱150,000\/month\n\n2\. Client 2\nSALE\nBuilding Name: Demo Sale Tower\nLocation: Not specified[\s\S]*Budget: ₱25,000,000$/.test(crRaw), '');
+      check(`${label}: no names, phones, emails or lead codes; failed / unresponsive / other-stage leads left out`, !/Sourcing Client|Test Client|Check Fails|\+63|@|BH-T|900 555/.test(crRaw), cr.slice(0, 60));
+      await c.ev(`window.__copied = null; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: (t) => { window.__copied = t; return Promise.resolve(); } } })`);
+      await click('#crCopy');
+      await until(`window.__copied !== null`);
+      check(`${label}: Copy message copies exactly the message shown`, (await c.ev(`window.__copied === document.querySelector('#crText').textContent`)) && /Copied/.test(await text('#crCopy')), await text('#toast'));
+      check(`${label}: no sideways scrolling on Client Requirements`, await noSideScroll());
+      check(`${label}: Location comes from City only; the free-text Client Requirements text never appears`, /^Location: Makati$/m.test(crRaw) && /^Location: Not specified$/m.test(crRaw) && !/Fake requirements|Demo Person|c\/o|0199/.test(crRaw), (crRaw.match(/^Location: .*$/gm) || []).join(' | '));
+      check(`${label}: Monday pets "Not Applicable" shows "Not specified", never "Pet Friendly"`, /^Pet Friendly\/Not Pet Friendly: Not specified$/m.test(crRaw) && !/: Pet Friendly$/m.test(crRaw), (crRaw.match(/^Pet Friendly.*$/m) || [''])[0]);
+      await shot(`${label}-6-client-requirements`);
+
+      // Property Requirements: same Location rule (City only, no free text)
+      if (mobile) { await c.ev(`(() => { const b = document.querySelector('.nav-burger'); b && b.click(); })()`); await sleep(250); }
+      await c.ev(`document.querySelector('[data-act="nav"][data-v="propreq"]').click()`);
+      await until(`!!document.querySelector('#prText')`);
+      const pr = await c.ev(`document.querySelector('#prText').textContent`);
+      check(`${label}: Property Requirements Location is City only; free text never appears`, /^Location: Makati$/m.test(pr) && /^Location: Not specified$/m.test(pr) && !/Fake requirements|Demo Person|c\/o|0199/.test(pr) && /^Pet Friendly\/Not Pet Friendly: Not specified$/m.test(pr), (pr.match(/^(Location|Pet).*$/gm) || []).join(' | '));
+      check(`${label}: no sideways scrolling on Property Requirements`, await noSideScroll());
+      await shot(`${label}-6b-property-requirements`);
+
+      // Daily Report: numeric lead IDs only (Monday item names "BH-T…" and client names never appear), Copy text copies it
+      if (mobile) { await c.ev(`(() => { const b = document.querySelector('.nav-burger'); b && b.click(); })()`); await sleep(250); }
+      await c.ev(`document.querySelector('[data-act="nav"][data-v="daily"]').click()`);
+      await until(`!!document.querySelector('#drText')`);
+      const dr = await c.ev(`document.querySelector('#drText').textContent`);
+      check(`${label}: Daily Report uses numeric lead IDs only`, /Lead #9\d{3}/.test(dr) && !/BH-T|Test Client|Sourcing Client|Check Fails|Hot Client|\+63|@/.test(dr), dr.split('\n').filter((x) => /^•/.test(x)).join(' | ').slice(0, 200));
+      await c.ev(`window.__copied = null`);
+      await click('[data-act="copydaily"]');
+      await until(`window.__copied !== null`);
+      check(`${label}: Daily Report copy matches the screen`, await c.ev(`window.__copied === document.querySelector('#drText').textContent`));
+      check(`${label}: no sideways scrolling on Daily Report`, await noSideScroll());
+      await shot(`${label}-7-daily-report`);
       await c.ev(`fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })`);
     }
     // a VA (edit access to Leads) can use Asking for Availability but not the Failed override
@@ -185,6 +233,8 @@ async function cdp(wsUrl) {
     await c.send('Page.navigate', { url: base + '/' });
     await until(`!!document.querySelector('#loginForm')`);
     await c.ev(`(() => { document.querySelector('#lEmail').value = 'ana@example.com'; document.querySelector('#lPass').value = ${JSON.stringify(PW)}; document.querySelector('#loginForm').requestSubmit(); })()`);
+    await until(`!!document.querySelector('[data-act="nav"][data-v="leads"]')`, 20000);
+    await c.ev(`document.querySelector('[data-act="nav"][data-v="leads"]').click()`);   // the browser remembers the last page
     await until(`!!document.querySelector('#list .row[data-id="9001"]')`, 20000);
     await c.ev(`document.querySelector('#list .row[data-id="9001"]').click()`);
     await until(`!!document.querySelector('#dbody .aicard')`); await sleep(300);
@@ -195,6 +245,19 @@ async function cdp(wsUrl) {
     await until(`!!document.querySelector('#propsResults [data-act="askadd"]')`);
     check('VA: Ask availability is available', true);
     await shot('va-details');
+    // Client Requirements follows the Property Requirements permission and the VA's own leads only
+    await c.ev(`document.querySelector('#drawer [data-act="close"]').click()`);
+    await c.ev(`document.querySelector('[data-act="nav"][data-v="clientreq"]').click()`);
+    await until(`!!document.querySelector('#crText')`);
+    const vaCr = await c.ev(`document.querySelector('#crText').textContent`);
+    check('VA: Client Requirements shows only her own sourcing client (not Bea\'s)', (vaCr.match(/^\d+\. Client \d+$/gm) || []).length === 1 && /RENT/.test(vaCr) && !/SALE|Demo Sale Tower/.test(vaCr), vaCr.split('\n').slice(2, 4).join(' | '));
+    // a VA without Property Requirements access doesn't get the page either
+    await c.send('Network.clearBrowserCookies'); await c.send('Page.navigate', { url: base + '/' });
+    await until(`!!document.querySelector('#loginForm')`);
+    await c.ev(`(() => { document.querySelector('#lEmail').value = 'cora@example.com'; document.querySelector('#lPass').value = ${JSON.stringify(PW)}; document.querySelector('#loginForm').requestSubmit(); })()`);
+    await until(`!!document.querySelector('[data-act="nav"][data-v="leads"]')`, 20000);
+    const coraNav = await c.ev(`[...document.querySelectorAll('[data-act="nav"]')].map((b) => b.dataset.v).join(',')`);
+    check('VA without Property Requirements access: no Client Requirements page', !/clientreq|propreq/.test(coraNav), coraNav);
 
     // nothing was written to Monday or respond.io, and photos were only read
     check('read-only: Monday got queries only, respond.io GETs only, file host GETs without the token',

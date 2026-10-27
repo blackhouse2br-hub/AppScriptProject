@@ -35,6 +35,7 @@
     ['upsell', 'Upselling', P('<path d="M3 11l18-8-8 18-2-8-8-2z"/>')],
     ['daily', 'Daily Report', P('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>')],
     ['propreq', 'Property Requirements', P('<path d="M3 21h18M6 21V10l6-5 6 5v11"/><circle cx="17" cy="16" r="3"/><path d="m21 20-1.8-1.8"/>')],
+    ['clientreq', 'Client Requirements', P('<circle cx="8" cy="7" r="3"/><path d="M3 20a5 5 0 0 1 10 0M15 8h6M15 12h6M15 16h4"/>')],
     ['services', 'Service Requests', P('<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.5-2.5z"/>')],
     ['pages', 'Project Pages', P('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>')],
     ['pl', 'P&L', P('<path d="M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>')],
@@ -129,7 +130,9 @@
     return D.users.find((u) => u.email === S.as) || D.users.find((u) => u.role === 'Manager') || D.users[0] || NOBODY;
   }
   const isManager = () => me().role === 'Manager';
-  const access = (mod) => SH.access(me(), mod);
+  // screens that share another module's permission (same data, same people): no separate Team & Access setting
+  const MOD_ALIAS = { clientreq: 'propreq' };
+  const access = (mod) => SH.access(me(), MOD_ALIAS[mod] || mod);
   const canSee = (mod) => access(mod) !== 'none';
   // records read live from Monday.com are read-only in this phase, whatever the user's role
   const canEdit = (mod) => access(mod) === 'edit' && !(!DEMO && S.source === 'monday' && ['leads', 'calendar', 'invdash'].includes(mod));
@@ -238,7 +241,7 @@
   function sidebar() {
     const vis = visibleLeads();
     const cnt = { leads: vis.length, vaportal: vaPending().length, calendar: visibleViewings().filter((v) => v.status === 'Done' && !v.feedback).length,
-      renewals: vis.filter((l) => l.ai === 'For Renewal').length, propreq: PR.sourcingLeads(vis).length };
+      renewals: vis.filter((l) => l.ai === 'For Renewal').length, propreq: PR.sourcingLeads(vis).length, clientreq: CR.clients(vis).length };
     const hot = { vaportal: 1 };
     const by = (k) => { const m = {}; vis.forEach((l) => { m[l[k]] = (m[l[k]] || 0) + 1; }); return m; };
     const aiN = by('ai'), tempN = by('temp');
@@ -259,7 +262,7 @@
   }
   function viewHtml() {
     const fn = { leads: leadsView, vaportal: vaPortalView, monitor: monitorView, calendar: calendarView, invdash: invView, ldash: ldashView,
-      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, team: settingsView }[S.view];
+      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView }[S.view];
     return fn ? fn() : laterView(S.view);
   }
   const laterBox = (title, what) => `<div class="later-box"><b>${esc(title)} isn't in this preview yet.</b><br>In the live portal: ${esc(what)}<br><span class="sub">It will be built in a later migration phase. Nothing here connects to the live system.</span></div>`;
@@ -931,20 +934,11 @@
       <div class="cols2">${table('By AI Status', AI_STAGES, (l) => l.ai)}${table('By source', LISTS.sources, (l) => l.source)}</div>
       ${isManager() ? table('By VA', LISTS.vas.concat(['']), (l) => l.va) : ''}`;
   }
-  function dailyText() {
-    const t = today(), tm = ymd(new Date(Date.now() + 864e5)), vv = visibleViewings().slice().sort((a, b) => String(a.time).localeCompare(String(b.time)));
-    const line = (v) => { const l = leadById(v.leadId) || {}, x = unitOf(v); return `• ${v.time || '--:--'} · ${x.building || '?'} (${x.city || ''}) · ${l.code || ''} · broker ${v.broker || '?'} · ${v.status}`; };
-    const newLeads = visibleLeads().filter((l) => Date.now() - new Date(l.createdAt) < 3 * 864e5);
-    const lois = visibleLeads().filter((l) => ['LOI', 'Contract'].includes(l.ai));
-    // client names and numbers are never included in broker-group messages (README rule), so this uses lead IDs only
-    return [`BLACKHOUSE DAILY REPORT · ${fmtShort(t)}${DEMO ? ' (DEMO DATA)' : ''}`, '',
-      `VIEWINGS TODAY (${vv.filter((v) => v.date === t && v.status !== 'Cancelled').length})`, ...vv.filter((v) => v.date === t && v.status !== 'Cancelled').map(line), '',
-      `VIEWINGS TOMORROW (${vv.filter((v) => v.date === tm && v.status !== 'Cancelled').length})`, ...vv.filter((v) => v.date === tm && v.status !== 'Cancelled').map(line), '',
-      `NEW CLIENT REQUIREMENTS (${newLeads.length})`, ...newLeads.map((l) => `• ${l.code} · ${l.inquiry} · ${l.city} · ${l.bedrooms === 'Studio' ? 'Studio' : l.bedrooms + ' BR'} · ${money(l.budget) || 'budget n/a'}${l.requirements ? ' · ' + l.requirements : ''}`), '',
-      `LOIs & CONTRACTS IN PROGRESS (${lois.length})`, ...lois.map((l) => `• ${l.code} · ${l.ai}${l.daysInStage != null ? ' · ' + l.daysInStage + ' days in stage' : ''}`)].join('\n');
-  }
+  // client names, codes, phones, emails and free-text notes never go in broker-group messages: numeric lead IDs only (daily-report.js)
+  const dailyText = () => window.BH_DAILY.buildDaily({ leads: visibleLeads(), viewings: visibleViewings(), listings: D.listings,
+    today: today(), tomorrow: ymd(new Date(Date.now() + 864e5)), demo: DEMO });
   function dailyView() {
-    return `<div class="panel"><h3>Daily Report <span class="muted">for the broker group · lead IDs only, no client names or numbers</span><span class="spacer"></span><button class="btn sm" data-act="copydaily">Copy text</button></h3><pre class="report">${esc(dailyText())}</pre></div>
+    return `<div class="panel"><h3>Daily Report <span class="muted">for the broker group · numeric lead IDs only, no client names, numbers or notes</span><span class="spacer"></span><button class="btn sm" data-act="copydaily">Copy text</button></h3><pre class="report" id="drText">${esc(dailyText())}</pre></div>
       <div class="sub">Posting to the broker group is not connected in the preview.</div>`;
   }
   // ---------- Property Requirements (read-only text for the broker channel; rules in prop-report.js) ----------
@@ -962,6 +956,20 @@
         <pre class="report" id="prText" aria-label="Report preview">${esc(propReqText())}</pre></div>
       <div class="sub">Included: leads you can see whose stage is <b>Property Matching</b> (from the Calendar, Monday AI STATUS and Next Action/Status, with or without a respond.io chat), unless the Temperature is Lost or Dead or the Client Status says closed/failed. The date only sets the heading; the leads are today's records.
         Missing details, including a pet preference that was never given, show “${esc(PR.NA)}”. Building, SQM, bathrooms, parking and furnishing are edited under <b>Unit Preferences</b> in each lead's details.${DEMO ? ' <b>This is fictional demo data.</b>' : ''} Nothing is sent to Viber.</div>`;
+  }
+  // ---------- Client Requirements (read-only daily message; rules in client-req.js, eligibility shared with prop-report.js) ----------
+  const CR = window.BH_CLIENTREQ;
+  const clientReqText = () => CR.buildMessage(visibleLeads(), CR.businessYmd());
+  function clientReqView() {
+    const list = CR.clients(visibleLeads()), rent = list.filter((l) => l.inquiry === 'Rent').length, sale = list.filter((l) => l.inquiry === 'Buy').length;
+    return `<div class="cards"><div class="card"><div class="n">${list.length}</div><div class="l">Active clients in Property Sourcing</div></div>
+        <div class="card"><div class="n">${rent}</div><div class="l">Rent</div></div><div class="card"><div class="n">${sale}</div><div class="l">Sale</div></div></div>
+      <div class="panel"><h3>Client Requirements <span class="muted">today's message · clients are numbered, no names, numbers, emails or lead IDs</span></h3>
+        <div class="pr-bar"><span class="sub">For ${esc(PR.dateLabel(CR.businessYmd()))} (Manila time)</span><span class="spacer"></span>
+          <button type="button" class="btn primary" id="crCopy" data-act="copyclientreq">Copy message</button></div>
+        <pre class="report" id="crText" aria-label="Message preview">${esc(clientReqText())}</pre></div>
+      <div class="sub">Included: clients you can see who are active and in <b>Property Sourcing</b> (stage Property Matching, with or without a respond.io chat), the same clients as Property Requirements. Excluded: Lost or Dead Temperature, and closed / failed Client Status, including a portal Failed override.
+        Building Name appears only when one was given; other missing details show “${esc(CR.NA)}”. Furnishing and pets are listed for rentals only.${DEMO ? ' <b>This is fictional demo data.</b>' : ''} Nothing is sent anywhere: copy the message and paste it yourself.</div>`;
   }
   /** Copies with the Clipboard API; falls back to a hidden textarea where that API isn't available. */
   async function copyText(text) {
@@ -999,7 +1007,7 @@
       <div class="pad sub">Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending respond.io messages or templates, creating contacts, webhooks and background jobs.
         Monday data is held in server memory for up to 5 minutes and is not saved to MongoDB.</div></div>`;
   }
-  const MOD_KEYS = VIEWS.map((v) => v[0]);
+  const MOD_KEYS = VIEWS.map((v) => v[0]).filter((k) => !MOD_ALIAS[k]);
   /** VA Assigned / Salesperson labels: from the Monday board when connected (mongo mode), else the preview's lists. */
   function loadTeamLabels() {
     if (DEMO || S.teamLabels || S.teamLabelsBusy) return;
@@ -1538,6 +1546,12 @@
       el.textContent = 'Copied ✓'; clearTimeout(el.t); el.t = setTimeout(() => { el.textContent = 'Copy report'; }, 2000);
     },
     prtoday: () => { S.prDate = ''; renderView(); },
+    copyclientreq: async (el) => {
+      const text = clientReqText(), n = CR.clients(visibleLeads()).length;
+      try { await copyText(text); } catch (e) { return toast('Copy was blocked by the browser. Select the message text and copy it by hand.', true); }
+      toast(`Message copied (${n} client${n === 1 ? '' : 's'}). Paste it where you need it; nothing was sent.`);
+      el.textContent = 'Copied ✓'; clearTimeout(el.t); el.t = setTimeout(() => { el.textContent = 'Copy message'; }, 2000);
+    },
     refresh: async () => {
       if (DEMO) return toast('Demo data doesn\'t change on its own. In the live portal, Refresh reloads from Monday.com.');
       if (S.open && Object.keys(S.draft).length) return toast('Save or discard your changes first.', true);

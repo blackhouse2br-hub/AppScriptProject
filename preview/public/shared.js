@@ -157,6 +157,22 @@
   /** MongoDB mode: Monday.com (read-only) is the default source for leads/listings/calendar; MongoDB only when chosen by hand. */
   const defaultSource = (manualChoice) => (manualChoice === 'mongo' ? 'mongo' : 'monday');
 
+  // ---------- pets ----------
+  /**
+   * A lead's pet answer as 'With Pets', 'No Pets' or '' (not specified). Only clear answers count: the Monday label
+   * "Not Applicable", N/A, Any, Not specified, blanks and anything else (e.g. "Small pets only", "Dog") stay ''.
+   * "No…" is checked first, because "not pet friendly" contains "pet friendly".
+   */
+  function normPets(v) {
+    const s = String(v == null ? '' : v).trim().replace(/\s+/g, ' ');
+    if (/^(no|none|wala|0|no pets?|no pets? allowed|pets? not allowed|not pet[- ]friendly)$/i.test(s)) return 'No Pets';
+    if (/^(yes|with pets?|pets? allowed|pet[- ]friendly)$/i.test(s)) return 'With Pets';
+    return '';
+  }
+  /** The wording both requirement messages use. */
+  const PET_WORDS = { 'With Pets': 'Pet Friendly', 'No Pets': 'Not Pet Friendly' };
+  const petWords = (v) => PET_WORDS[normPets(v)] || 'Not specified';
+
   // ---------- cities ----------
   // The Monday Listings board's City (mirrored from the Building Database) says "Taguig", "Makati", "Rockwell"…, and is
   // empty for listings not linked to a building; the preview groups by the LISTS.cities labels ("Taguig (BGC)").
@@ -252,5 +268,5 @@
   return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
     validateLeadPatch, leadUpdateNote, validateNote, validateBooking, bookingLeadChanges, bookingNote,
     validateViewingPatch, validateAvailability, validateUser, validateTemplate,
-    canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride };
+    normPets, petWords, canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride };
 });

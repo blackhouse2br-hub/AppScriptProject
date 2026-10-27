@@ -291,7 +291,7 @@ pre.report { white-space: pre-wrap; font: 12.5px/1.5 ui-monospace, Consolas, mon
 .pr-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .pr-date { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
 .pr-date input { padding: 5px 8px; }
-#prText { overflow-wrap: anywhere; max-height: 70vh; overflow-y: auto; }
+#prText, #crText { overflow-wrap: anywhere; max-height: 70vh; overflow-y: auto; }
 
 /* Calendar */
 .cal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -439,7 +439,7 @@ pre.report { white-space: pre-wrap; font: 12.5px/1.5 ui-monospace, Consolas, mon
   .pr-date { flex: 1 1 100%; flex-direction: column; align-items: stretch; gap: 4px; }
   .pr-date input { min-height: 44px; width: 100%; }
   .pr-bar .btn { flex: 1 1 0; justify-content: center; min-height: 44px; }
-  #prText { max-height: none; font-size: 13px; }
+  #prText, #crText { max-height: none; font-size: 13px; }
 }
 
 /* lead table → cards when the list is narrow (phones, portrait tablets): name, lead ID, AI status, temperature, VA, type */
