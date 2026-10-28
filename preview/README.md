@@ -116,6 +116,14 @@ owner sets `MONDAY_CALENDAR_FEEDBACK_COLUMN` to the id of one dedicated Calendar
 other column has (one line, ≤ 200 characters). If the setting is absent or the column doesn't qualify, nothing is copied,
 the save still goes through with a warning, and Settings → Integrations → Test Monday connection shows why.
 
+**Reports from the Monday Calendar board (read only).** Leads Report → Closed Deals — Commission Collected, Renewals,
+P&L and the per-period Broker / VA figures read the Calendar board's deal columns (Contract Date, Blackhouse Commission,
+Total Paid, Deductions, Date of Payment, Monthly Contract Price, Rental Rate, Type, Contract Expiration Date, Renewal Date,
+Renewal Status) through `GET /api/monday/deals`, scoped like the rest of Monday data. "Collected" follows the Apps
+Script: Total Paid on a Closed row with a Date of Payment. Portal-only records: the Renewals message log ("I sent it from
+respond.io": template and time, never the text), the Daily Report's own lines and the P&L cost lines. Nothing is sent
+from the portal, and none of these screens writes to Monday.
+
 **Brokers on Monday** are identified only by the exact Salesperson label an admin sets for them in Settings → Team &
 Access (one broker per label). Without a label, or with a label shared by two active brokers, a broker sees no Monday
 viewings or clients and is told what to ask for. Their portal name is never matched to Monday.

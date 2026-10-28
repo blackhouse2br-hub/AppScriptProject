@@ -44,11 +44,19 @@ fx.BOARDS['1111111'].items.push({ id: '9008', name: 'BH-T8', group: 'ALL CLIENTS
 // Calendar board: the real board's Status labels and LOI Creation Date; two viewings that already happened for Ana's
 // client 9010 with no result yet (Pending Broker Feedback), one recorded per screen size
 const daysAgo = (n) => { const d = new Date(Date.now() - n * 864e5); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const ymdIn = (n) => daysAgo(-n);
 const todayManila = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const CB = fx.BOARDS['3333333'];
 CB.columns.find((c) => c.id === 'st').settings_str = JSON.stringify({ labels: { 0: 'Viewing Scheduled', 1: 'Under Negotiations', 2: 'Failed', 3: 'Confirmed', 4: 'Pending' } });
 CB.columns.push({ id: 'lcd', title: 'LOI Creation Date', type: 'date', settings_str: '{}' });
 fx.BOARDS['1111111'].items.push({ id: '9010', name: 'BH-T10', group: 'ALL CLIENTS', v: { cn: 'Viewing Client', ph: '+63 900 555 0010', va1: 'Ana', inq: 'Rent', na: 'Schedule Viewing', city: 'Makati', br: '2', dq: daysAgo(12) } });
+// deals and a lease on the Calendar board (the real board's column titles and kinds), for a client of Bea's (9011)
+CB.columns.push({ id: 'ccd', title: 'Contract Date', type: 'date', settings_str: '{}' }, { id: 'bc', title: 'Blackhouse Commission', type: 'numbers', settings_str: '{}' },
+  { id: 'mcp', title: 'Monthly Contract Price', type: 'numbers', settings_str: '{}' }, { id: 'dop', title: 'Date of Payment', type: 'date', settings_str: '{}' },
+  { id: 'ced', title: 'Contract Expiration Date', type: 'date', settings_str: '{}' }, { id: 'typ', title: 'Type', type: 'dropdown', settings_str: JSON.stringify({ labels: { 0: 'Property Sale', 1: 'Property Rental', 2: 'Property Renewal' } }) });
+fx.BOARDS['1111111'].items.push({ id: '9011', name: 'BH-T11', group: 'ALL CLIENTS', v: { cn: 'Lease Client', ph: '+63 900 555 0011', va1: 'Bea', inq: 'Rent', na: 'Schedule Viewing', city: 'Makati', br: '2', dq: daysAgo(90) } });
+CB.items.push({ id: '6301', name: 'Deal 1', group: 'Closed', created: daysAgo(70), v: { fs: daysAgo(60), cl: { linked: ['9011'] }, b: 'Demo Lease Tower', c: 'Makati', tm: '10:00', sp: 'Gia Cruz', st: 'Closed',
+  ccd: daysAgo(50), bc: '120000', tp: '120000', mcp: '120000', dop: daysAgo(20), ced: ymdIn(25), typ: 'Property Rental' } });
 CB.items.push({ id: '6201', name: 'Viewing 3', group: 'Viewings', created: daysAgo(6), v: { fs: daysAgo(2), cl: { linked: ['9010'] }, b: 'Demo Pending Tower', c: 'Makati', tm: '3:00 PM', sp: 'Ely Santos', st: 'Viewing Scheduled' } },
   { id: '6202', name: 'Viewing 4', group: 'Viewings', created: daysAgo(6), v: { fs: daysAgo(3), cl: { linked: ['9010'] }, b: 'Demo LOI Tower', c: 'Makati', tm: '11:00 AM', sp: 'Ely Santos', st: 'Viewing Scheduled' } });
 
@@ -239,7 +247,7 @@ async function cdp(wsUrl) {
       await c.ev(`document.querySelector('[data-act="nav"][data-v="daily"]').click()`);
       await until(`!!document.querySelector('#drText')`);
       const dr = await c.ev(`document.querySelector('#drText').textContent`);
-      check(`${label}: Daily Report uses numeric lead IDs only`, /Lead #9\d{3}/.test(dr) && !/BH-T|Test Client|Sourcing Client|Check Fails|Hot Client|\+63|@/.test(dr), dr.split('\n').filter((x) => /^•/.test(x)).join(' | ').slice(0, 200));
+      check(`${label}: Daily Report uses numeric lead IDs only`, /Lead #9\d{3}/.test(dr) && !/BH-T|Test Client|Sourcing Client|Check Fails|Hot Client|Lease Client|Viewing Client|\+63|@/.test(dr), dr.split('\n').filter((x) => /^•/.test(x)).join(' | ').slice(0, 200));
       await c.ev(`window.__copied = null`);
       await click('[data-act="copydaily"]');
       await until(`window.__copied !== null`);
@@ -408,6 +416,64 @@ async function cdp(wsUrl) {
     await until(`!document.querySelector('#modal').classList.contains('open')`, 15000);
     await until(`/Ely Santos/.test((document.querySelector('[data-act="user"][data-v="brk@example.com"]') || {}).textContent || '')`, 10000);
     check('Team & Access: the label is saved and matches a Salesperson on the board', /Ely Santos \(Salesperson\)/.test(await text('[data-act="user"][data-v="brk@example.com"]')) && /✓ Salesperson/.test(await text('[data-act="user"][data-v="brk@example.com"]')), await text('[data-act="user"][data-v="brk@example.com"]'));
+
+    // ---- Apps Script parity screens (Manager, Monday data; nothing may be written to Monday or sent to respond.io) ----
+    const mutBefore = writesSent().length, respondBefore = fx.calls.respond.length;
+    for (const [label, w, h, mobile] of [['desktop', 1440, 900, false], ['phone', 390, 844, true]]) {
+      await c.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: mobile ? 2 : 1, mobile });
+      // Leads Report → Closed Deals — Commission Collected
+      await navTo('ldash', mobile);
+      await until(`/Closed Deals — Commission Collected/.test(document.body.textContent) && /Commission collected/.test(document.body.textContent)`, 15000);
+      const ld = await text('#view');
+      check(`${label}: Leads Report shows Closed Deals — Commission Collected from the Calendar board (₱120,000, by city and building)`, /₱120,000/.test(ld) && /Demo Lease Tower/.test(ld) && /By city/.test(ld), (ld.match(/Commission collected[^A-Z]*/) || [''])[0].slice(0, 80));
+      check(`${label}: no sideways scrolling on the Leads Report`, await noSideScroll());
+      // Broker Management: the board's own Salesperson labels, per period
+      await navTo('brokers', mobile);
+      await until(`/Per period/.test(document.body.textContent) && !/Loading the Monday/.test(document.body.textContent)`, 15000);
+      const brk = await c.ev(`[...document.querySelectorAll('#view table:first-of-type tbody tr td:first-child')].map((x) => x.textContent.trim())`);
+      check(`${label}: Broker Management lists the Monday Salesperson labels, not fictional names`, brk.includes('Ely Santos') && brk.includes('Gia Cruz') && !brk.includes('Fritz Lim'), brk.join(', '));
+      // Renewals: the lease from the Calendar board, its Message (copy + "I sent it" log)
+      await navTo('renewals', mobile);
+      await until(`!!document.querySelector('[data-act="rnmsg"][data-id="9011"]')`, 15000);
+      check(`${label}: Renewals lists the Calendar lease due in 25 days, with the Contract Expiration Date`, /Demo Lease Tower/.test(await text('#view')) && /25 d/.test(await text('#view')), (await text('#view')).slice(0, 120));
+      await click('[data-act="rnmsg"][data-id="9011"]');
+      await until(`!!document.querySelector('#rnText')`);
+      const msg = await c.ev(`document.querySelector('#rnText').value`);
+      check(`${label}: Message fills the 30-day renewal template (first name, building, days)`, /^Hi Lease, your lease at Demo Lease Tower ends on/.test(msg) && /only 25 days/.test(msg), msg.slice(0, 90));
+      await c.ev(`window.__copied = ''; navigator.clipboard.writeText = (t) => { window.__copied = t; return Promise.resolve(); }`);
+      await click('#modal [data-act="rncopy"]');
+      await sleep(200);
+      check(`${label}: Copy puts the message on the clipboard`, (await c.ev('window.__copied')) === msg);
+      await click('#modal [data-act="rnsent"]');
+      await until(`!document.querySelector('#modal').classList.contains('open')`, 10000);
+      await until(`/Renewal — 30 days/.test(document.querySelector('#view').textContent)`, 10000);
+      check(`${label}: "I sent it from respond.io" records the message on the lease (no sending)`, /Recorded: Renewal — 30 days\. Nothing was sent/.test(await text('#toast')), await text('#toast'));
+      check(`${label}: no sideways scrolling on Renewals`, await noSideScroll());
+      // P&L: commission per month from the Calendar board; a cost line saved in the portal
+      await navTo('pl', mobile);
+      await until(`/Total Estimated Commission/.test(document.body.textContent) && !!document.querySelector('[data-ch="plcell"]')`, 15000);
+      const pl = await text('#view');
+      check(`${label}: P&L shows the Calendar commission (₱120,000 collected) and the Data Check`, /Collected Commission Revenue/.test(pl) && /₱120,000/.test(pl) && /Data Check/.test(pl), pl.slice(0, 100));
+      if (!mobile) {
+        await c.ev(`(() => { const i = document.querySelector('[data-ch="plcell"][data-line="salaries"]'); i.value = '20000'; i.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        await until(`/Saved in the portal/.test(document.querySelector('#toast').textContent)`, 10000);
+        check('desktop: a P&L cost line is saved in the portal and counted in operating expenses', /₱20,000/.test(await text('#view')));
+      }
+      // Daily Report: date, sections, own lines, Clear — the generated part stays free of names and numbers
+      await navTo('daily', mobile);
+      await until(`!!document.querySelector('[data-ch="drdate"]')`, 10000);
+      await c.ev(`(() => { const s = document.querySelector('[data-ch="drsec"][data-k="new"]'); s.checked = false; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await sleep(200);
+      await c.ev(`(() => { const t = document.querySelector('[data-ch="drnote"][data-k="extra"]'); t.value = 'Team meeting at 4pm'; t.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+      await until(`/NOTES\\nTeam meeting at 4pm/.test(document.querySelector('#drText').textContent)`, 10000);
+      const drt = await text('#drText');
+      check(`${label}: Daily Report leaves out an unticked section and adds the team's own lines`, !/NEW CLIENT REQUIREMENTS/.test(drt) && /NOTES Team meeting at 4pm/.test(drt) && !/Lease Client|Sourcing Client|\+63/.test(drt), drt.slice(0, 140));
+      await click('[data-act="drclear"]');
+      await until(`/NEW CLIENT REQUIREMENTS/.test(document.querySelector('#drText').textContent) && !/NOTES/.test(document.querySelector('#drText').textContent)`, 10000);
+      check(`${label}: Clear brings back every section and removes the extra lines`, true);
+      check(`${label}: no sideways scrolling on the Daily Report`, await noSideScroll());
+    }
+    check('parity screens: nothing written to Monday, nothing sent to respond.io', writesSent().length === mutBefore && fx.calls.respond.slice(respondBefore).every((x) => x.method === 'GET'));
     // a VA with Leads edit (no Inventory access): lead fields are Managers only, so no Monday updates at all
     await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await signIn('ana@example.com');

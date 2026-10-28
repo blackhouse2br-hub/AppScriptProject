@@ -3,10 +3,10 @@
 // and every handler checks module access and lead visibility for the signed-in user.
 const express = require('express');
 const SH = require('../public/shared');
-const { Lead, Listing, Viewing, Note, User, Template, AvailabilityRequest, LeadOverride } = require('./models');
+const { Lead, Listing, Viewing, Note, User, Template, AvailabilityRequest, LeadOverride, RenewalLog, DailyNote, PlCell } = require('./models');
 const { authRoutes, requireUser, hashPassword, revokeSessions } = require('./auth');
 const { dbReady } = require('./db');
-const { isId, need, leadScope, viewingScope, findVisibleLead, resolveBrokerLabel } = require('./access');
+const { isId, need, leadScope, viewingScope, findVisibleLead, resolveBrokerLabel, scopeExternal } = require('./access');
 const { integrationRoutes, createIntegrations } = require('./integrations/routes');
 const { saveMondayResult, saveMongoResult, pendingFeedback } = require('./integrations/viewingResult');
 
@@ -222,6 +222,57 @@ function apiRouter(config) {
       res.status(code).json({ error: err.message, ...['needsConfirm', 'stale', 'writesOff', 'retryAfter', 'partial'].reduce((o, k) => (err[k] ? { ...o, [k]: err[k] } : o), {}) });
     }
   });
+  // ----- Renewals: "I sent it from respond.io" log (the portal sends nothing; template key and time only) -----
+  r.post('/leads/:source/:id/renewal-log', need('renewals', 'edit'), async (req, res) => {
+    const kind = req.body && req.body.kind;
+    if (!req.body || Object.keys(req.body).some((k) => k !== 'kind') || !SH.RENEWAL_TEMPLATES.some((t) => t.k === kind)) return bad(res, ['Pick a message template.']);
+    const lead = await leadFor(req, res); if (!lead) return;
+    const entry = await RenewalLog.create({ source: req.params.source, leadId: lead.id, kind, by: { name: req.user.name, userId: req.user._id } });
+    res.status(201).json({ entry: { leadId: lead.id, kind, at: entry.createdAt, by: req.user.name } });
+  });
+  /** The renewal log of the clients this user can see: { leadId: [{ kind, at, by }] } (newest first, 12 each). */
+  r.get('/renewals/log', need('renewals', 'view'), async (req, res) => {
+    const source = req.query.source === 'mongo' ? 'mongo' : 'monday';
+    let ids;
+    if (source === 'mongo') ids = (await Lead.find(await leadScope(req.user), { _id: 1 }).limit(20000).lean()).map((l) => String(l._id));
+    else {
+      if (!integ.monday) return res.json({ log: {} });
+      const all = await integ.monday.loadAll(false);
+      ids = scopeExternal(req.user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads.map((l) => l.id);
+    }
+    const rows = await RenewalLog.find({ source, leadId: { $in: ids } }).sort({ createdAt: -1 }).limit(20000).lean();
+    const log = {};
+    rows.forEach((x) => { const a = (log[x.leadId] = log[x.leadId] || []); if (a.length < 12) a.push({ kind: x.kind, at: x.createdAt, by: x.by && x.by.name }); });
+    res.json({ log });
+  });
+
+  // ----- Daily Report: the team's own extra lines (call plan, anything else), as typed -----
+  r.get('/daily/notes', need('daily', 'view'), async (req, res) => {
+    const n = await DailyNote.findOne({ key: 'daily' }).lean();
+    res.json({ notes: { call: (n && n.call) || '', extra: (n && n.extra) || '' } });
+  });
+  r.put('/daily/notes', need('daily', 'edit'), async (req, res) => {
+    const b = req.body || {};
+    if (Object.keys(b).some((k) => !['call', 'extra'].includes(k)) || ['call', 'extra'].some((k) => b[k] !== undefined && typeof b[k] !== 'string')) return bad(res, ['Invalid request.']);
+    const set = {}; if (b.call !== undefined) set.call = b.call.slice(0, 2000); if (b.extra !== undefined) set.extra = b.extra.slice(0, 4000);
+    const n = await DailyNote.findOneAndUpdate({ key: 'daily' }, { $set: { ...set, by: { name: req.user.name, userId: req.user._id } } }, { upsert: true, new: true, runValidators: true });
+    res.json({ notes: { call: n.call, extra: n.extra } });
+  });
+
+  // ----- P&L: manual monthly lines (the commission figures are read from the Monday Calendar board) -----
+  r.get('/pl/cells', need('pl', 'view'), async (req, res) => {
+    const cells = {};
+    (await PlCell.find({}).limit(5000).lean()).forEach((c) => { (cells[c.line] = cells[c.line] || {})[c.month] = c.value; });
+    res.json({ cells });
+  });
+  r.put('/pl/cells', need('pl', 'edit'), async (req, res) => {
+    const { value, errors } = SH.validatePlCell(req.body);
+    if (errors.length) return bad(res, errors);
+    if (value.value === null) await PlCell.deleteOne({ line: value.line, month: value.month });
+    else await PlCell.findOneAndUpdate({ line: value.line, month: value.month }, { $set: { value: value.value, by: { name: req.user.name, userId: req.user._id } } }, { upsert: true, runValidators: true });
+    res.json({ cell: value });
+  });
+
   // Pending Broker Feedback beside the Calendar: viewings that happened with no result yet (both sources)
   r.get('/calendar/pending', need('calendar', 'view'), async (req, res) => {
     res.json(await pendingFeedback({ integ, user: req.user, now: Date.now() }));

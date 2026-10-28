@@ -35,7 +35,8 @@
     const vv = viewings.slice().sort((a, b) => String(a.time).localeCompare(String(b.time)));
     const on = (d) => vv.filter((v) => v.date === d && v.status !== 'Cancelled');
     const line = (v) => { const x = unit(v); return `• ${v.time || '--:--'} · ${clean(x.building) || '?'} (${clean(x.city)}) · ${ref(lead(v.leadId))} · broker ${clean(v.broker) || '?'} · ${v.status}`; };
-    const newLeads = leads.filter((l) => now - new Date(l.createdAt) < 3 * 864e5);
+    // the 3 days up to the report date (a past report date leaves out leads created after it)
+    const newLeads = leads.filter((l) => { const t = new Date(l.createdAt).getTime(); return t <= now && now - t < 3 * 864e5; });
     const lois = leads.filter((l) => ['LOI', 'Contract'].includes(l.ai));
     const beds = (b) => (!clean(b) ? 'BR n/a' : b === 'Studio' ? 'Studio' : clean(b) + ' BR');
     return [`BLACKHOUSE DAILY REPORT · ${dayLabel(opts.today)}${opts.demo ? ' (DEMO DATA)' : ''}`, '',

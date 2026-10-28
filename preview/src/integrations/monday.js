@@ -96,9 +96,26 @@ function matchCalendarCols(columns) {
   const out = { fin: find(/^final schedule$/i, 'date'), client: find(/^clients?$/i, 'board_relation'), bld: find(/^building$/i), city: find(/^city$/i),
     time: find(/^time$/i), broker: find(/^salesperson$/i), status: find(/^status$/i),
     loi: find(/^date loi\s+submitted$/i, 'date'), loi2: find(/^loi creation date$/i, 'date'), file: find(/^loi$/i, 'file'),
-    cdate: find(/^contract date$/i), cfile: find(/^contract$/i, 'file'), sfile: find(/^signed contract$/i, 'file'), paid: find(/^total paid$/i) };
+    cdate: find(/^contract date$/i), cfile: find(/^contract$/i, 'file'), sfile: find(/^signed contract$/i, 'file'), paid: find(/^total paid$/i),
+    // deals, commission and leases (Code.gs brokerCalendar_), read only: Leads Report, Renewals, P&L, Broker Management.
+    // "Type" is the dropdown (the board also has a text column titled "Type").
+    rate: find(/^rental rate$/i), price: find(/^monthly contract price$/i), comm: find(/^blackhouse commission$/i), ded: find(/^deductions$/i),
+    pay: find(/^date of payment$/i, 'date'), coll: find(/^collection date$/i, 'date'), exp: find(/^contract expiration date$/i, 'date'),
+    rdate: find(/^renewal date$/i, 'date'), rst: find(/^renewal status$/i, 'status'), ctype: find(/^type$/i, 'dropdown') };
   Object.keys(out).forEach((k) => { if (!out[k]) delete out[k]; });
   return out;
+}
+/**
+ * One Calendar item as a deal / lease row (Code.gs brokerCalendar_), for every item — with or without a Final Schedule.
+ * Amounts and dates only; no client name (the client is the linked Direct Clients item).
+ */
+function shapeDeal(it, cols) {
+  const v = values(it, cols), rel = v._client && v._client.linked_item_ids;
+  return { id: String(it.id), leadId: rel && rel[0] ? String(rel[0]) : '', group: (it.group && it.group.title) || '',
+    fin: ymdIn(v.fin), sp: v.broker, status: v.status, type: v.ctype || '', rst: v.rst || '', rdate: ymdIn(v.rdate), exp: ymdIn(v.exp),
+    contract: ymdIn(v.cdate), loi: ymdIn(v.loi) || ymdIn(v.loi2), pay: ymdIn(v.pay), coll: ymdIn(v.coll),
+    rate: money(v.rate), price: money(v.price), comm: money(v.comm), paid: money(v.paid), ded: money(v.ded),
+    building: String(v.bld || '').split(',')[0].trim(), city: String(v.city || '').split(',')[0].trim() };
 }
 /** Status/dropdown label names from a column's settings_str (Code.gs statusOptions_). */
 function labelsOf(col) {
@@ -353,12 +370,13 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
       if (!cols.fin) throw new IntegrationError('monday', `Calendar board ${id} has no "Final Schedule" date column.`);
       startProgress(p, meta);
       const items = await allItems(id, Object.values(cols), ITEM_FIELDS, 500, p);
-      const today = new Date().toISOString().slice(0, 10), viewings = [], lm = {};
+      const today = new Date().toISOString().slice(0, 10), viewings = [], lm = {}, deals = [];
       items.forEach((it) => {
         const v = values(it, cols), group = (it.group && it.group.title) || '';
         const rel = v._client && v._client.linked_item_ids, lead = rel && rel[0] ? String(rel[0]) : '';
         const shaped = shapeViewing(it, cols, today);
         if (shaped) viewings.push(shaped);
+        deals.push(shapeDeal(it, cols));
         // LOI / contract evidence per client (Code.gs loiMap_): Failed/Archive rows and Status Failed are skipped
         if (!lead || /failed|archive/i.test(group) || /fail/i.test(v.status || '')) return;
         const o = lm[lead] = lm[lead] || { d: '', ds: '', dc: '', cd: '', files: 0, cfiles: 0, sfiles: 0, paid: 0, booked: 0 };
@@ -372,7 +390,7 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
       // the Calendar board's own Salesperson labels (and any value in use): what a broker's label must match exactly
       const spCol = meta.columns.find((c) => c.id === cols.broker);
       const salesperson = [...new Set(labelsOf(spCol).concat(viewings.map((x) => x.broker).filter(Boolean)))];
-      return { viewings, lm, salesperson };
+      return { viewings, lm, salesperson, deals };
     },
   };
   const BOARD_OF = { leads: 'leads', listings: 'listings', calendar: 'calendar' };
@@ -450,7 +468,8 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     return {
       leads: raw.leads ? raw.leads.leads : [], labels: raw.leads ? raw.leads.labels : null,
       listings: raw.listings ? raw.listings.listings : [], viewings: raw.calendar ? raw.calendar.viewings : [], lm: raw.calendar ? raw.calendar.lm : {},
-      calendarOk: !!raw.calendar, calendarSalesperson: raw.calendar ? raw.calendar.salesperson || [] : null, errors, notConfigured, ...summary(boards),
+      calendarOk: !!raw.calendar, calendarSalesperson: raw.calendar ? raw.calendar.salesperson || [] : null, deals: raw.calendar ? raw.calendar.deals || [] : [],
+      errors, notConfigured, ...summary(boards),
     };
   }
 

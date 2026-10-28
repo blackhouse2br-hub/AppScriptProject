@@ -370,9 +370,38 @@
     return out;
   }
 
+  // ---------- Renewals: message templates (Code.gs CONFIG.RENEWAL_TEMPLATES, unchanged); composed and copied, not sent ----------
+  const RENEWAL_TEMPLATES = [
+    { k: 'renew90', group: 'Renewal', label: 'Renewal — 90 days', text: 'Hi {firstName}! This is {va} from Blackhouse. Your lease at {building} ends on {date}. Are you planning to renew, or would you like us to start looking for your next home? We can handle the renewal talks with the owner for you.' },
+    { k: 'renew60', group: 'Renewal', label: 'Renewal — 60 days', text: 'Hi {firstName}! {va} from Blackhouse here. Just a reminder that your lease at {building} ends on {date} ({days} days). Would you like us to arrange the renewal with the owner, or help you find a new place?' },
+    { k: 'renew30', group: 'Renewal', label: 'Renewal — 30 days', text: 'Hi {firstName}, your lease at {building} ends on {date} — only {days} days to go. Let us know today if you\'d like to renew so we can secure the same terms with the owner, or if you need options for your move.' },
+    { k: 'renewDone', group: 'Renewal', label: 'Thank you — renewed', text: 'Hi {firstName}! Thank you for renewing your lease at {building} with Blackhouse. If you need anything during your stay — repairs, cleaning or furniture — just message us here.' },
+    { k: 'movers', group: 'Services', label: 'Movers', text: 'Hi {firstName}! Moving soon? Blackhouse can arrange trusted movers for you — packing, truck and set-up at your new place, all handled. Would you like a quote?' },
+    { k: 'cleaners', group: 'Services', label: 'Cleaning', text: 'Hi {firstName}! Need your unit cleaned? We offer deep cleaning, move-in / move-out cleaning and regular housekeeping. Would you like us to book a schedule?' },
+    { k: 'aircon', group: 'Services', label: 'AC Cleaning', text: 'Hi {firstName}! When was your aircon last cleaned? Regular AC cleaning keeps it cool, saves on electricity and avoids breakdowns. We can book a trusted technician at {building} — how many units do you have, and what day works for you?' },
+    { k: 'repairs', group: 'Services', label: 'Repairs & maintenance', text: 'Hi {firstName}! Anything at {building} that needs fixing — aircon, plumbing, electrical or appliances? Our maintenance team can take care of it. Just send us a photo and we\'ll arrange it.' },
+    { k: 'interiors', group: 'Services', label: 'Interior design', text: 'Hi {firstName}! Thinking of refreshing your space? Our interior design partners can style your unit — from a simple makeover to a full fit-out. Would you like to see a few ideas?' },
+    { k: 'furniture', group: 'Services', label: 'Furniture', text: 'Hi {firstName}! Need furniture for your unit? We can source and deliver complete packages or individual pieces at partner prices. What are you looking for?' },
+    { k: 'legal', group: 'Services', label: 'Legal assistance', text: 'Hi {firstName}! Blackhouse also offers legal assistance — lease reviews, contract renewals, notarization and property documents. Would you like help with anything?' },
+  ];
+  // ---------- P&L manual lines (Code.gs PL_LINES_); everything else on the P&L is read from the Calendar board ----------
+  const PL_LINES = { cos: 'Cost of Services', salaries: 'Salaries', comm_inhouse: 'Commission (in-house)', benefits: 'Benefits', contracted: 'Contracted services',
+    advertising: 'Advertising', misc: 'Miscellaneous', permits: 'Permits & licenses', medical: 'Medical', corporate: 'Corporate', supplies: 'Supplies', dues: 'Dues & subscriptions' };
+  /** A P&L cell from the page: { line, month 'YYYY-MM', value } — value '' / null clears it. */
+  function validatePlCell(b) {
+    if (!isPlainObject(b) || Object.keys(b).some((k) => !['line', 'month', 'value'].includes(k))) return { errors: ['Invalid request.'] };
+    if (!Object.prototype.hasOwnProperty.call(PL_LINES, b.line)) return { errors: ['Unknown P&L line.'] };
+    if (typeof b.month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(b.month)) return { errors: ['Pick a month.'] };
+    if (b.value === '' || b.value === null) return { value: { line: b.line, month: b.month, value: null }, errors: [] };
+    const n = typeof b.value === 'number' ? b.value : Number(String(b.value).replace(/[,₱\s]/g, ''));
+    if (!Number.isFinite(n) || Math.abs(n) > 1e12) return { errors: ['Enter an amount.'] };
+    return { value: { line: b.line, month: b.month, value: Math.round(n * 100) / 100 }, errors: [] };
+  }
+
   return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
     validateLeadPatch, leadUpdateNote, validateNote, validateBooking, bookingLeadChanges, bookingNote,
     validateViewingPatch, validateAvailability, validateUser, validateTemplate,
     normPets, petWords, canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride,
-    FEEDBACK_TAGS, RESULT, validateResult, pendingSince, viewingAt, portalPending, numOf, fbInfer, feedbackPrefs, applyFeedback };
+    FEEDBACK_TAGS, RESULT, validateResult, pendingSince, viewingAt, portalPending, numOf, fbInfer, feedbackPrefs, applyFeedback,
+    RENEWAL_TEMPLATES, PL_LINES, validatePlCell };
 });

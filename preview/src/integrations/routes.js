@@ -122,6 +122,24 @@ function integrationRoutes(r, integ) {
       fetchedAt: all.fetchedAt, boards: all.boards, refreshing: all.refreshing, staleAfterMs: all.staleAfterMs });
   });
 
+  /**
+   * Calendar-board deals / leases (amounts, dates, statuses; no client names) for Leads Report, Renewals, P&L and Broker
+   * Management. Read only. Managers: every row; others: rows of clients they can see (brokers also their own label).
+   */
+  const DEAL_SCREENS = ['ldash', 'pl', 'brokers', 'renewals'];
+  r.get('/monday/deals', (req, res, next) => (DEAL_SCREENS.some((m) => SH.access(req.user, m) !== 'none') ? next() : res.status(403).json({ error: 'You don\'t have access to these reports.' })), async (req, res) => {
+    if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
+    const all = await monday.loadAll(false);
+    if (all.errors.viewings) return res.status(502).json({ error: 'The Monday Calendar board could not be read: ' + all.errors.viewings });
+    let deals = all.deals || [];
+    if (req.user.role !== 'Manager') {
+      const ids = new Set(scopeExternal(req.user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads.map((l) => l.id));
+      const label = req.user.role === 'Broker' ? brokerLabelOf(req.user).label : '';
+      deals = deals.filter((d) => ids.has(d.leadId) || (label && d.sp === label));
+    }
+    res.json({ deals, fetchedAt: all.fetchedAt });
+  });
+
   // how old each board's in-memory copy is and whether a refresh is running or failed (no Monday data in the reply)
   r.get('/monday/freshness', need('leads', 'view'), (req, res) => {
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);

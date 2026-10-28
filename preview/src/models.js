@@ -183,4 +183,28 @@ const ViewingResult = mongoose.model('ViewingResult', new Schema({
   by: { name: { type: String, default: '' }, userId: { type: ObjectId, ref: 'User' } },
 }, opts));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult };
+// Renewals → Message: "I sent it from respond.io" (Code.gs apiRenewalLog / rn_). Which template and when — never the
+// message text or the client's number. Nothing is sent from the portal.
+const RenewalLog = mongoose.model('RenewalLog', new Schema({
+  ...leadRef,
+  kind: { type: String, required: true, maxlength: 20 },   // a template key (SH.RENEWAL_TEMPLATES)
+  by,
+}, opts).index({ source: 1, leadId: 1, createdAt: -1 }));
+
+// Daily Report: the team's own extra lines (Code.gs jr_notes) — typed by staff, kept as written
+const DailyNote = mongoose.model('DailyNote', new Schema({
+  key: { type: String, required: true, unique: true, maxlength: 20 },
+  call: { type: String, default: '', maxlength: 2000 },
+  extra: { type: String, default: '', maxlength: 4000 },
+  by,
+}, opts));
+
+// P&L: manual monthly values per line (Code.gs pl_m_<line>); the commission figures come from the Calendar board
+const PlCell = mongoose.model('PlCell', new Schema({
+  line: { type: String, required: true, maxlength: 30 },
+  month: { type: String, required: true, match: /^\d{4}-\d{2}$/ },
+  value: { type: Number, required: true },
+  by,
+}, opts).index({ line: 1, month: 1 }, { unique: true }));
+
+module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell };

@@ -11,7 +11,8 @@
   const DEMO = !(window.BH_CONFIG && window.BH_CONFIG.mode === 'mongo');
   const GOOGLE = !DEMO && window.BH_CONFIG.auth === 'google';   // hosted portal: Google sign-in, no passwords
   const where = () => (DEMO ? 'in this browser (demo)' : 'in MongoDB');
-  const SRC = DEMO ? 'demo data' : 'MongoDB';
+  // where the records on screen come from (labels only): the chosen data source, never assumed to be MongoDB
+  const srcName = () => (DEMO ? 'demo data' : S.source === 'monday' ? 'Monday.com' : 'MongoDB');
   const STORE = 'bh_preview_demo_v1', PREF = 'bh_preview_prefs_v1';
 
   // ---------- constants copied from the original Index.html ----------
@@ -43,12 +44,11 @@
   ];
   const VIEW_LABEL = Object.fromEntries(VIEWS.map((v) => [v[0], v[1]]));
   const TITLES = { leads: 'Blackhouse Leads', calendar: 'Viewing calendar' };
-  // screens that exist in the original but are not rebuilt in this preview yet (descriptions from the original README)
+  // screens that exist in the original but are not rebuilt in the portal yet: what each one needs first
   const LATER = {
-    upsell: 'Concierge broadcasts to active clients, with images, sent through respond.io.',
-    services: 'Supplier jobs and service requests detected from client chats.',
-    pages: 'Developer project pages with a public inquiry form.',
-    pl: 'Profit & loss, commissions collected/pending and the Data Check rules, read from the Monday Calendar board.',
+    upsell: 'Concierge broadcasts to clients, with images, tagged and sent through respond.io. Needs sending through respond.io (switched off in the portal) and image hosting; the service messages themselves are already available under Renewals → Message.',
+    services: 'Service requests found in client replies (AI reading of respond.io chats), suppliers and sending jobs to them. Needs an AI service key and sending through respond.io, neither of which the portal has.',
+    pages: 'Developer project pages built from Google Drive folders and web research, with a public inquiry form. Needs Google Drive access, an AI service key and a public form endpoint, which the portal does not have.',
   };
   const LATER_TAB = {
     approval: 'Owner-confirmed units waiting for the client, and the “send confirmed units” chat pop-up.',
@@ -220,7 +220,7 @@
       const m = S.integ && S.integ.monday, canMonday = !!(m && m.configured);
       const errs = S.source === 'monday' ? Object.entries(S.srcErrors || {}) : [];
       const nc = S.source === 'monday' ? (S.srcNotConfigured || []) : [];
-      return `<div class="demo-bar live-bar ${S.source === 'monday' ? 'ext' : ''}"><span class="demo-tag live">MongoDB</span>
+      return `<div class="demo-bar live-bar ${S.source === 'monday' ? 'ext' : ''}"><span class="demo-tag live">${S.source === 'monday' ? 'Monday.com' : 'MongoDB'}</span>
         <div class="seg" role="group" aria-label="Data source">
           <button data-act="source" data-v="mongo" aria-pressed="${S.source === 'mongo'}">MongoDB</button>
           <button data-act="source" data-v="monday" aria-pressed="${S.source === 'monday'}" title="${canMonday ? (mondayWritesOn() ? 'Show live Monday.com data (only confirmed, allowlisted updates are written) — the default' : 'Show live Monday.com data (read-only) — the default') : 'Monday.com is not connected: set MONDAY_TOKEN and the board IDs in preview/.env'}">${mondayWritesOn() ? 'Monday.com · live' : 'Monday.com · read-only'}</button></div>
@@ -267,7 +267,7 @@
   }
   function viewHtml() {
     const fn = { leads: leadsView, vaportal: vaPortalView, monitor: monitorView, calendar: calendarView, invdash: invView, ldash: ldashView,
-      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView }[S.view];
+      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView, pl: plView }[S.view];
     return fn ? fn() : laterView(S.view);
   }
   const laterBox = (title, what) => `<div class="later-box"><b>${esc(title)} isn't in this preview yet.</b><br>In the live portal: ${esc(what)}<br><span class="sub">It will be built in a later migration phase. Nothing here connects to the live system.</span></div>`;
@@ -837,35 +837,298 @@
   function vaPortalView() {
     const rows = vaPending();
     return `<div class="cards">${['Reply to client', 'Confirm schedule', 'Send more units'].map((k) => `<div class="card"><div class="n">${rows.filter((r) => r[1] === k).length}</div><div class="l">${k}</div></div>`).join('')}</div>
-      <div class="panel"><h3>Pending actions <span class="muted">${rows.length} items · ${SRC}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Lead</th><th>Client</th><th>VA</th><th>Action</th><th>Detail</th><th>AI Status</th></tr></thead><tbody>
+      <div class="panel"><h3>Pending actions <span class="muted">${rows.length} items · ${srcName()}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Lead</th><th>Client</th><th>VA</th><th>Action</th><th>Detail</th><th>AI Status</th></tr></thead><tbody>
       ${rows.map(([l, a, d]) => `<tr class="click" data-act="open" data-id="${esc(l.id)}"><td>${esc(l.code)}</td><td>${esc(l.name)}</td><td>${esc(l.va || 'Unassigned')}</td><td><b>${esc(a)}</b></td><td>${esc(d)}</td><td>${aiPill(l)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing pending.</td></tr>'}
       </tbody></table></div></div>`;
   }
+  // people on screen: the board's own labels for live Monday data; the preview's lists for MongoDB / demo records
+  const vaNames = () => (viewSrc() === 'monday' ? [...new Set(D.leads.map((l) => l.va).filter(Boolean))].sort() : LISTS.vas);
+  const brokerNames = () => (viewSrc() === 'monday' ? [...new Set(visibleViewings().map((v) => v.broker).filter(Boolean))].sort() : LISTS.brokers);
   function monitorView() {
-    const vis = visibleLeads(), vv = visibleViewings(), vas = isManager() ? LISTS.vas : [me().vaLabel].filter(Boolean);
+    const vis = visibleLeads(), vv = visibleViewings(), vas = isManager() ? vaNames() : [me().vaLabel].filter(Boolean);
     const rows = vas.map((va) => { const ls = vis.filter((l) => l.va === va), ids = new Set(ls.map((l) => l.id));
       return [va, ls.length, ls.filter((l) => l.waiting === 'va' && l.onRespond).length, ls.filter((l) => l.temp === 'Hot').length,
         vv.filter((v) => ids.has(v.leadId) && v.status !== 'Cancelled').length, ls.filter((l) => LEAD_PLUS.includes(l.ai)).length, ls.filter((l) => l.ai === 'Failed').length]; });
     const needs = vis.filter((l) => l.onRespond && l.waiting === 'va').length;
     return `<div class="cards"><div class="card"><div class="n">${needs}</div><div class="l">Needs VA Reply</div></div><div class="card"><div class="n">${vis.filter((l) => l.onRespond && l.waiting === 'client').length}</div><div class="l">Waiting on Client</div></div>
         <div class="card"><div class="n">${vis.filter((l) => !l.va).length}</div><div class="l">Unassigned leads</div></div><div class="card"><div class="n">${vis.filter((l) => l.temp === 'Hot').length}</div><div class="l">🔥 Hot leads</div></div></div>
-      <div class="panel"><h3>Response monitor &amp; KPIs per VA <span class="muted">${SRC} · response times and scores come from respond.io in the live portal</span></h3>
+      <div class="panel"><h3>Response monitor &amp; KPIs per VA <span class="muted">${srcName()} · response times and scores come from respond.io in the live portal</span></h3>
       <div class="scroll-x"><table class="t"><thead><tr><th>VA</th><th class="num">Leads</th><th class="num">Needs reply</th><th class="num">Hot</th><th class="num">Viewings</th><th class="num">LOI or later</th><th class="num">Failed</th></tr></thead><tbody>
       ${rows.map((r) => `<tr class="click" data-act="filterva" data-v="${esc(r[0])}"><td><b>${esc(r[0])}</b></td>${r.slice(1).map((n, i) => `<td class="num ${i === 1 && n ? 'hotnum' : ''}">${n}</td>`).join('')}</tr>`).join('')}
-      </tbody></table></div></div>`;
+      </tbody></table></div></div>
+      ${vaPerformanceHtml()}`;
   }
   function brokersView() {
-    const rows = LISTS.brokers.map((b) => { const vs = D.calendar.filter((v) => v.broker === b), ids = new Set(vs.map((v) => v.leadId)), ls = D.leads.filter((l) => ids.has(l.id));
-      return [b, vs.filter((v) => v.status !== 'Cancelled').length, ids.size, vs.filter((v) => v.status === 'Done' && !v.feedback).length, ls.filter((l) => LEAD_PLUS.includes(l.ai)).length, ls.filter((l) => ['Active', 'For Renewal'].includes(l.ai)).length]; });
-    return `<div class="panel"><h3>Brokers <span class="muted">${SRC}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Broker</th><th class="num">Viewings</th><th class="num">Unique clients</th><th class="num">Pending feedback</th><th class="num">LOIs or later</th><th class="num">Closed</th></tr></thead><tbody>
-      ${rows.map((r) => `<tr><td><b>${esc(r[0])}</b></td>${r.slice(1).map((n, i) => `<td class="num ${i === 2 && n ? 'hotnum' : ''}">${n}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
+    // pending feedback: the Pending Broker Feedback list once loaded (the Apps Script rules), else Done without a result
+    const pend = S.pend && S.pend.at ? S.pend.rows : null;
+    if (!pend && canSee('calendar')) setTimeout(loadPending, 0);
+    const rows = brokerNames().map((b) => { const vs = visibleViewings().filter((v) => v.broker === b), ids = new Set(vs.map((v) => v.leadId)), ls = visibleLeads().filter((l) => ids.has(l.id));
+      return [b, vs.filter((v) => v.status !== 'Cancelled').length, ids.size, pend ? pend.filter((r) => r.broker === b).length : vs.filter((v) => v.status === 'Done' && !resultOf(v) && !v.feedback).length,
+        ls.filter((l) => LEAD_PLUS.includes(l.ai)).length, ls.filter((l) => ['Active', 'For Renewal'].includes(l.ai)).length]; });
+    return `<div class="panel"><h3>Brokers <span class="muted">${srcName()}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Broker</th><th class="num">Viewings</th><th class="num">Unique clients</th><th class="num">Pending feedback</th><th class="num">LOIs or later</th><th class="num">Closed</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td><b>${esc(r[0])}</b></td>${r.slice(1).map((n, i) => `<td class="num ${i === 2 && n ? 'hotnum' : ''}">${n}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>
+      ${brokerMonthsHtml()}`;
   }
+  // ---------- Calendar-board deals: Leads Report, Renewals, P&L, Broker / VA figures (Monday source; read only) ----------
+  /** The deals of the Monday Calendar board this user may see, loading them when needed; null for other sources. */
+  function dealsState() {
+    if (viewSrc() !== 'monday') return null;
+    if (!S.deals || (!S.deals.loading && Date.now() - S.deals.at > 300e3)) setTimeout(loadDeals, 0);
+    return S.deals || { rows: [], at: 0, loading: true };
+  }
+  async function loadDeals() {
+    if (DEMO || S.source !== 'monday' || !S.user || (S.deals && S.deals.loading)) return;
+    const token = S.srcToken;
+    S.deals = { ...(S.deals || { rows: [], at: 0 }), loading: true };
+    try {
+      const r = await API.get('/api/monday/deals');
+      if (token !== S.srcToken) { S.deals.loading = false; return; }
+      S.deals = { rows: r.deals || [], at: Date.now(), loading: false, error: '' };
+    } catch (e) { if (signedOut(e)) return; S.deals = { rows: [], at: Date.now(), loading: false, error: e.message }; }
+    if (['ldash', 'renewals', 'pl', 'brokers', 'monitor'].includes(S.view)) renderView();
+  }
+  const dealsNote = (st) => (!st.at ? '<div class="empty">Loading the Monday Calendar board…</div>' : st.error ? `<div class="src-err" role="alert">${esc(st.error)}</div>` : '');
+  // period selector (Last 3 / 6 / 12 months / All time), kept per screen
+  const RANGES = [['3', 'Last 3 months'], ['6', 'Last 6 months'], ['12', 'Last 12 months'], ['all', 'All time']];
+  const rangeOf = (key, def) => ((S.rng || {})[key] || def);
+  const rangeSel = (key, def) => `<select data-ch="rng" data-k="${key}" aria-label="Period">${RANGES.map(([v, l]) => `<option value="${v}" ${rangeOf(key, def) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  /** 'YYYY-MM' months of the period, oldest first (All time: from the first month with data, at most 10 years). */
+  function monthsIn(r, first) {
+    const out = [], d = new Date(), n = r === 'all' ? 120 : Number(r) || 6;
+    for (let i = 0; i < n; i++) { const k = ymd(new Date(d.getFullYear(), d.getMonth() - i, 1)).slice(0, 7); if (r === 'all' && first && k < first) break; out.push(k); }
+    return out.reverse();
+  }
+  const monLabel = (m) => { const d = parseYmd(m + '-01'); return d ? d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }) : m; };
+  const peso = (n) => (n ? '₱' + Math.round(n).toLocaleString('en-PH') : '—');
+  const dFailed = (d) => /fail/i.test(d.status) || /failed|archive/i.test(d.group);
+  const dType = (d) => (/sale/i.test(d.type) ? 'Sale' : /renewal/i.test(d.type) ? 'Renewal' : 'Rental');
+  // collected commission (Code.gs collectedByLead_ / apiGetPL): Total Paid on a "Closed" row with a Date of Payment
+  const dCollected = (d) => (!dFailed(d) && /^closed$/i.test(String(d.status || '').trim()) && d.pay ? d.paid || 0 : 0);
+  const firstMonth = (rows, f) => rows.map(f).filter(Boolean).sort()[0] || '';
+
+  /** Leads Report → Closed Deals — Commission Collected (Code.gs closedDeals_; rent and sale, renewals left out). */
+  function closedDealsHtml() {
+    const st = dealsState(); if (!st) return '';
+    const head = `<div class="panel"><h3>Closed Deals — Commission Collected <span class="muted">Monday Calendar board · Total Paid on Closed deals with a Date of Payment</span><span class="spacer"></span>${rangeSel('ldash', '12')}</h3>`;
+    if (!st.at || st.error) return head + dealsNote(st) + '</div>';
+    const rows = st.rows.filter((d) => !/renewal/i.test(d.type) && dCollected(d) > 0).map((d) => {
+      const l = leadById(d.leadId);
+      return { m: (d.contract || d.pay).slice(0, 7), ty: /sale/i.test(d.type) || (!d.type && l && l.inquiry === 'Buy') ? 'Sale' : 'Rent', amt: dCollected(d),
+        city: SH.canonCity(d.city, d.building) || d.city || 'City not set', bld: d.building || '—' };
+    });
+    const months = monthsIn(rangeOf('ldash', '12'), firstMonth(rows, (x) => x.m)), set = new Set(months), inR = rows.filter((x) => set.has(x.m));
+    const sum = (xs) => xs.reduce((a, x) => a + x.amt, 0);
+    const group = (key) => { const g = {}; inR.forEach((x) => { (g[x[key]] = g[x[key]] || []).push(x); }); return Object.entries(g).sort((a, b) => sum(b[1]) - sum(a[1])); };
+    const byTable = (title, key) => `<div class="panel"><h3>${title}</h3><div class="scroll-x"><table class="t"><thead><tr><th></th><th class="num">Deals</th><th class="num">Rent</th><th class="num">Sale</th><th class="num">Collected</th></tr></thead><tbody>
+      ${group(key).slice(0, 15).map(([k, xs]) => `<tr><td>${esc(k)}</td><td class="num">${xs.length}</td><td class="num">${peso(sum(xs.filter((x) => x.ty === 'Rent')))}</td><td class="num">${peso(sum(xs.filter((x) => x.ty === 'Sale')))}</td><td class="num"><b>${peso(sum(xs))}</b></td></tr>`).join('') || '<tr><td colspan="5" class="muted">No collected commission in this period.</td></tr>'}</tbody></table></div></div>`;
+    return head + `<div class="cards"><div class="card"><div class="n">${peso(sum(inR))}</div><div class="l">Commission collected</div></div><div class="card"><div class="n">${inR.length}</div><div class="l">Closed deals paid</div></div>
+        <div class="card"><div class="n">${peso(sum(inR.filter((x) => x.ty === 'Rent')))}</div><div class="l">Rent</div></div><div class="card"><div class="n">${peso(sum(inR.filter((x) => x.ty === 'Sale')))}</div><div class="l">Sale</div></div></div>
+      <div class="scroll-x"><table class="t"><thead><tr><th>Month</th><th class="num">Rent</th><th class="num">Sale</th><th class="num">Total</th></tr></thead><tbody>
+      ${months.map((m) => { const xs = inR.filter((x) => x.m === m); return `<tr><td>${esc(monLabel(m))}</td><td class="num">${peso(sum(xs.filter((x) => x.ty === 'Rent')))}</td><td class="num">${peso(sum(xs.filter((x) => x.ty === 'Sale')))}</td><td class="num"><b>${peso(sum(xs))}</b></td></tr>`; }).join('')}
+      </tbody></table></div></div><div class="cols2">${byTable('By city', 'city')}${byTable('By building', 'bld')}</div>`;
+  }
+
+  /** Renewals from the Calendar board (Code.gs renewalLeases_): one lease per client, its next due date and status. */
+  function leasesFromDeals(rows) {
+    const now = Date.now(), lim = ymd(new Date(now - 60 * 864e5)), byLead = {};
+    rows.forEach((d) => {
+      if (!d.leadId || /fail/i.test(d.status) || /sale/i.test(d.type)) return;
+      if (!(d.contract || /^closed$|waiting for payment|renew/i.test(String(d.status).trim()) || /renewal/i.test(d.type))) return;
+      (byLead[d.leadId] = byLead[d.leadId] || []).push(d);
+    });
+    return Object.entries(byLead).map(([lid, rs]) => {
+      const l = leadById(lid); if (!l) return null;   // only clients this user can see
+      const base = rs.filter((r) => !/renewal/i.test(r.type)).sort((a, b) => String(b.contract).localeCompare(String(a.contract)))[0] || rs[0];
+      const start = rs.map((r) => r.contract).filter(Boolean).sort().pop() || '';
+      let cands = rs.map((r) => r.exp).concat(rs.filter((r) => /renewal/i.test(r.type) && r.rdate && !r.pay).map((r) => r.rdate)).filter(Boolean), est = false;
+      if (!cands.length && start) {   // no end date on Monday: start + lease term (months, else 12), rolled forward
+        const term = parseInt((String(l.leaseTerm || '').match(/\d+/) || [])[0], 10) || 12;
+        let d = parseYmd(start), n = 0;
+        do { d = new Date(d.getFullYear(), d.getMonth() + term, d.getDate()); } while (ymd(d) < lim && ++n < 60);
+        cands = [ymd(d)]; est = true;
+      }
+      if (!cands.length) return null;
+      cands = [...new Set(cands)].sort();
+      const due = cands.find((c) => c >= lim) || cands[cands.length - 1], row = rs.find((r) => r.exp === due || r.rdate === due) || base;
+      let status = row.rst || (/renewed/i.test(row.status) ? 'Closed' : 'Upcoming Renewal');
+      if (rs.some((r) => /non-?renew/i.test(r.rst)) && !cands.some((c) => c >= today())) status = 'Non-renewed';
+      return { lead: l, leadId: lid, building: base.building, city: base.city, rent: base.price || base.rate, start, due, est, days: daysUntil(due), status,
+        broker: base.sp, renewals: rs.filter((r) => /renewal/i.test(r.type) && r.pay).length };
+    }).filter(Boolean).sort((a, b) => a.days - b.days);
+  }
+  const rnDone = (x) => /closed|non-?renew/i.test(x.status);
+  const RN_SEG = {
+    due90: ['Next 90 days', (x) => x.days >= -30 && x.days <= 90 && !rnDone(x)], overdue: ['Overdue', (x) => x.days < 0 && !rnDone(x)],
+    due30: ['Due ≤ 30 days', (x) => x.days >= 0 && x.days <= 30], due60: ['31–60 days', (x) => x.days > 30 && x.days <= 60],
+    later: ['91–180 days', (x) => x.days > 90 && x.days <= 180], renewed: ['Renewed', (x) => /closed/i.test(x.status)],
+    lost: ['Not renewed', (x) => /non-?renew/i.test(x.status)], all: ['All leases', () => true],
+  };
+  async function loadRenewalLog() {
+    if (DEMO || !S.user || (S.rnLog && S.rnLog.loading)) return;
+    const token = S.srcToken; S.rnLog = { ...(S.rnLog || { log: {}, at: 0 }), loading: true };
+    try { const r = await API.get('/api/renewals/log?source=' + (S.source === 'monday' ? 'monday' : 'mongo')); if (token !== S.srcToken) { S.rnLog.loading = false; return; } S.rnLog = { log: r.log || {}, at: Date.now(), loading: false }; }
+    catch (e) { if (signedOut(e)) return; S.rnLog = { log: {}, at: Date.now(), loading: false, error: e.message }; }
+    if (S.view === 'renewals') renderView();
+  }
+  const rnLogOf = (id) => (S.rnLog && S.rnLog.log[id]) || [];
+  const tplLabel = (k) => (SH.RENEWAL_TEMPLATES.find((t) => t.k === k) || { label: k }).label;
   function renewalsView() {
+    const st = dealsState();
+    if (st) {
+      if (!S.rnLog || (!S.rnLog.loading && Date.now() - S.rnLog.at > 120e3)) setTimeout(loadRenewalLog, 0);
+      const head = `<div class="panel"><h3>Renewals <span class="muted">leases from the Monday Calendar board · messages are written here and sent from respond.io by you</span></h3>`;
+      if (!st.at || st.error) return head + dealsNote(st) + '</div>';
+      const all = leasesFromDeals(st.rows), seg = RN_SEG[S.rnSeg] ? S.rnSeg : 'due90', q = (S.rnQ || '').toLowerCase().trim();
+      const vaF = isManager() ? S.rnVa || '' : '';
+      const rows = all.filter(RN_SEG[seg][1]).filter((x) => (!vaF || x.lead.va === vaF) && (!q || [x.lead.name, x.building, x.lead.va, x.broker].join(' ').toLowerCase().includes(q)));
+      const due90 = all.filter(RN_SEG.due90[1]), messaged = due90.filter((x) => rnLogOf(x.leadId).some((e) => /^renew/.test(e.kind))).length;
+      const tile = (k, n, extra) => `<button type="button" class="card ${seg === k ? 'on' : ''}" data-act="rnseg" data-v="${k}" aria-pressed="${seg === k}"><div class="n">${n}</div><div class="l">${RN_SEG[k][0]}${extra || ''}</div></button>`;
+      const badge = (d) => `<span class="pill" style="--c:${d < 0 || d <= 30 ? '#f85149' : d <= 60 ? '#d29922' : d <= 90 ? 'var(--accent)' : '#8b949e'}">${d < 0 ? Math.abs(d) + ' d overdue' : d + ' d'}</span>`;
+      const edit = access('renewals') === 'edit';
+      return `<div class="cards">${tile('overdue', all.filter(RN_SEG.overdue[1]).length)}${tile('due30', all.filter(RN_SEG.due30[1]).length)}${tile('due60', all.filter(RN_SEG.due60[1]).length)}
+          <div class="card"><div class="n">${due90.length ? Math.round(messaged / due90.length * 100) + '%' : '—'}</div><div class="l">Messaged (next 90 days)</div></div>
+          ${tile('renewed', all.filter(RN_SEG.renewed[1]).length)}${tile('lost', all.filter(RN_SEG.lost[1]).length)}</div>
+        ${head}<div class="pad toolbar"><select data-ch="rnseg" aria-label="Show">${Object.entries(RN_SEG).map(([k, [lab]]) => `<option value="${k}" ${seg === k ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>
+          <input type="search" data-in="rnq" value="${esc(S.rnQ || '')}" placeholder="Search client, building, VA, broker" aria-label="Search leases">
+          ${isManager() ? `<select data-ch="rnva" aria-label="VA"><option value="">All VAs</option>${vaNames().map((v) => `<option ${vaF === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>` : ''}</div>
+        <div class="scroll-x"><table class="t"><thead><tr><th>Client</th><th>Unit</th><th class="num">Rent</th><th>Lease ends</th><th>Renewal status</th><th>VA</th><th>Broker</th><th>Last message</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => { const lg = rnLogOf(x.leadId), last = lg[0];
+          return `<tr><td><button type="button" class="linkbtn" data-act="open" data-id="${esc(x.leadId)}">${esc(x.lead.name || x.lead.code)}</button>${x.renewals ? `<div class="sub">renewed ${x.renewals}×</div>` : ''}</td>
+            <td>${esc(x.building || '—')}<div class="sub">${esc(x.city || '')}</div></td><td class="num">${esc(peso(x.rent))}</td>
+            <td>${esc(fmtDate(x.due))}${x.est ? ' <span class="sub">(estimated)</span>' : ''} ${badge(x.days)}</td><td>${esc(x.status)}</td><td>${esc(x.lead.va || '—')}</td><td>${esc(x.broker || '—')}</td>
+            <td class="sub">${last ? `${esc(tplLabel(last.kind))} · ${esc(ago(last.at))}${last.by ? ' · ' + esc(last.by) : ''}${lg.length > 1 ? ` · ${lg.length} sent` : ''}` : '—'}</td>
+            <td>${edit ? `<button type="button" class="btn sm" data-act="rnmsg" data-id="${esc(x.leadId)}">Message</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="9" class="muted">No leases in this view.</td></tr>'}
+        </tbody></table></div></div>
+        <div class="sub">The Renewal Status shown is Monday's; changing it from the portal is not connected yet. Sending messages from the portal is not connected: write the message here, copy it to respond.io, then press “I sent it from respond.io”.</div>`;
+    }
     const rows = visibleLeads().filter((l) => l.leaseEnd).sort((a, b) => a.leaseEnd.localeCompare(b.leaseEnd));
     return `<div class="cards"><div class="card"><div class="n">${rows.filter((l) => daysUntil(l.leaseEnd) <= 30).length}</div><div class="l">Due within 30 days (or overdue)</div></div><div class="card"><div class="n">${rows.length}</div><div class="l">Active leases</div></div></div>
       <div class="panel"><h3>Leases &amp; due dates <span class="muted">renewal messaging is not connected in the preview</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Lead</th><th>Client</th><th>AI Status</th><th>Lease end</th><th class="num">Days left</th><th class="num">Monthly</th><th>VA</th></tr></thead><tbody>
       ${rows.map((l) => { const d = daysUntil(l.leaseEnd); return `<tr class="click" data-act="open" data-id="${esc(l.id)}"><td>${esc(l.code)}</td><td>${esc(l.name)}</td><td>${aiPill(l)}</td><td>${esc(fmtDate(l.leaseEnd))}</td><td class="num ${d <= 30 ? 'hotnum' : ''}">${d}</td><td class="num">${esc(money(l.budget) || '—')}</td><td>${esc(l.va || '—')}</td></tr>`; }).join('') || '<tr><td colspan="7" class="muted">No active leases.</td></tr>'}
       </tbody></table></div></div>`;
+  }
+  /** Renewals → Message (Code.gs rnCompose / rnFill): a template filled for this lease, edited, copied; nothing is sent. */
+  function rnFill(text, x) {
+    const d = parseYmd(x.due), first = String(x.lead.name || '').trim().split(/\s+/)[0] || 'there';
+    return text.replace(/\{firstName\}/g, first).replace(/\{building\}/g, x.building || 'your unit')
+      .replace(/\{date\}/g, d ? d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'the end of your lease')
+      .replace(/\{days\}/g, String(Math.max(0, x.days || 0))).replace(/\{va\}/g, String(me().name || '').trim().split(/\s+/)[0] || 'Blackhouse');
+  }
+  function rnMsgModal(leadId, kind) {
+    const st = S.deals, x = st && leasesFromDeals(st.rows).find((y) => y.leadId === leadId); if (!x) return toast('That lease is no longer listed.', true);
+    const k = kind || (rnDone(x) && /closed/i.test(x.status) ? 'renewDone' : x.days <= 30 ? 'renew30' : x.days <= 60 ? 'renew60' : 'renew90');
+    const t = SH.RENEWAL_TEMPLATES.find((y) => y.k === k), sent = new Set(rnLogOf(leadId).map((e) => e.kind));
+    S.modal = { kind: 'rnmsg', leadId, tpl: k };
+    const btns = (g) => SH.RENEWAL_TEMPLATES.filter((y) => y.group === g).map((y) => `<button type="button" class="btn sm ${y.k === k ? 'on' : ''}" data-act="rntpl" data-v="${y.k}" aria-pressed="${y.k === k}">${esc(y.label)}${sent.has(y.k) ? ' ✓' : ''}</button>`).join('');
+    openModal(`<h3 id="modalTitle">Message ${esc(x.lead.name || x.lead.code)} <span class="muted" style="font-weight:400;font-size:12px">· lease ends ${esc(fmtDate(x.due))}</span></h3>
+      <div class="sub">Renewal</div><div class="qd">${btns('Renewal')}</div><div class="sub" style="margin-top:8px">Upsell — services</div><div class="qd">${btns('Services')}</div>
+      <label class="full" style="margin-top:10px">Message<textarea id="rnText" rows="6" maxlength="1500">${esc(rnFill(t.text, x))}</textarea></label>
+      <div class="sub">Sending from the portal is not connected: copy the message, send it in respond.io, then record it here.</div>
+      ${rnLogOf(leadId).length ? `<div class="sub" style="margin-top:8px"><b>Sent</b>: ${rnLogOf(leadId).map((e) => `${esc(tplLabel(e.kind))} · ${esc(ago(e.at))}${e.by ? ' · ' + esc(e.by) : ''}`).join(' · ')}</div>` : ''}
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Close</button><button type="button" class="btn" data-act="rncopy">Copy</button><button type="button" class="btn primary" data-act="rnsent">I sent it from respond.io</button></div>`);
+  }
+  async function rnSent() {
+    const m = S.modal; if (!m || m.kind !== 'rnmsg') return;
+    if (access('renewals') !== 'edit') return toast('You don\'t have edit access to Renewals.', true);
+    try {
+      const r = await API.post(`/api/leads/monday/${encodeURIComponent(m.leadId)}/renewal-log`, { kind: m.tpl });
+      S.rnLog = S.rnLog || { log: {}, at: 0 }; (S.rnLog.log[m.leadId] = S.rnLog.log[m.leadId] || []).unshift({ kind: r.entry.kind, at: r.entry.at, by: r.entry.by });
+    } catch (e) { if (signedOut(e)) return; return toast('Not recorded: ' + e.message, true); }
+    S.modalReturn = null; closeModal(); renderView(); toast('Recorded: ' + tplLabel(m.tpl) + '. Nothing was sent from the portal.');
+  }
+
+  /** P&L (Code.gs apiGetPL / plMonth): commission per month from the Calendar board + the team's own cost lines. */
+  async function loadPlCells() {
+    if (DEMO || !S.user || (S.plCells && S.plCells.loading)) return;
+    S.plCells = { cells: {}, at: 0, loading: true };
+    try { const r = await API.get('/api/pl/cells'); S.plCells = { cells: r.cells || {}, at: Date.now(), loading: false }; }
+    catch (e) { if (signedOut(e)) return; S.plCells = { cells: {}, at: Date.now(), loading: false, error: e.message }; }
+    if (S.view === 'pl') renderView();
+  }
+  const PL_OPEX = ['salaries', 'comm_inhouse', 'benefits', 'contracted', 'advertising', 'misc', 'permits', 'medical', 'corporate', 'supplies', 'dues'];
+  function plDeals(rows) {
+    return rows.filter((d) => d.comm || d.paid).map((d) => {
+      const ty = dType(d), t = ty === 'Renewal' ? d.rdate : d.contract;
+      return { d, ty, t, m: (t || '').slice(0, 7), comm: d.comm || 0, coll: dCollected(d), ded: d.ded || 0, failed: dFailed(d) };
+    });
+  }
+  /** Code.gs Data Check rules for the P&L (rows to fix on Monday). */
+  function plChecks(list) {
+    const out = [], past = (s, days) => s && daysUntil(s) < -days;
+    list.forEach(({ d, ty, t }) => {
+      const add = (what) => out.push({ d, ty, m: (t || '').slice(0, 7), what });
+      const closed = /^closed$/i.test(String(d.status || '').trim());
+      if (!t) add(ty === 'Renewal' ? 'No Renewal Date (not in the P&L)' : 'No Contract Date (not in the P&L)');
+      if (!d.type) add('No Type');
+      if (d.paid && !d.pay) add('Total Paid but no Date of Payment');
+      if (d.paid && !closed) add('Paid, but the Status is “' + (d.status || 'empty') + '”');
+      if (closed && Math.abs((d.comm || 0) - (d.paid || 0) - (d.ded || 0)) >= 1) add('Closed: commission ≠ Total Paid + Deductions');
+      if (closed && past(t, 7) && !d.pay) add('Closed more than 7 days ago, no Date of Payment');
+      if (!closed && !dFailed(d) && !/renewed/i.test(d.status) && d.comm && !d.paid && past(t, 7)) add('Commission not paid yet (date passed more than 7 days ago)');
+      if (ty === 'Renewal' && d.pay && d.rdate && daysUntil(d.pay) - daysUntil(d.rdate) < -60) add('Renewal paid more than 60 days before the Renewal Date (copied from the old lease?)');
+    });
+    return out;
+  }
+  function plView() {
+    if (viewSrc() !== 'monday') return laterBox('P&L', 'The P&L is read from the Monday Calendar board. Choose Monday.com as the data source to see it.');
+    const st = dealsState();
+    if (!S.plCells || (!S.plCells.loading && Date.now() - S.plCells.at > 300e3)) setTimeout(loadPlCells, 0);
+    const head = `<div class="panel"><h3>P&amp;L <span class="muted">commission from the Monday Calendar board · cost lines entered here</span><span class="spacer"></span>${rangeSel('pl', '6')}</h3>`;
+    if (!st.at || st.error) return head + dealsNote(st) + '</div>';
+    const list = plDeals(st.rows), months = monthsIn(rangeOf('pl', '6'), firstMonth(list, (x) => x.m)), cells = (S.plCells && S.plCells.cells) || {};
+    const edit = access('pl') === 'edit', cell = (line, m) => Number((cells[line] || {})[m]) || 0;
+    const per = months.map((m) => {
+      const xs = list.filter((x) => x.m === m && !x.failed), by = (f, ty) => xs.filter((x) => x.ty === ty).reduce((a, x) => a + x[f], 0);
+      const est = { Sale: by('comm', 'Sale'), Rental: by('comm', 'Rental'), Renewal: by('comm', 'Renewal') }, col = { Sale: by('coll', 'Sale'), Rental: by('coll', 'Rental'), Renewal: by('coll', 'Renewal') };
+      const E = est.Sale + est.Rental + est.Renewal, C = col.Sale + col.Rental + col.Renewal, ded = xs.reduce((a, x) => a + x.ded, 0);
+      const cos = cell('cos', m), gm = C - cos, opT = PL_OPEX.reduce((a, k) => a + cell(k, m), 0);
+      return { m, est, col, E, C, ded, unc: E - C - ded, cos, gm, opT, net: gm - opT };
+    });
+    const row = (label, f, cls) => `<tr class="${cls || ''}"><td>${label}</td>${per.map((p) => `<td class="num">${peso(f(p))}</td>`).join('')}<td class="num"><b>${peso(per.reduce((a, p) => a + f(p), 0))}</b></td></tr>`;
+    const input = (line) => `<tr><td>${esc(SH.PL_LINES[line])}</td>${months.map((m) => `<td class="num">${edit ? `<input class="plcell" data-ch="plcell" data-line="${line}" data-m="${m}" inputmode="decimal" value="${(cells[line] || {})[m] != null ? esc(cells[line][m]) : ''}" aria-label="${esc(SH.PL_LINES[line] + ' ' + monLabel(m))}">` : peso(cell(line, m))}</td>`).join('')}<td class="num"><b>${peso(months.reduce((a, m) => a + cell(line, m), 0))}</b></td></tr>`;
+    const checks = plChecks(list);
+    return head + `<div class="scroll-x"><table class="t pl"><thead><tr><th></th>${months.map((m) => `<th class="num">${esc(monLabel(m))}</th>`).join('')}<th class="num">Total</th></tr></thead><tbody>
+        ${row('<b>Total Estimated Commission</b>', (p) => p.E)}${row('Est. Sales', (p) => p.est.Sale, 'sub')}${row('Est. Rentals', (p) => p.est.Rental, 'sub')}${row('Est. Renewals', (p) => p.est.Renewal, 'sub')}
+        ${row('Collected Sales', (p) => p.col.Sale, 'sub')}${row('Collected Rentals', (p) => p.col.Rental, 'sub')}${row('Collected Renewals', (p) => p.col.Renewal, 'sub')}
+        ${row('Total Deductions', (p) => p.ded)}${row('Uncollected', (p) => p.unc)}${row('<b>Collected Commission Revenue</b>', (p) => p.C)}
+        <tr><th colspan="${months.length + 2}" class="left">Direct cost</th></tr>${input('cos')}${row('<b>Gross Margin</b>', (p) => p.gm)}
+        <tr><th colspan="${months.length + 2}" class="left">Operating expenses</th></tr>${PL_OPEX.map(input).join('')}${row('Total operating expenses', (p) => p.opT)}${row('<b>Net Income / Loss</b>', (p) => p.net)}
+      </tbody></table></div></div>
+      <div class="panel"><h3>Data Check <span class="muted">${checks.length} Calendar item${checks.length === 1 ? '' : 's'} to fix on Monday</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Item</th><th>Building</th><th>Type</th><th>Month</th><th>What to check</th></tr></thead><tbody>
+        ${checks.slice(0, 200).map((c) => `<tr><td>${esc(c.d.id)}</td><td>${esc(c.d.building || '—')}</td><td>${esc(c.ty)}</td><td>${esc(c.m ? monLabel(c.m) : '—')}</td><td>${esc(c.what)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing to check.</td></tr>'}</tbody></table></div></div>
+      <div class="sub">Commission and collection are read from the Calendar board (Blackhouse Commission, Total Paid, Deductions, Date of Payment, Type, Contract / Renewal Date); cost lines are saved in the portal${edit ? ' when you leave a cell' : ''}. Commission rules and monthly targets are not in the portal yet.</div>`;
+  }
+
+  /** Broker / VA figures per period from the Calendar board (Code.gs apiGetBrokerDashboard / apiGetVaDashboard, simplified). */
+  function brokerMonthsHtml() {
+    const st = dealsState(); if (!st) return '';
+    const head = `<div class="panel"><h3>Per period <span class="muted">Monday Calendar board</span><span class="spacer"></span>${rangeSel('brokers', '3')}</h3>`;
+    if (!st.at || st.error) return head + dealsNote(st) + '</div>';
+    const months = monthsIn(rangeOf('brokers', '3')), from = months[0] + '-01', to = today();
+    const inR = (s) => s && s >= from && s <= to, rows = st.rows.filter((d) => !/renewal/i.test(d.type) && !dFailed(d));
+    const names = [...new Set(rows.map((d) => d.sp).filter(Boolean))].sort();
+    return head + `<div class="scroll-x"><table class="t"><thead><tr><th>Broker</th><th class="num">Viewings</th><th class="num">Clients viewed</th><th class="num">LOI clients</th><th class="num">Closed clients</th><th class="num">Commission collected</th></tr></thead><tbody>
+      ${names.map((b) => { const rs = rows.filter((d) => d.sp === b), v = rs.filter((d) => inR(d.fin));
+        return `<tr><td><b>${esc(b)}</b></td><td class="num">${v.length}</td><td class="num">${new Set(v.map((d) => d.leadId).filter(Boolean)).size}</td><td class="num">${new Set(rs.filter((d) => inR(d.loi)).map((d) => d.leadId)).size}</td>
+          <td class="num">${new Set(rs.filter((d) => inR(d.contract)).map((d) => d.leadId)).size}</td><td class="num">${peso(rs.filter((d) => inR(d.pay)).reduce((a, d) => a + dCollected(d), 0))}</td></tr>`; }).join('') || '<tr><td colspan="6" class="muted">No Calendar data for this period.</td></tr>'}
+      </tbody></table></div></div>`;
+  }
+  function vaPerformanceHtml() {
+    const st = dealsState(); if (!st || !isManager()) return '';
+    const head = `<div class="panel"><h3>VA Performance &amp; Ranking <span class="muted">clients assigned in the period · Monday leads + Calendar</span><span class="spacer"></span>${rangeSel('monitor', '3')}</h3>`;
+    if (!st.at || st.error) return head + dealsNote(st) + '</div>';
+    const months = monthsIn(rangeOf('monitor', '3')), from = months[0] + '-01', t = today();
+    const viewed = new Set(st.rows.filter((d) => d.fin && d.fin <= t && !/renewal/i.test(d.type)).map((d) => d.leadId));
+    const sold = new Set(st.rows.filter((d) => !dFailed(d) && !/renewal/i.test(d.type) && (d.contract || /^closed$/i.test(String(d.status).trim()))).map((d) => d.leadId));
+    const pct = (a, b) => (b ? Math.round(a / b * 100) : 0);
+    const rows = vaNames().map((va) => {
+      const ls = visibleLeads().filter((l) => l.va === va && String(l.inquiryDate || l.createdAt || '').slice(0, 10) >= from);
+      const v = ls.filter((l) => viewed.has(l.id)).length, s = ls.filter((l) => sold.has(l.id)).length, lost = ls.filter((l) => l.ai === 'Failed').length;
+      return { va, n: ls.length, vp: pct(v, ls.length), sp: pct(s, ls.length), lp: pct(lost, ls.length) };
+    }).filter((r) => r.n).sort((a, b) => (b.vp + b.sp - b.lp / 2) - (a.vp + a.sp - a.lp / 2));
+    return head + `<div class="scroll-x"><table class="t"><thead><tr><th>#</th><th>VA</th><th class="num">Clients</th><th class="num">To viewing</th><th class="num">To sale</th><th class="num">Lost</th></tr></thead><tbody>
+      ${rows.map((r, i) => `<tr class="click" data-act="filterva" data-v="${esc(r.va)}"><td>${i + 1}</td><td><b>${esc(r.va)}</b></td><td class="num">${r.n}</td><td class="num">${r.vp}%</td><td class="num">${r.sp}%</td><td class="num">${r.lp}%</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No clients assigned in this period.</td></tr>'}
+      </tbody></table></div><div class="sub pad">Ranked by conversion to viewing and to sale, less half the lost rate. Lead-time scores (time to answer, to source and send units) need the respond.io chats and Monday subitems and are not in the portal yet.</div></div>`;
   }
 
   // ---------- Calendar ----------
@@ -887,14 +1150,14 @@
     if (!S.pend || (!S.pend.loading && Date.now() - S.pend.at > 60e3)) setTimeout(loadPending, 0);
     return `<div class="cal-layout"><div class="cal-main"><div class="cal-head"><h2>${m.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h2>
         <button class="btn sm" data-act="calmove" data-v="-1" aria-label="Previous month">‹</button><button class="btn sm" data-act="calmove" data-v="0">Today</button><button class="btn sm" data-act="calmove" data-v="1" aria-label="Next month">›</button>
-        ${me().role !== 'Broker' ? `<select data-ch="calbroker" style="padding:5px 8px"><option value="">All brokers</option>${LISTS.brokers.map((b) => `<option ${S.calBroker === b ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select>` : ''}
+        ${me().role !== 'Broker' ? `<select data-ch="calbroker" style="padding:5px 8px"><option value="">All brokers</option>${brokerNames().map((b) => `<option ${S.calBroker === b ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select>` : ''}
         <span class="spacer"></span><span class="legend">${LISTS.viewingStatuses.map((s) => `<span><span class="dot" style="background:${VSTAT_COLORS[s]}"></span> ${s} ${inMonth.filter((v) => v.status === s).length}</span>`).join('')}</span></div>
       <div class="cal">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="dow">${d}</div>`).join('')}${cells}</div>
       <div class="agenda" aria-label="Viewings this month">${inMonth.length ? inMonth.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map((v) => { const l = leadById(v.leadId) || {}, x = unitOf(v);
         return `<button type="button" class="ag-item ${v.date === t ? 'today' : ''}" data-act="viewing" data-id="${esc(v.id)}"><span class="ag-date">${esc(fmtShort(v.date))}<b>${esc(v.time || '—')}</b></span>
           <span class="ag-main"><b>${esc(l.code || '')} ${esc(l.name || '')}</b><span class="sub">${esc([x.building, x.city, v.broker].filter(Boolean).join(' · '))}</span></span>${pill(v.status, VSTAT_COLORS[v.status])}</button>`; }).join('') : '<div class="empty">No viewings this month.</div>'}</div>
       <div class="foot-note">${viewSrc() === 'monday' ? 'Viewings from the Monday Calendar board (Final Schedule). A result you record sets the viewing\'s Status on Monday; its reasons and broker feedback are kept in the portal.'
-        : `Portal bookings (${SRC}). The live portal also shows the Monday Final Schedule for dates before 12 Oct 2026.`}</div></div>
+        : `Portal bookings (${srcName()}). The live portal also shows the Monday Final Schedule for dates before 12 Oct 2026.`}</div></div>
       <aside class="pfb" id="pendingFb" aria-label="Pending broker feedback">${pendingHtml()}</aside></div>`;
   }
 
@@ -984,7 +1247,7 @@
         <div class="card" title="Listings whose City is Taguig or BGC, or with no City but a BGC building; each listing counted once"><div class="n">${tg.length}</div><div class="l">Taguig (BGC) · ${tg.filter((x) => x.availability === 'Available').length} available</div></div>
         ${LISTS.availability.map((a) => `<div class="card"><div class="n">${L.filter((x) => x.availability === a).length}</div><div class="l">${a}</div></div>`).join('')}
         <div class="card"><div class="n">${L.filter((x) => x.type === 'For Rent').length} / ${L.filter((x) => x.type === 'For Sale').length}</div><div class="l">For rent / for sale</div></div></div>
-      <div class="panel"><h3>By city <span class="muted">${SRC}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>City</th><th class="num">Listings</th><th class="num">For rent</th><th class="num">For sale</th><th class="num">Available</th></tr></thead><tbody>
+      <div class="panel"><h3>By city <span class="muted">${srcName()}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>City</th><th class="num">Listings</th><th class="num">For rent</th><th class="num">For sale</th><th class="num">Available</th></tr></thead><tbody>
         ${byCity.map((r) => `<tr class="click" data-act="invcity" data-v="${esc(r[0])}"><td>${esc(r[0])}</td>${r.slice(1).map((n) => `<td class="num ${n ? '' : 'zero'}">${n}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>
       <div class="panel"><h3>Listings</h3><div class="pad">
         <div class="toolbar"><div class="search">${P('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>')}<input data-in="invq" value="${esc(f.q)}" placeholder="Search building or listing ID…" autocomplete="off"></div>
@@ -1019,14 +1282,44 @@
         <div class="card"><div class="n">${money(counted.reduce((a, l) => a + (l.budget || 0), 0)) || '₱0'}</div><div class="l">Counted lead value</div></div></div>
       <div class="sub" style="margin-bottom:12px">Minimum budget rule: rent below ₱200k/month or sale below ₱20M is not counted; unknown budgets are counted.</div>
       <div class="cols2">${table('By AI Status', AI_STAGES, (l) => l.ai)}${table('By source', LISTS.sources, (l) => l.source)}</div>
-      ${isManager() ? table('By VA', LISTS.vas.concat(['']), (l) => l.va) : ''}`;
+      ${isManager() ? table('By VA', vaNames().concat(['']), (l) => l.va) : ''}
+      ${closedDealsHtml()}`;
   }
   // client names, codes, phones, emails and free-text notes never go in broker-group messages: numeric lead IDs only (daily-report.js)
+  // Daily Report controls (Code.gs drDate / jr_notes): the report date, which sections go in, and the team's own lines.
+  // The generated part stays numeric-ID only; the extra lines are added exactly as the team types them.
+  const DR_SECTIONS = [['today', 'Viewings that day'], ['tomorrow', 'Viewings the next day'], ['new', 'New client requirements'], ['lois', 'LOIs & contracts']];
+  const drDate = () => (S.dr && SH.isYmd(S.dr.date) && S.dr.date <= today() ? S.dr.date : today());
+  const drNext = () => { const d = parseYmd(drDate()); return ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)); };
   const dailyText = () => window.BH_DAILY.buildDaily({ leads: visibleLeads(), viewings: visibleViewings(), listings: D.listings,
-    today: today(), tomorrow: ymd(new Date(Date.now() + 864e5)), demo: DEMO });
+    today: drDate(), tomorrow: drNext(), now: Math.min(Date.now(), (parseYmd(drDate()) || new Date()).getTime() + 864e5 - 1), demo: DEMO })
+    .split('\n\n').filter((block, i) => i === 0 || !(S.dr && S.dr.off && S.dr.off[DR_SECTIONS[i - 1] && DR_SECTIONS[i - 1][0]])).join('\n\n')
+    + ((S.dr && S.dr.notes && S.dr.notes.call) ? '\n\nCALL PLAN\n' + S.dr.notes.call.trim() : '') + ((S.dr && S.dr.notes && S.dr.notes.extra) ? '\n\nNOTES\n' + S.dr.notes.extra.trim() : '');
+  async function loadDailyNotes() {
+    S.dr = S.dr || {};
+    if (S.dr.loaded) return;
+    S.dr.loaded = true;
+    if (DEMO) { S.dr.notes = D.dailyNotes || { call: '', extra: '' }; return; }
+    try { S.dr.notes = (await API.get('/api/daily/notes')).notes; } catch (e) { if (signedOut(e)) return; S.dr.notes = { call: '', extra: '' }; S.dr.err = e.message; }
+    if (S.view === 'daily') renderView();
+  }
+  async function saveDailyNotes(patch) {
+    S.dr.notes = { ...(S.dr.notes || {}), ...patch };
+    if (DEMO) { D.dailyNotes = S.dr.notes; persist(); return; }
+    try { await API.put('/api/daily/notes', patch); } catch (e) { if (!signedOut(e)) toast('Not saved: ' + e.message, true); }
+  }
   function dailyView() {
-    return `<div class="panel"><h3>Daily Report <span class="muted">for the broker group · numeric lead IDs only, no client names, numbers or notes</span><span class="spacer"></span><button class="btn sm" data-act="copydaily">Copy text</button></h3><pre class="report" id="drText">${esc(dailyText())}</pre></div>
-      <div class="sub">Posting to the broker group is not connected in the preview.</div>`;
+    if (!S.dr || !S.dr.loaded) setTimeout(loadDailyNotes, 0);
+    const edit = access('daily') === 'edit', n = (S.dr && S.dr.notes) || { call: '', extra: '' }, off = (S.dr && S.dr.off) || {};
+    return `<div class="panel"><h3>Daily Report <span class="muted">for the broker group · numeric lead IDs only, no client names, numbers or notes</span><span class="spacer"></span><button class="btn sm" data-act="copydaily">Copy text</button></h3>
+      <div class="pad toolbar"><label>Report date <input type="date" data-ch="drdate" value="${esc(drDate())}" max="${esc(today())}"></label>
+        ${DR_SECTIONS.map(([k, lab]) => `<label class="tagck"><input type="checkbox" data-ch="drsec" data-k="${k}" ${off[k] ? '' : 'checked'}> ${esc(lab)}</label>`).join('')}
+        <button type="button" class="btn sm" data-act="drclear">Clear</button></div>
+      <div class="pad grid"><label>Call plan <span class="muted">(added under CALL PLAN)</span><textarea data-ch="drnote" data-k="call" rows="2" maxlength="2000" ${edit ? '' : 'disabled'}>${esc(n.call || '')}</textarea></label>
+        <label>Anything else <span class="muted">(added under NOTES)</span><textarea data-ch="drnote" data-k="extra" rows="2" maxlength="4000" ${edit ? '' : 'disabled'}>${esc(n.extra || '')}</textarea></label></div>
+      <div class="sub pad">Your own lines are added exactly as typed, so leave out client names and numbers.</div>
+      <pre class="report" id="drText">${esc(dailyText())}</pre></div>
+      <div class="sub">Posting to the broker group is not connected: copy the text and paste it there.</div>`;
   }
   // ---------- Property Requirements (read-only text for the broker channel; rules in prop-report.js) ----------
   const PR = window.BH_PROPREPORT;
@@ -1072,7 +1365,7 @@
     const tabs = [['team', 'Team & Access'], ['files', 'Files'], ['wa', 'WhatsApp Templates'], ['integ', 'Integrations'], ['sync', 'Monday Sync']];
     const body = S.setTab === 'wa' ? waView() : S.setTab === 'files' ? laterBox('Files (LOI templates)', 'upload the Lease and Sale LOI templates, stored in Google Drive.')
       : S.setTab === 'integ' ? integView()
-      : S.setTab === 'sync' ? laterBox('Monday Sync', 'AI STATUS write-back and client subitem sync to Monday.com. All Monday writes are switched off in this preview.') : teamView();
+      : S.setTab === 'sync' ? laterBox('Monday Sync', 'AI STATUS write-back and client subitem sync to Monday.com are not part of the portal. ' + (mondayWritesOn() ? 'Only the confirmed updates listed under Integrations are written to Monday.' : 'Monday updates are switched off on this server.')) : teamView();
     return `<div class="subtabs" role="tablist">${tabs.map(([k, l]) => `<button class="btn ${S.setTab === k ? 'on' : ''}" role="tab" aria-selected="${S.setTab === k}" data-act="settab" data-v="${k}">${esc(l)}</button>`).join('')}</div>${body}`;
   }
   function integView() {
@@ -1516,7 +1809,7 @@
   /** mongo mode: a 401 means the session ended, so go back to the sign-in screen. */
   function signedOut(e) {
     if (DEMO || !e || e.status !== 401) return false;
-    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null;
+    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null;
     $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
     renderLogin('Your session ended. Please sign in again.');
     return true;
@@ -1760,6 +2053,14 @@
     invmore: () => { S.inv.limit = (S.inv.limit || 120) + 120; renderInventory(); },
     invcity: (el) => { S.inv.city = el.dataset.v; S.inv.limit = 120; renderView(); const g = $('#invGrid'); if (g) g.scrollIntoView({ behavior: 'smooth' }); },
     filterva: (el) => { if (!isManager()) return; S.view = 'leads'; S.va = el.dataset.v; S.wait = ''; savePrefs(); render(); },
+    // Renewals (Monday Calendar leases): segment tiles, Message (compose / copy / "I sent it" log; nothing is sent)
+    rnseg: (el) => { S.rnSeg = el.dataset.v; renderView(); },
+    rnmsg: (el) => rnMsgModal(el.dataset.id),
+    rntpl: (el) => { const m = S.modal; if (m && m.kind === 'rnmsg') rnMsgModal(m.leadId, el.dataset.v); },
+    rncopy: async () => { try { await copyText($('#rnText').value); toast('Copied. Paste it in respond.io; nothing was sent from the portal.'); } catch (e) { toast('Copy was blocked by the browser.', true); } },
+    rnsent: () => rnSent(),
+    // Daily Report: back to today, every section, no extra lines
+    drclear: async () => { S.dr = { ...(S.dr || {}), date: '', off: {} }; if (access('daily') === 'edit') await saveDailyNotes({ call: '', extra: '' }); renderView(); toast('Daily Report cleared.'); },
     settab: (el) => { S.setTab = el.dataset.v; renderView(); if (S.setTab === 'integ') refreshStatus().then(() => { if (S.view === 'team' && S.setTab === 'integ') renderView(); }); },
     integstatus: async () => { await refreshStatus(); renderView(); },
     mtest: async (el) => {
@@ -1771,7 +2072,7 @@
     source: async (el) => {
       const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
-      prefs.source = v; S.source = v; S.pend = null; savePrefs();
+      prefs.source = v; S.source = v; S.pend = null; S.deals = null; S.rnLog = null; savePrefs();
       if (v === 'monday') { await openMondaySource(false); toast(mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
       S.srcBusy = false;
       if (!(await attempt(loadAll))) return;
@@ -1819,8 +2120,8 @@
     },
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
-      S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
-      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null;
+      S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null;
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
     },
@@ -1897,6 +2198,19 @@
     from: (el) => { S.from = el.value; filtersChanged(); },
     sort: (el) => { if (!el.value) return; S.sort = el.value; S.sortCol = ''; refreshLeads(true); },
     calbroker: (el) => { S.calBroker = el.value; renderView(); },
+    rng: (el) => { S.rng = { ...(S.rng || {}), [el.dataset.k]: el.value }; renderView(); },
+    rnseg: (el) => { S.rnSeg = el.value; renderView(); },
+    rnva: (el) => { S.rnVa = el.value; renderView(); },
+    plcell: async (el) => {
+      const { value, errors } = SH.validatePlCell({ line: el.dataset.line, month: el.dataset.m, value: el.value.trim() });
+      if (errors.length) return toast(errors[0], true);
+      try { await API.put('/api/pl/cells', value); } catch (e) { if (!signedOut(e)) toast('Not saved: ' + e.message, true); return; }
+      const c = S.plCells.cells; c[value.line] = c[value.line] || {}; if (value.value === null) delete c[value.line][value.month]; else c[value.line][value.month] = value.value;
+      renderView(); toast('Saved in the portal.');
+    },
+    drdate: (el) => { S.dr = { ...(S.dr || {}), date: el.value }; renderView(); },
+    drsec: (el) => { S.dr = { ...(S.dr || {}), off: { ...((S.dr || {}).off || {}), [el.dataset.k]: !el.checked } }; renderView(); },
+    drnote: async (el) => { if (access('daily') !== 'edit') return; await saveDailyNotes({ [el.dataset.k]: el.value }); renderView(); },
     prdate: (el) => { S.prDate = SH.isYmd(el.value) ? el.value : ''; renderView(); const d = $('[data-ch="prdate"]'); if (d) d.focus(); },
     invcity: (el) => { S.inv.city = el.value; renderInventory(); }, invtype: (el) => { S.inv.type = el.value; renderInventory(); },
     invbeds: (el) => { S.inv.beds = el.value; renderInventory(); }, invavail: (el) => { S.inv.avail = el.value; renderInventory(); },
@@ -1959,6 +2273,9 @@
     }
     if (el.dataset.in === 'q') { clearTimeout(searchT); searchT = setTimeout(() => { S.q = el.value; refreshLeads(true); }, 120); }
     else if (el.dataset.in === 'invq') { clearTimeout(searchT); searchT = setTimeout(() => { S.inv.q = el.value; renderInventory(); }, 120); }
+    else if (el.dataset.in === 'rnq') {   // Renewals search: redraw, then give the search box its focus and caret back
+      clearTimeout(searchT); searchT = setTimeout(() => { S.rnQ = el.value; renderView(); const i = $('[data-in="rnq"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 250);
+    }
     else if (PF_IN[el.dataset.in]) { const k = PF_IN[el.dataset.in], v = el.value; clearTimeout(searchT); searchT = setTimeout(() => pfSet(k, v, true), 200); }
     else if (el.dataset.field) onField(el);
   });
