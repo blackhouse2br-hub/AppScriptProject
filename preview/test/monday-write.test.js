@@ -320,10 +320,14 @@ test('second guard: only the exact fixed mutation for a configured board, numeri
     ['mutation { delete_item(item_id: 9001) { id } }', v], ['mutation { create_item(board_id: 1111111, item_name: "x") { id } }', v],
     [WRITE_MUTATION + ' mutation { delete_item(item_id: 1) { id } }', v], [WRITE_MUTATION.replace('change_simple_column_value', 'x: change_simple_column_value'), v],
     [WRITE_MUTATION.replace('change_simple_column_value', 'change_multiple_column_values'), v], [' ' + WRITE_MUTATION, v],
-    [WRITE_MUTATION, { ...v, b: '9999999' }], [WRITE_MUTATION, { ...v, b: BOARDS.calendar }], [WRITE_MUTATION, { ...v, i: '9001 OR 1' }], [WRITE_MUTATION, { ...v, c: 'bud"}' }],
+    [WRITE_MUTATION, { ...v, b: '9999999' }], [WRITE_MUTATION, { ...v, b: BOARDS.leads, extra2: 1 }], [WRITE_MUTATION, { ...v, i: '9001 OR 1' }], [WRITE_MUTATION, { ...v, c: 'bud"}' }],
     [WRITE_MUTATION, { ...v, v: 'a\nb' }], [WRITE_MUTATION, { ...v, v: 'x'.repeat(201) }], [WRITE_MUTATION, { ...v, v: 5 }], [WRITE_MUTATION, { ...v, extra: 1 }],
   ];
   for (const [q, vars] of bad) assert.throws(() => assertAllowedWrite(q, vars, BOARDS), /not on the allowed list/, q.slice(0, 50));
+  // the Calendar board passes this guard only for viewing results (viewingResult.js decides the columns);
+  // the generic /monday/write route has no Calendar action at all (see the refusals above: viewingStatus → 400)
+  assert.doesNotThrow(() => assertAllowedWrite(WRITE_MUTATION, { ...v, b: BOARDS.calendar }, BOARDS));
+  assert.ok(Object.values(ACTIONS).every((a) => a.board !== 'calendar'), 'no generic Calendar action');
   // the read path still refuses every mutation, including the write template
   assert.throws(() => assertReadOnly(WRITE_MUTATION), /only read queries/);
   // values per kind

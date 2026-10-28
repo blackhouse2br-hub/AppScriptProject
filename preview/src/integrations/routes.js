@@ -10,6 +10,7 @@ const { createRespond } = require('./respondio');
 const { computeLead, replyState } = require('./pipeline');
 const { LeadOverride, MondayWrite } = require('../models');
 const { performWrite, writeOptions, createWriteLimiter } = require('./mondayWrite');
+const { mondayResults } = require('./viewingResult');
 
 /** One set of clients + status per server (shared by the integration routes and Team & Access). */
 function createIntegrations(config) {
@@ -86,6 +87,8 @@ function integrationRoutes(r, integ) {
 
   r.get('/integrations/status', (req, res) => res.json({
     readOnly: !(monday && monday.writesEnabled), mondayWrites: !!(monday && monday.writesEnabled),
+    // whether a Calendar column also receives broker feedback (MONDAY_CALENDAR_FEEDBACK_COLUMN); the id is not sent
+    calendarFeedbackColumn: !!(monday && ic.monday.calFeedbackColumn),
     monday: { ...status.monday.snapshot(), boards: Object.fromEntries(Object.entries(ic.monday.boards).map(([k, v]) => [k, !!v])) },
     respond: { ...status.respond.snapshot(), inboxLinks: !!ic.respond.spaceId, listChecks: ic.respond.listChecks },
   }));
@@ -99,6 +102,9 @@ function integrationRoutes(r, integ) {
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
     const all = await monday.loadAll(req.query.refresh === '1');
     const scoped = scopeExternal(req.user, { leads: integ.enrich(all, all.leads, await integ.mondayOverrides()), viewings: all.viewings, listings: all.listings });
+    // results saved for Calendar-board viewings (broker feedback is kept in the portal unless a Monday column is configured)
+    const results = await mondayResults(scoped.viewings.map((v) => v.id));
+    scoped.viewings = scoped.viewings.map((v) => { const r = results.get(v.id); return r ? { ...v, feedback: r.feedback, result: r } : v; });
     res.json({ ...scoped, errors: all.errors, notConfigured: all.notConfigured, calendarOk: all.calendarOk,
       fetchedAt: all.fetchedAt, boards: all.boards, refreshing: all.refreshing, staleAfterMs: all.staleAfterMs });
   });

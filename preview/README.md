@@ -105,6 +105,14 @@ user-confirmed changes are written to Monday, and nothing else (`src/integration
 | … Target Move-in Date | Direct Clients · Target Move-in Date (date) | YYYY-MM-DD | same |
 | … Inquiry Type | Direct Clients · Inquiry Type (status) | the board's own labels | same |
 | … Nationality | Direct Clients · Nationality (text) | one line, ≤ 60 characters | same |
+| Calendar → a viewing's details, or Pending Broker Feedback → **Create LOI** | Calendar · Status (status) | `Under Negotiations` (the label must already exist) | Calendar **edit**, viewings they can see |
+| … Create LOI, only when empty | Calendar · LOI Creation Date (date) | today (Manila) | same |
+
+**Failed** changes nothing on Monday, as in the Apps Script. A viewing's result, reasons, broker feedback and LOI
+confidence are kept in the portal (`ViewingResult` for Monday Calendar viewings — the Apps Script's `bfb_` store — and the
+viewing itself for portal bookings); they shape that client's property suggestions. **Broker feedback is not written to
+any Monday column**: the Calendar board has no unique feedback column ("Remarks" appears twice). It would be copied only
+if the owner sets `MONDAY_CALENDAR_FEEDBACK_COLUMN` to one unique Calendar text column (one line, ≤ 200 characters).
 
 Each change is one `change_simple_column_value` on one item and column. A value is never cleared, and nothing is
 created, deleted, moved or archived. The page asks for confirmation (old → new) before anything is sent. The server then

@@ -57,6 +57,7 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 | `MONDAY_LISTINGS_BOARD_ID` | yes | digits only |
 | `MONDAY_CALENDAR_BOARD_ID` | yes | digits only |
 | `MONDAY_WRITES` | optional | leave **unset** (off): Monday is read-only. `on` enables only the allowlisted, user-confirmed updates in README "Monday updates" (the token then needs write access to those boards). |
+| `MONDAY_CALENDAR_FEEDBACK_COLUMN` | optional | a Calendar-board **text** column id that also receives a viewing's broker feedback (one line, ≤ 200 characters). Unset: the feedback stays in the portal only. Must not be a column the portal already reads. |
 | `MONDAY_WRITE_LIMIT` | optional | Monday update attempts per user per minute, 1–60 (default 10; the server as a whole allows 3×). |
 | `RESPOND_TOKEN` | optional 🔒 | respond.io API token (read-only use); without it the Chat tab says "not connected" |
 | `RESPOND_SPACE_ID` | optional | digits only; only adds "Open in respond.io" links |

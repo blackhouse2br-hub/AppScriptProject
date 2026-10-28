@@ -41,6 +41,16 @@ fx.BOARDS['1111111'].columns.push({ id: 'bldg', title: 'Building Name', type: 't
   { id: 'creq', title: 'Client Requirements', type: 'text', settings_str: '{}' });
 fx.BOARDS['1111111'].items.push({ id: '9008', name: 'BH-T8', group: 'ALL CLIENTS', v: { cn: 'Sourcing Client Rent', ph: '+63 900 555 0008', va1: 'Ana', inq: 'Rent', na: 'New Inquiry', city: 'Makati', bud: '₱150k', br: '2', dq: '2026-10-22', pets: 'Not Applicable', creq: 'Fake requirements note near BGC c/o Demo Person 0900 555 0199' } },
   { id: '9009', name: 'BH-T9', group: 'ALL CLIENTS', v: { cn: 'Sourcing Client Sale', ph: '+63 900 555 0009', va1: 'Bea', inq: 'Buy', na: 'New Inquiry', city: '', bud: '25M', br: '3', bldg: 'Demo Sale Tower', dq: '2026-10-23', creq: 'Fake requirements note: Taguig, ask Demo Person' } });
+// Calendar board: the real board's Status labels and LOI Creation Date; two viewings that already happened for Ana's
+// client 9010 with no result yet (Pending Broker Feedback), one recorded per screen size
+const daysAgo = (n) => { const d = new Date(Date.now() - n * 864e5); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const todayManila = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const CB = fx.BOARDS['3333333'];
+CB.columns.find((c) => c.id === 'st').settings_str = JSON.stringify({ labels: { 0: 'Viewing Scheduled', 1: 'Under Negotiations', 2: 'Failed', 3: 'Confirmed', 4: 'Pending' } });
+CB.columns.push({ id: 'lcd', title: 'LOI Creation Date', type: 'date', settings_str: '{}' });
+fx.BOARDS['1111111'].items.push({ id: '9010', name: 'BH-T10', group: 'ALL CLIENTS', v: { cn: 'Viewing Client', ph: '+63 900 555 0010', va1: 'Ana', inq: 'Rent', na: 'Schedule Viewing', city: 'Makati', br: '2', dq: daysAgo(12) } });
+CB.items.push({ id: '6201', name: 'Viewing 3', group: 'Viewings', created: daysAgo(6), v: { fs: daysAgo(2), cl: { linked: ['9010'] }, b: 'Demo Pending Tower', c: 'Makati', tm: '3:00 PM', sp: 'Ely Santos', st: 'Viewing Scheduled' } },
+  { id: '6202', name: 'Viewing 4', group: 'Viewings', created: daysAgo(6), v: { fs: daysAgo(3), cl: { linked: ['9010'] }, b: 'Demo LOI Tower', c: 'Makati', tm: '11:00 AM', sp: 'Ely Santos', st: 'Viewing Scheduled' } });
 
 async function cdp(wsUrl) {
   const ws = new WebSocket(wsUrl); let id = 0; const wait = new Map();
@@ -74,7 +84,8 @@ async function cdp(wsUrl) {
   const base = `http://127.0.0.1:${server.address().port}`;
   await User.create([{ email: 'boss@example.com', name: 'Demo Manager', role: 'Manager', passwordHash: await hashPassword(PW) },
     { email: 'ana@example.com', name: 'Ana Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit', propreq: 'view' }, passwordHash: await hashPassword(PW) },
-    { email: 'cora@example.com', name: 'Cora Demo', role: 'VA', vaLabel: 'Cora Fake', modules: { leads: 'edit' }, passwordHash: await hashPassword(PW) }]);
+    { email: 'cora@example.com', name: 'Cora Demo', role: 'VA', vaLabel: 'Cora Fake', modules: { leads: 'edit' }, passwordHash: await hashPassword(PW) },
+    { email: 'vcal@example.com', name: 'Vcal Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit', calendar: 'view' }, passwordHash: await hashPassword(PW) }]);
 
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'bhui-'));
   const port = 9300 + Math.floor(Math.random() * 500);
@@ -289,8 +300,8 @@ async function cdp(wsUrl) {
     const navTo = async (v, mobile) => { if (mobile) { await c.ev(`(() => { const b = document.querySelector('.nav-burger'); b && b.click(); })()`); await sleep(250); } await c.ev(`document.querySelector('[data-act="nav"][data-v="${v}"]').click()`); };
     const choose = (sel, v) => c.ev(`(() => { const s = document.querySelector(${JSON.stringify(sel)}); s.value = ${JSON.stringify(v)}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     const writesSent = () => fx.calls.monday.slice(beforeWrites).filter((x) => /^\s*mutation\b/.test(x.body.query));
-    const plan = [['desktop', 1440, 900, false, 'Remove', 'leadBudget', '175000'], ['phone', 390, 844, true, 'Available', 'leadInquiry', 'Buy']];
-    for (const [label, w, h, mobile, avail, field, value] of plan) {
+    const plan = [['desktop', 1440, 900, false, 'Remove', 'leadBudget', '175000', '6201', 'failed'], ['phone', 390, 844, true, 'Available', 'leadInquiry', 'Buy', '6202', 'loi']];
+    for (const [label, w, h, mobile, avail, field, value, calItem, calOutcome] of plan) {
       await c.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: mobile ? 2 : 1, mobile });
       await signIn('boss@example.com');
       // Inventory: the board's own Availability labels; Cancel sends nothing; Confirm updates Monday
@@ -332,7 +343,55 @@ async function cdp(wsUrl) {
       check(`${label} (writes on): no sideways scrolling in the lead panel`, await c.ev(`document.querySelector('#drawer').scrollWidth <= document.querySelector('#drawer').clientWidth + 1`));
       await shot(`${label}-9-monday-lead-update`);
       await c.ev(`document.querySelector('#drawer [data-act="close"]').click()`);
+      // Calendar → Pending Broker Feedback → record the result; the viewing's Status is written on (fake) Monday after confirming
+      // Create LOI sets the Monday Status (after a confirmation); Failed changes nothing on Monday (as the Apps Script)
+      const loi = calOutcome === 'loi', target = loi ? 'Under Negotiations' : 'Viewing Scheduled';
+      await sleep(300); await navTo('calendar', mobile);
+      await until(`!!document.querySelector('#pendingFb [data-act="pfbres"][data-id="${calItem}"]')`, 15000);
+      check(`${label} (writes on): Pending Broker Feedback lists the viewing that happened, with Open client, Create LOI and Failed`,
+        await c.ev(`(() => { const row = document.querySelector('#pendingFb [data-act="pfbres"][data-id="${calItem}"]').closest('.pfb-row'); return !!row.querySelector('[data-act=pfbopen]') && row.querySelectorAll('[data-act=pfbres]').length === 2; })()`));
+      check(`${label} (writes on): no sideways scrolling on the Calendar with the feedback panel`, await noSideScroll());
+      await shot(`${label}-10-calendar-pending`);
+      await click(`#pendingFb [data-act="pfbres"][data-id="${calItem}"][data-v="${calOutcome}"]`);
+      await until(`document.querySelector('#modal').classList.contains('open') && !!document.querySelector('#vFeedback')`);
+      check(`${label} (writes on): the viewing dialog has its result (Status) and Broker feedback enabled, ${calOutcome} chosen`,
+        await c.ev(`!document.querySelector('#vFeedback').disabled && !document.querySelector('#modal fieldset.vres').disabled && document.querySelector('#modal input[name=vOutcome][value="${calOutcome}"]').checked && !!document.querySelector('#vSave')`));
+      if (calOutcome === 'loi') await c.ev(`(() => { document.querySelector('#vConf').value = '75'; document.querySelector('#vState').value = 'Owner reviewing'; })()`);
+      else await click('#modal input[name=vTag][value="too_small"]');
+      await c.ev(`document.querySelector('#vFeedback').value = 'Demo feedback from the broker'`);
+      const n1 = writesSent().length;
+      await click('#vSave');
+      if (loi) {
+        await until(`!!document.querySelector('#vConfirm .vconfirm')`);
+        const conf = await text('#vConfirm');
+        check(`${label} (writes on): Create LOI asks first, naming the Monday Status change (old → new) and automations`, /Viewing Scheduled/.test(conf) && conf.includes(target) && /automations/.test(conf) && writesSent().length === n1, conf.slice(0, 160));
+        await shot(`${label}-11-calendar-result-confirm`);
+        await click('#modal [data-act="vconfirm"]');
+      }
+      await until(`!document.querySelector('#modal').classList.contains('open')`, 15000);
+      const t2 = await text('#toast');
+      check(`${label} (writes on): ${loi ? 'Create LOI saved — Status and LOI Creation Date on (fake) Monday' : 'Failed saved — nothing on Monday'}, broker feedback kept in the portal`,
+        (loi ? t2.includes('Status → ' + target) : /Monday was not changed/.test(t2)) && /saved in the portal/.test(t2) && writesSent().length === n1 + (loi ? 2 : 0), t2);
+      await until(`!document.querySelector('#pendingFb [data-id="${calItem}"]')`, 10000);
+      check(`${label} (writes on): the viewing left Pending Broker Feedback`, true);
+      await click(`[data-act="viewing"][data-id="${calItem}"]`);
+      await until(`document.querySelector('#modal').classList.contains('open')`);
+      check(`${label} (writes on): reopened, the viewing shows ${loi ? 'the new' : 'the unchanged'} Monday Status and the saved feedback`,
+        (await text('#vMonStatus')) === target && (await c.ev(`document.querySelector('#vFeedback').value`)) === 'Demo feedback from the broker', await text('#vMonStatus'));
+      check(`${label} (writes on): no sideways scrolling in the viewing dialog`, await c.ev(`document.querySelector('#modal .box').scrollWidth <= document.querySelector('#modal .box').clientWidth + 1`));
+      await shot(`${label}-12-calendar-result-saved`);
+      await click('#modal [data-act="mclose"]');
     }
+    // a VA with Calendar view access only: the viewing's result and feedback stay read-only, with the reason shown
+    await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await signIn('vcal@example.com');
+    await navTo('calendar', false);
+    await until(`!!document.querySelector('[data-act="viewing"][data-id="6201"]')`, 15000);
+    await click('[data-act="viewing"][data-id="6201"]');
+    await until(`document.querySelector('#modal').classList.contains('open')`);
+    check('VA with Calendar view only: result and Broker feedback are disabled, no Save, and it says why',
+      await c.ev(`document.querySelector('#vFeedback').disabled && document.querySelector('#modal fieldset.vres').disabled && !document.querySelector('#vSave') && /view-only/.test(document.querySelector('#modal').textContent)`));
+    await click('#modal [data-act="mclose"]');
     // a VA with Leads edit (no Inventory access): lead fields are Managers only, so no Monday updates at all
     await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await signIn('ana@example.com');
@@ -341,9 +400,10 @@ async function cdp(wsUrl) {
     check('VA (writes on): no "Update on Monday" in her own lead (Managers only); no Inventory page',
       !(await c.ev(`!!document.querySelector('#dbody .mwbox')`)) && !(await c.ev(`!!document.querySelector('[data-act="nav"][data-v="invdash"]')`)));
     const sent = writesSent().map((x) => [x.body.query === WRITE_MUTATION, x.body.variables]);
-    check('writes on: exactly the 4 confirmed changes reached (fake) Monday, each the fixed single-column mutation',
+    check('writes on: exactly the 6 confirmed changes reached (fake) Monday (none for the Failed viewing), each the fixed single-column mutation',
       JSON.stringify(sent) === JSON.stringify([[true, { b: '2222222', i: '7005', c: 'av', v: 'Remove' }], [true, { b: '1111111', i: '9008', c: 'bud', v: '175000' }],
-        [true, { b: '2222222', i: '7005', c: 'av', v: 'Available' }], [true, { b: '1111111', i: '9008', c: 'inq', v: 'Buy' }]]), JSON.stringify(sent));
+        [true, { b: '2222222', i: '7005', c: 'av', v: 'Available' }], [true, { b: '1111111', i: '9008', c: 'inq', v: 'Buy' }],
+        [true, { b: '3333333', i: '6202', c: 'st', v: 'Under Negotiations' }], [true, { b: '3333333', i: '6202', c: 'lcd', v: todayManila }]]), JSON.stringify(sent));
     check('writes on: every other Monday call was a read query; respond.io untouched', fx.calls.monday.slice(beforeWrites).every((x) => /^\s*query\b/.test(x.body.query) || x.body.query === WRITE_MUTATION) && fx.calls.respond.every((x) => x.method === 'GET'));
     server2.close();
     const errs = await c.ev(`(window.__errs || []).join(' | ')`);

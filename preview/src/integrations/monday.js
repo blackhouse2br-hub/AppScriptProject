@@ -187,10 +187,24 @@ function shapeListing(it, cols) {
 }
 function viewingStatus(label, date, today) {
   if (/cancel/i.test(label)) return 'Cancelled';
-  if (/done|viewed|complete|loi|contract|closed/i.test(label)) return 'Done';
+  // a result is recorded (Failed, Under Negotiations after an LOI): the viewing happened
+  if (/done|viewed|complete|loi|contract|closed|fail|negotiat/i.test(label)) return 'Done';
   if (/confirm/i.test(label)) return 'Confirmed';
   if (/propos|pending|tentative/i.test(label)) return 'Proposed';
   return date < today ? 'Done' : 'Confirmed';
+}
+/**
+ * One Calendar-board item as a viewing, or null without a Final Schedule date. group / loi / contract feed the
+ * Pending Broker Feedback rules (Code.gs pendingFeedback_); no client details are taken from the Calendar board.
+ */
+function shapeViewing(it, cols, today) {
+  const v = values(it, cols), group = (it.group && it.group.title) || '';
+  const rel = v._client && v._client.linked_item_ids, lead = rel && rel[0] ? String(rel[0]) : '';
+  const date = ymdIn(v.fin);
+  if (!date) return null;
+  return { id: String(it.id), leadId: lead, listingId: '', building: v.bld.split(',')[0].trim(), city: v.city.split(',')[0].trim(),
+    date, time: time24(v.time), broker: v.broker, status: viewingStatus(v.status, date, today), statusLabel: v.status, feedback: '',
+    group, loi: ymdIn(v.loi) || ymdIn(v.loi2), loiCreated: ymdIn(v.loi2), contract: ymdIn(v.cdate) };
 }
 
 // ---------- client ----------
@@ -219,12 +233,14 @@ function assertReadOnly(query) {
 const WRITE_MUTATION = 'mutation ($b: ID!, $i: ID!, $c: String!, $v: String) { change_simple_column_value(board_id: $b, item_id: $i, column_id: $c, value: $v) { id } }';
 /**
  * Second, independent guard right before a write is sent: the exact mutation text above, exactly the four variables,
- * the configured Leads or Listings board (never Calendar), a numeric item, a plain column id and a short one-line value.
+ * a configured Leads, Listings or Calendar board, a numeric item, a plain column id and a short one-line value.
+ * (Which columns of the Calendar board: only those viewingResult.js allows — a viewing's Status, LOI Creation Date and
+ * the optional configured feedback column.)
  */
 function assertAllowedWrite(query, variables, boards) {
   const v = variables || {}, keys = Object.keys(v).sort().join(','), b = boards || {};
   const ok = query === WRITE_MUTATION && keys === 'b,c,i,v'
-    && [b.leads, b.listings].filter(Boolean).includes(v.b) && /^\d{1,20}$/.test(String(v.i)) && /^[a-z0-9_]{1,64}$/.test(String(v.c))
+    && [b.leads, b.listings, b.calendar].filter(Boolean).includes(v.b) && /^\d{1,20}$/.test(String(v.i)) && /^[a-z0-9_]{1,64}$/.test(String(v.c))
     && typeof v.v === 'string' && v.v.length <= 200 && !/[\r\n]/.test(v.v);
   if (!ok) throw new IntegrationError('monday', 'Blocked: this Monday change is not on the allowed list.', { status: 500 });
 }
@@ -341,9 +357,8 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
       items.forEach((it) => {
         const v = values(it, cols), group = (it.group && it.group.title) || '';
         const rel = v._client && v._client.linked_item_ids, lead = rel && rel[0] ? String(rel[0]) : '';
-        const date = ymdIn(v.fin);
-        if (date) viewings.push({ id: String(it.id), leadId: lead, listingId: '', building: v.bld.split(',')[0].trim(), city: v.city.split(',')[0].trim(),
-          date, time: time24(v.time), broker: v.broker, status: viewingStatus(v.status, date, today), statusLabel: v.status, feedback: '' });
+        const shaped = shapeViewing(it, cols, today);
+        if (shaped) viewings.push(shaped);
         // LOI / contract evidence per client (Code.gs loiMap_): Failed/Archive rows and Status Failed are skipped
         if (!lead || /failed|archive/i.test(group) || /fail/i.test(v.status || '')) return;
         const o = lm[lead] = lm[lead] || { d: '', ds: '', dc: '', cd: '', files: 0, cfiles: 0, sfiles: 0, paid: 0, booked: 0 };
@@ -378,7 +393,8 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     const p = tracked(status, () => fn(e.progress)).then(
       (value) => {
         try { keepPatches(e, value, startedAt); } catch (err) { /* never leaves the board stuck "refreshing" */ }
-        Object.assign(e, { value, readFrom: startedAt, at: now(), error: '', failedAt: 0, pending: null, patches: new Map() });
+        // a change the portal made after this read started still needs a fresh read (e.g. the clients' LOI evidence)
+        Object.assign(e, { value, readFrom: startedAt, at: now(), error: '', failedAt: 0, pending: null, patches: new Map(), stale: !!(e.stale && e.staleAt >= startedAt) });
       },
       (err) => { Object.assign(e, { error: err.message, failedAt: now(), pending: null, patches: new Map() }); throw err; });
     p.catch(() => {});   // a background refresh reports through e.error; a first load rethrows to its caller
@@ -397,6 +413,7 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     if (e.pending) return false;
     const t = now(), backoff = e.failedAt && t - e.failedAt < MIN_REFRESH_MS;
     if (!e.value) return !backoff;
+    if (e.stale && !backoff) return true;   // an item was changed on Monday by the portal: reload in the background
     return force ? t - e.at >= MIN_REFRESH_MS : t - e.at >= TTL_MS && !backoff;
   }
   async function cached(key, force, fn) {
@@ -528,6 +545,7 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
    */
   async function refreshItem(board, itemId, { remember = true } = {}) {
     const boardId = cfg.boards[board], e = cache.get(board + ':' + boardId);
+    if (board === 'calendar') return refreshViewing(itemId, e, remember);
     const cols = board === 'leads' ? matchLeadCols(await boardColumns('leads')) : matchListingCols(await boardColumns('listings'));
     const fields = board === 'leads' ? ITEM_FIELDS : LISTING_FIELDS;
     const d = await tracked(status, () => gql(`query ($i: [ID!], $c: [String!]) { items(ids: $i) { ${fields} } }`, { i: [String(itemId)], c: Object.values(cols) }));
@@ -552,6 +570,19 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     patch('listings', x, assets);
     return x;
   }
+  /**
+   * A Calendar item as a viewing (see refreshItem). After a remembered re-read the whole board is marked for a
+   * background reload, because the clients' LOI evidence (lm) is built from every Calendar item.
+   */
+  async function refreshViewing(itemId, e, remember) {
+    const cols = matchCalendarCols(await boardColumns('calendar'));
+    const d = await tracked(status, () => gql(`query ($i: [ID!], $c: [String!]) { items(ids: $i) { ${ITEM_FIELDS} } }`, { i: [String(itemId)], c: Object.values(cols) }));
+    const it = (d.items || [])[0], v = it ? shapeViewing(it, cols, new Date().toISOString().slice(0, 10)) : null;
+    if (!v || !remember) return v;
+    if (e && e.value) { e.value.viewings = e.value.viewings.map((x) => (x.id === v.id ? v : x)); e.stale = true; e.staleAt = now(); }
+    if (e && e.pending) (e.patches = e.patches || new Map()).set(v.id, { list: 'viewings', rec: v, at: now() });
+    return v;
+  }
   /** The cached record (as on screen) for a board item, or null. */
   function cachedItem(board, itemId) {
     const e = cache.get(board + ':' + cfg.boards[board]), list = e && e.value && (board === 'leads' ? e.value.leads : e.value.listings);
@@ -561,4 +592,4 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
   return { loadAll, freshness, settled, notes, photo, test, respondIdSample, writeColumn, boardColumns, refreshItem, cachedItem, writesEnabled: !!cfg.writes };
 }
 
-module.exports = { createMonday, assertReadOnly, assertAllowedWrite, WRITE_MUTATION, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, imageType, HIDE };
+module.exports = { createMonday, assertReadOnly, assertAllowedWrite, WRITE_MUTATION, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, shapeViewing, money, time24, imageType, HIDE };

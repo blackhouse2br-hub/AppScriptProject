@@ -8,6 +8,7 @@ const { authRoutes, requireUser, hashPassword, revokeSessions } = require('./aut
 const { dbReady } = require('./db');
 const { isId, need, leadScope, viewingScope, findVisibleLead } = require('./access');
 const { integrationRoutes, createIntegrations } = require('./integrations/routes');
+const { saveMondayResult, saveMongoResult, pendingFeedback } = require('./integrations/viewingResult');
 
 const bad = (res, errors) => res.status(400).json({ error: errors[0], errors });
 const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'propreq', 'brokers'];
@@ -203,6 +204,25 @@ function apiRouter(config) {
     Object.assign(viewing, value);
     await viewing.save();
     res.json({ viewing });
+  });
+  // the result of a viewing that happened (Create LOI / Failed, reasons, broker feedback): a portal booking ('mongo') or
+  // a Monday Calendar-board item ('monday'); each part is saved where it belongs (src/integrations/viewingResult.js)
+  r.post('/viewings/:source/:id/result', need('calendar', 'edit'), async (req, res) => {
+    const { source, id } = req.params;
+    try {
+      if (source === 'mongo') return res.json(await saveMongoResult({ user: req.user, id, body: req.body }));
+      if (source === 'monday') return res.json(await saveMondayResult({ integ, user: req.user, id, body: req.body }));
+      res.status(404).json({ error: 'Viewing not found.' });
+    } catch (err) {
+      const code = err.httpStatus || (err.integration ? 502 : 500);
+      if (code === 500 && !err.integration && !err.httpStatus) throw err;
+      if (err.retryAfter) res.set('Retry-After', String(err.retryAfter));
+      res.status(code).json({ error: err.message, ...['needsConfirm', 'stale', 'writesOff', 'retryAfter', 'partial'].reduce((o, k) => (err[k] ? { ...o, [k]: err[k] } : o), {}) });
+    }
+  });
+  // Pending Broker Feedback beside the Calendar: viewings that happened with no result yet (both sources)
+  r.get('/calendar/pending', need('calendar', 'view'), async (req, res) => {
+    res.json(await pendingFeedback({ integ, user: req.user, now: Date.now() }));
   });
 
   // ----- team (Settings → Team & Access) -----

@@ -107,7 +107,7 @@
     if (!isPlainObject(p)) return { errors: ['Invalid request.'] };
     const value = {};
     if ('status' in p) { if (!LISTS.viewingStatuses.includes(p.status)) return { errors: ['Unknown viewing status.'] }; value.status = p.status; }
-    if ('feedback' in p) { if (typeof p.feedback !== 'string') return { errors: ['Feedback must be text.'] }; value.feedback = p.feedback.trim().slice(0, 500); }
+    if ('feedback' in p) { if (typeof p.feedback !== 'string') return { errors: ['Feedback must be text.'] }; value.feedback = p.feedback.trim().slice(0, 1000); }
     for (const k of Object.keys(p)) if (k !== 'status' && k !== 'feedback') return { errors: ['Unknown field: ' + k] };
     if (!Object.keys(value).length) return { errors: ['Nothing to save.'] };
     return { value, errors: [] };
@@ -265,8 +265,110 @@
       override: { failed: true, reason: ov.failed.reason, by: ov.failed.by, at: ov.failed.at } });
   }
 
+  // ---------- viewing results and broker feedback (Code.gs FEEDBACK_TAGS, apiSetOutcome, pendingFeedback_) ----------
+  const FEEDBACK_TAGS = {
+    too_expensive: 'Too expensive', too_small: 'Too small', more_bedrooms: 'Needs more bedrooms',
+    liked_building: 'Liked the building', disliked_building: "Didn't like the building",
+    liked_area: 'Liked the area', disliked_area: "Didn't like the area",
+    condition: 'Unit condition', view_floor: 'View / floor', layout: 'Layout',
+  };
+  const RESULT = { outcomes: ['loi', 'failed'], feedbackMax: 1000, stateMax: 500, from: '2026-10-12', days: 60 };
+  /**
+   * A viewing result from the page: { outcome: 'loi'|'failed', tags[], feedback, conf (0–100, LOI only), state }.
+   * LOI needs a confidence level; Failed needs a reason or some feedback (as the Apps Script panel did).
+   * feedbackMax: a lower limit when the text also goes into a one-line Monday column.
+   */
+  function validateResult(b, feedbackMax) {
+    const max = feedbackMax || RESULT.feedbackMax;
+    if (!isPlainObject(b) || Object.keys(b).some((k) => !['outcome', 'tags', 'feedback', 'conf', 'state'].includes(k))) return { errors: ['Invalid request.'] };
+    if (!RESULT.outcomes.includes(b.outcome)) return { errors: ['Choose Create LOI or Failed.'] };
+    const tags = b.tags === undefined ? [] : b.tags;
+    if (!Array.isArray(tags) || tags.length > 10 || tags.some((t) => typeof t !== 'string' || !Object.prototype.hasOwnProperty.call(FEEDBACK_TAGS, t))) return { errors: ['Unknown feedback reason.'] };
+    if (b.feedback !== undefined && typeof b.feedback !== 'string') return { errors: ['Feedback must be text.'] };
+    const feedback = String(b.feedback || '').trim();
+    if (feedback.length > max) return { errors: [`Broker feedback: ${max} characters at most.`] };
+    const value = { outcome: b.outcome, tags: [...new Set(tags)], feedback };
+    if (b.outcome === 'loi') {
+      const n = Number(b.conf);
+      if (b.conf === '' || b.conf == null || !Number.isFinite(n) || n < 0 || n > 100) return { errors: ['Set the LOI confidence level — a number from 0 to 100%.'] };
+      if (b.state !== undefined && typeof b.state !== 'string') return { errors: ['Current state must be text.'] };
+      value.conf = { pct: Math.round(n), state: String(b.state || '').trim().slice(0, RESULT.stateMax) };
+    } else {
+      if (b.conf !== undefined || b.state !== undefined) return { errors: ['A confidence level is only for Create LOI.'] };
+      if (!value.tags.length && !feedback) return { errors: ['Pick a reason or write what the client said.'] };
+    }
+    return { value, errors: [] };
+  }
+  /** Start of the pending-feedback window: 60 days back, never before 12 Oct 2026 (older viewings are not chased). */
+  const pendingSince = (now) => Math.max(now - RESULT.days * 864e5, Date.parse(RESULT.from + 'T00:00:00+08:00'));
+  /** A portal viewing's start time (Manila), or 0. */
+  const viewingAt = (v) => (isYmd(v.date) ? Date.parse(v.date + 'T' + (/^\d{2}:\d{2}$/.test(v.time || '') ? v.time : '12:00') + ':00+08:00') || 0 : 0);
+  /** A portal booking that happened (Confirmed / Done, in the window) and has no result yet. */
+  const portalPending = (v, now) => { const t = viewingAt(v); return ['Confirmed', 'Done'].includes(v.status) && !v.outcome && !!t && t <= now && t >= pendingSince(now); };
+
+  // property suggestions shaped by viewing feedback (Code.gs fbInfer_ / feedbackPrefs_ / applyFeedback_, unchanged rules)
+  function numOf(v) {
+    const s = String(v == null ? '' : v).toLowerCase().replace(/[,₱\s]|php/g, '');
+    if (!s) return null;
+    if (/studio/.test(s)) return 0;
+    const m = s.match(/(\d+(?:\.\d+)?)(k|m)?/);
+    return m ? parseFloat(m[1]) * (m[2] === 'k' ? 1e3 : m[2] === 'm' ? 1e6 : 1) : null;
+  }
+  /** Reasons read from free-text feedback (used when no reason was picked). */
+  function fbInfer(text) {
+    const t = String(text || '').toLowerCase(), out = [];
+    if (/expensive|pricey|over ?budget|too high|cheaper|lower (price|rent)|mahal/.test(t)) out.push('too_expensive');
+    if (/too small|small|cramped|tiny|bigger|more space|larger/.test(t)) out.push('too_small');
+    if (/more (bed)?rooms|another bedroom|need \d ?br|bigger family/.test(t)) out.push('more_bedrooms');
+    if (/(didn'?t|did not|doesn'?t|does not|not) like (the )?(building|tower|condo)|old building|building (is )?old/.test(t)) out.push('disliked_building');
+    if (/(didn'?t|did not|doesn'?t|does not|not) like (the )?(area|location|neighbou?rhood)|too far|far from/.test(t)) out.push('disliked_area');
+    if (/condition|dirty|old unit|needs repair|smell|mold|mould|worn/.test(t)) out.push('condition');
+    if (/higher floor|low floor|view/.test(t)) out.push('view_floor');
+    if (/layout/.test(t)) out.push('layout');
+    return out;
+  }
+  /** entries: [{ tags[], feedback, name, price, sqm, bedrooms, building, location }] (one per viewing with feedback) → { rules, summary, notes } */
+  function feedbackPrefs(entries) {
+    const rules = [], summary = [], notes = [];
+    (entries || []).forEach((f) => {
+      const name = f.name || f.building || 'a unit', tags = f.tags && f.tags.length ? f.tags : fbInfer(f.feedback);
+      const price = numOf(f.price), sqm = numOf(f.sqm), br = numOf(f.bedrooms), bld = normT(f.building || name), area = normT(f.location);
+      tags.forEach((t) => {
+        if (t === 'too_expensive' && price) { rules.push({ t, price }); summary.push('Under ' + Math.round(price).toLocaleString() + ' (' + name + ' was too expensive)'); }
+        if (t === 'too_small' && sqm) { rules.push({ t, sqm }); summary.push('Bigger than ' + sqm + ' sqm (' + name + ' was too small)'); }
+        if (t === 'more_bedrooms' && br != null) { rules.push({ t, br }); summary.push('More than ' + br + ' BR'); }
+        if (t === 'disliked_building' && bld) { rules.push({ t, bld }); summary.push('Not ' + (f.building || name)); }
+        if (t === 'liked_building' && bld) { rules.push({ t, bld }); summary.push('Same building as ' + (f.building || name) + ' first'); }
+        if (t === 'liked_area' && area) { rules.push({ t, area }); summary.push(f.location + ' first'); }
+        if (t === 'disliked_area' && area) { rules.push({ t, area }); summary.push(f.location + ' last'); }
+      });
+      if (f.feedback) notes.push(name + ': “' + String(f.feedback).slice(0, 140) + '”');
+    });
+    return { rules, summary: summary.filter((x, i, a) => a.indexOf(x) === i), notes };
+  }
+  /** One listing ({ price, sqm, bedrooms, building, location }) against those rules → { hide, boost, chips[] }. */
+  function applyFeedback(L, fb) {
+    const out = { hide: false, boost: 0, chips: [] };
+    const price = numOf(L.price), sqm = numOf(L.sqm), br = numOf(L.bedrooms), bld = normT(L.building), area = normT(L.location);
+    const sameBld = (b) => !!bld && !!b && (bld.indexOf(b) >= 0 || b.indexOf(bld) >= 0);
+    (fb && fb.rules || []).forEach((r) => {
+      if (r.t === 'too_expensive' && price != null && price >= r.price) out.hide = true;
+      if (r.t === 'too_small' && sqm != null && sqm <= r.sqm) out.hide = true;
+      if (r.t === 'more_bedrooms' && br != null && br <= r.br) out.hide = true;
+      if (r.t === 'disliked_building' && sameBld(r.bld)) out.hide = true;
+      if (r.t === 'liked_building' && sameBld(r.bld)) { out.boost += 6; out.chips.push('same building they liked'); }
+      if (r.t === 'liked_area' && area && area === r.area) { out.boost += 3; out.chips.push('area they liked'); }
+      if (r.t === 'disliked_area' && area && area === r.area) { out.boost -= 6; out.chips.push('area they disliked'); }
+      if (r.t === 'too_expensive' && price != null && price < r.price) { out.boost += 1; }
+      if (r.t === 'too_small' && sqm != null && sqm > r.sqm) { out.boost += 2; out.chips.push('bigger'); }
+    });
+    out.chips = out.chips.filter((x, i, a) => a.indexOf(x) === i);
+    return out;
+  }
+
   return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
     validateLeadPatch, leadUpdateNote, validateNote, validateBooking, bookingLeadChanges, bookingNote,
     validateViewingPatch, validateAvailability, validateUser, validateTemplate,
-    normPets, petWords, canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride };
+    normPets, petWords, canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride,
+    FEEDBACK_TAGS, RESULT, validateResult, pendingSince, viewingAt, portalPending, numOf, fbInfer, feedbackPrefs, applyFeedback };
 });

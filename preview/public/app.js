@@ -202,7 +202,7 @@
     const refreshing = Object.values(live).some((b) => b.refreshing);
     const failed = Object.entries(live).filter(([k, b]) => b.refreshError && shown[k] && shown[k].loaded);
     let h = `<div class="src-note${old ? ' stale' : ''}" role="status">${mondayWritesOn()
-      ? 'Live Monday.com data. Only the changes you confirm (Availability in the Inventory Dashboard, “Update on Monday” in a lead\'s details) are written to Monday; nothing else is, and Monday data isn\'t saved to MongoDB or this browser.'
+      ? 'Live Monday.com data. Only the changes you confirm (Availability in the Inventory Dashboard, “Update on Monday” in a lead\'s details, a viewing\'s result in the Calendar) are written to Monday; nothing else is, and Monday data isn\'t saved to MongoDB or this browser.'
       : 'Live Monday.com data, read-only: nothing is written to Monday or saved to MongoDB or this browser.'}`;
     if (S.srcFetchedAt) h += ` Data on screen was read from Monday at <b>${esc(hhmm(S.srcFetchedAt))}</b> (${esc(ago(S.srcFetchedAt))}).${old ? ' <b>It may be out of date.</b>' : ''}`;
     if (refreshing) h += ' Refreshing in the background… the data on screen stays until the new copy is ready.';
@@ -244,7 +244,8 @@
   }
   function sidebar() {
     const vis = visibleLeads();
-    const cnt = { leads: vis.length, vaportal: vaPending().length, calendar: visibleViewings().filter((v) => v.status === 'Done' && !v.feedback).length,
+    // Calendar: viewings waiting for broker feedback (the Pending Broker Feedback panel), once loaded
+    const cnt = { leads: vis.length, vaportal: vaPending().length, calendar: S.pend && S.pend.at ? S.pend.rows.length : 0,
       renewals: vis.filter((l) => l.ai === 'For Renewal').length, propreq: PR.sourcingLeads(vis).length, clientreq: CR.clients(vis).length };
     const hot = { vaportal: 1 };
     const by = (k) => { const m = {}; vis.forEach((l) => { m[l[k]] = (m[l[k]] || 0) + 1; }); return m; };
@@ -633,8 +634,9 @@
     toast('Saved ' + where() + '. Nothing was written to Monday.com.');
   }
 
-  // Property matching: hard rules hide units; soft rules rank (budget band ±15%, per data-points.xlsx)
-  function matchListing(l, x, anyType) {
+  // Property matching: hard rules hide units; soft rules rank (budget band ±15%, per data-points.xlsx).
+  // fb: rules from the client's viewing feedback (SH.feedbackPrefs) hide or move units, as the Apps Script suggestions did.
+  function matchListing(l, x, anyType, fb) {
     if (x.availability === 'Not Available' || (!anyType && x.type !== (l.inquiry === 'Rent' ? 'For Rent' : 'For Sale'))) return null;
     const chips = [];
     // "BGC", "Taguig" and "Taguig (BGC)" are the same place; a lead may name several areas
@@ -642,7 +644,13 @@
     chips.push(['Bedrooms', x.bedrooms === l.bedrooms]);
     if (l.budget) chips.push(['Budget', x.price <= l.budget * 1.15]);
     if (l.pets === 'With Pets') chips.push(['Pets', x.petFriendly]);
-    const score = chips.reduce((s, [k, hit]) => s + (hit ? (k === 'Location' || k === 'Budget' ? 3 : 2) : 0), 0);
+    let score = chips.reduce((s, [k, hit]) => s + (hit ? (k === 'Location' || k === 'Budget' ? 3 : 2) : 0), 0);
+    if (fb && fb.rules.length) {
+      const a = SH.applyFeedback({ price: x.price, sqm: x.sizeSqm, bedrooms: x.bedrooms, building: x.building, location: x.city }, fb);
+      if (a.hide) return null;
+      score += a.boost;
+      a.chips.forEach((c) => chips.push([c, !/disliked/.test(c)]));
+    }
     return { score, chips };
   }
   function listingCard(x, extra) {
@@ -669,8 +677,8 @@
   function listingCities() { const n = {}; D.listings.forEach((x) => { n[x.city] = (n[x.city] || 0) + 1; }); return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b)); }
   /** Matches for the lead, narrowed by the VA's filters. f.all = ignore the client's requirements (any available unit). */
   function propResults(l) {
-    const f = pfFor(l);
-    const scored = D.listings.map((x) => [x, matchListing(l, x, f.all || !!f.type)]).filter(([, m]) => m);
+    const f = pfFor(l), fb = f.all ? null : leadFeedback(l);   // "ignore the client's requirements" also ignores feedback
+    const scored = D.listings.map((x) => [x, matchListing(l, x, f.all || !!f.type, fb)]).filter(([, m]) => m);
     const xs = SH.filterListings(scored.map(([x]) => x), { ...f, available: true }), keep = new Set(xs);
     return scored.filter(([x]) => keep.has(x)).sort((a, b) => b[1].score - a[1].score);
   }
@@ -696,8 +704,9 @@
   }
   function propsResultsHtml(l) {
     const f = pfFor(l), matches = propResults(l), lim = S.pf.limit, book = canEdit('calendar'), ask = canAsk();
-    const asked = new Set((askState(l).list || []).map((a) => a.listingId));
-    return `<div class="sub" style="margin:10px 0 12px" role="status">${matches.length} ${f.all ? 'available' : 'matching'} ${DEMO ? 'demo ' : ''}listing${matches.length === 1 ? '' : 's'}${pfCount(f) ? ' with your filters' : ''}, best match first. Hidden: not available${f.all || f.type ? '' : `, and ${l.inquiry === 'Rent' ? 'for sale' : 'for rent'} units`}. Ranked by location, budget (±15%), bedrooms and pets.${readOnlySource() ? ' Booking is off for read-only Monday data.' : ''}</div>
+    const asked = new Set((askState(l).list || []).map((a) => a.listingId)), fb = f.all ? null : leadFeedback(l);
+    return `${fb && fb.summary.length ? `<div class="fbhint" role="note"><b>From viewing feedback:</b> ${fb.summary.map(esc).join(' · ')} <span class="sub">(units that don't fit are hidden)</span></div>` : ''}
+      <div class="sub" style="margin:10px 0 12px" role="status">${matches.length} ${f.all ? 'available' : 'matching'} ${DEMO ? 'demo ' : ''}listing${matches.length === 1 ? '' : 's'}${pfCount(f) ? ' with your filters' : ''}, best match first. Hidden: not available${f.all || f.type ? '' : `, and ${l.inquiry === 'Rent' ? 'for sale' : 'for rent'} units`}. Ranked by location, budget (±15%), bedrooms and pets.${readOnlySource() ? ' Booking is off for read-only Monday data.' : ''}</div>
       ${matches.length ? `<div class="lgrid">${matches.slice(0, lim).map(([x, m]) => listingCard(x, { score: m.score, chips: m.chips,
         action: [book ? `<button class="btn sm" data-act="book" data-id="${esc(x.id)}">📅 Book Viewing</button>` : '',
           ask ? (asked.has(x.id) ? `<button class="btn sm ghost" data-act="tab" data-v="asking">✓ In Asking for Availability</button>` : `<button class="btn sm" data-act="askadd" data-id="${esc(x.id)}">❓ Ask availability</button>`) : ''].join(' ') })).join('')}</div>
@@ -874,7 +883,8 @@
         ${evs.length > 4 ? `<span class="sub">+${evs.length - 4} more</span>` : ''}</div>`;
     }
     const inMonth = vv.filter((v) => { const d = parseYmd(v.date); return d && d.getMonth() === m.getMonth() && d.getFullYear() === m.getFullYear(); });
-    return `<div class="cal-head"><h2>${m.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h2>
+    if (!S.pend || (!S.pend.loading && Date.now() - S.pend.at > 60e3)) setTimeout(loadPending, 0);
+    return `<div class="cal-layout"><div class="cal-main"><div class="cal-head"><h2>${m.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h2>
         <button class="btn sm" data-act="calmove" data-v="-1" aria-label="Previous month">‹</button><button class="btn sm" data-act="calmove" data-v="0">Today</button><button class="btn sm" data-act="calmove" data-v="1" aria-label="Next month">›</button>
         ${me().role !== 'Broker' ? `<select data-ch="calbroker" style="padding:5px 8px"><option value="">All brokers</option>${LISTS.brokers.map((b) => `<option ${S.calBroker === b ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select>` : ''}
         <span class="spacer"></span><span class="legend">${LISTS.viewingStatuses.map((s) => `<span><span class="dot" style="background:${VSTAT_COLORS[s]}"></span> ${s} ${inMonth.filter((v) => v.status === s).length}</span>`).join('')}</span></div>
@@ -882,7 +892,76 @@
       <div class="agenda" aria-label="Viewings this month">${inMonth.length ? inMonth.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map((v) => { const l = leadById(v.leadId) || {}, x = unitOf(v);
         return `<button type="button" class="ag-item ${v.date === t ? 'today' : ''}" data-act="viewing" data-id="${esc(v.id)}"><span class="ag-date">${esc(fmtShort(v.date))}<b>${esc(v.time || '—')}</b></span>
           <span class="ag-main"><b>${esc(l.code || '')} ${esc(l.name || '')}</b><span class="sub">${esc([x.building, x.city, v.broker].filter(Boolean).join(' · '))}</span></span>${pill(v.status, VSTAT_COLORS[v.status])}</button>`; }).join('') : '<div class="empty">No viewings this month.</div>'}</div>
-      <div class="foot-note">Portal bookings (${SRC}). The live portal also shows the Monday Final Schedule for dates before 12 Oct 2026.</div>`;
+      <div class="foot-note">${viewSrc() === 'monday' ? 'Viewings from the Monday Calendar board (Final Schedule). A result you record sets the viewing\'s Status on Monday; its reasons and broker feedback are kept in the portal.'
+        : `Portal bookings (${SRC}). The live portal also shows the Monday Final Schedule for dates before 12 Oct 2026.`}</div></div>
+      <aside class="pfb" id="pendingFb" aria-label="Pending broker feedback">${pendingHtml()}</aside></div>`;
+  }
+
+  // ---------- Pending Broker Feedback (Code.gs pendingFeedback_; server: src/integrations/viewingResult.js) ----------
+  /** Where this page's viewings come from: a portal booking ('mongo'), the Monday Calendar board ('monday') or 'demo'. */
+  const viewSrc = () => (DEMO ? 'demo' : S.source === 'monday' ? 'monday' : 'mongo');
+  /** '' when this user may record a viewing's result here, else why not (shown in the dialog). */
+  function resultBlock() {
+    return access('calendar') !== 'edit' ? 'You have view-only access to the Calendar.' : '';
+  }
+  /** Create LOI on a Monday Calendar viewing sets its Status on Monday, so it needs Monday writes on. '' = allowed. */
+  const loiBlock = () => (viewSrc() === 'monday' && !mondayWritesOn() ? 'Monday updates are switched off on this server, so Create LOI (which sets the Calendar Status on Monday) can\'t be saved; Failed can.' : '');
+  // the Calendar Status Create LOI sets on Monday (server: viewingResult.js CAL.status.labels); Failed changes nothing there
+  const MONDAY_RESULT = { loi: 'Under Negotiations' };
+  const resultOf = (v) => v.result || (v.outcome ? { outcome: v.outcome, tags: v.feedbackTags || [], feedback: v.feedback || '', loiConf: v.loiConf || null, by: v.outcomeBy || '', at: v.outcomeAt || '' } : null);
+  async function loadPending() {
+    if ((!DEMO && !S.user) || !canSee('calendar')) return;
+    const token = S.srcToken, src = viewSrc();
+    S.pend = { ...(S.pend || { rows: [], errors: {}, at: 0 }), loading: true };
+    try {
+      if (DEMO) {
+        const now = Date.now();
+        S.pend = { rows: visibleViewings().filter((v) => SH.portalPending(v, now)).map((v) => { const x = unitOf(v); return { src: 'demo', id: v.id, leadId: v.leadId, date: v.date, time: v.time, when: SH.viewingAt(v), broker: v.broker, status: v.status, unit: { building: x.building, city: x.city, code: x.code } }; })
+          .sort((a, b) => b.when - a.when), errors: {}, at: now, loading: false };
+      } else {
+        const r = await API.get('/api/calendar/pending');
+        if (token !== S.srcToken || src !== viewSrc()) {
+          // the data was reloaded meanwhile: never leave the panel "Loading…"; ask again for the data now on screen
+          if (S.pend) S.pend.loading = false;
+          if (src === viewSrc()) loadPending();
+          return;
+        }
+        S.pend = { rows: r.rows || [], errors: r.errors || {}, at: Date.now(), loading: false };
+      }
+    } catch (e) { if (signedOut(e)) return; S.pend = { rows: [], errors: { all: e.message }, at: Date.now(), loading: false }; }
+    const box = $('#pendingFb'); if (box) box.innerHTML = pendingHtml();
+    renderSide();
+  }
+  function pendingHtml() {
+    const p = S.pend || { rows: [], errors: {} }, rows = p.rows || [], here = viewSrc(), block = resultBlock();
+    const errs = Object.values(p.errors || {});
+    const head = `<div class="pfb-head"><h3>Pending Broker Feedback</h3>${p.at ? `<span class="pill" style="--c:${rows.length ? '#d29922' : '#3fb950'}">${rows.length}</span>` : ''}</div>
+      <div class="sub">Viewings that happened (from 12 Oct 2026, the last 60 days) with no result yet.</div>`;
+    if (!p.at) return head + '<div class="empty">Loading…</div>';
+    const list = rows.map((r) => {
+      const local = r.src === here, l = local ? leadById(r.leadId) : null, v = local ? D.calendar.find((x) => x.id === r.id) : null;
+      const who = l ? `${esc(l.code || '')} · ${esc(l.name || '')}` : esc(r.src === 'monday' ? 'Monday Calendar viewing' : 'Portal booking');
+      return `<div class="pfb-row" data-key="${esc(r.src + ':' + r.id)}"><div class="pfb-main"><b>${esc(fmtShort(r.date))} ${esc(r.time || '')}</b> · ${esc([r.unit.building, r.unit.city].filter(Boolean).join(', ') || 'Unit')}
+          <div class="sub">${who}${r.broker ? ' · ' + esc(r.broker) : ''}${r.status ? ' · ' + esc(r.status) : ''}</div></div>
+        <div class="pfb-act">${l ? `<button type="button" class="btn sm" data-act="pfbopen" data-id="${esc(l.id)}">Open client</button>` : ''}
+          ${v && !block ? `${loiBlock() ? '' : `<button type="button" class="btn sm" data-act="pfbres" data-id="${esc(v.id)}" data-v="loi">📄 Create LOI</button>`}<button type="button" class="btn sm" data-act="pfbres" data-id="${esc(v.id)}" data-v="failed">✕ Failed</button>` : ''}
+          ${!local ? `<span class="sub">Switch the data source to ${r.src === 'monday' ? 'Monday.com' : 'MongoDB'} to record it.</span>` : ''}</div></div>`;
+    }).join('');
+    return head + (errs.length ? `<div class="src-err" role="alert">${esc(errs[0])}</div>` : '') + (block && rows.length ? `<div class="sub" role="note">${esc(block)}</div>` : '')
+      + (rows.length ? `<div class="pfb-list">${list}</div>` : '<div class="empty">Nothing waiting for feedback.</div>');
+  }
+  /** Feedback from this client's viewings (results recorded on viewings that happened) → rules for the property suggestions. */
+  function leadFeedback(l) {
+    const entries = visibleViewings().filter((v) => v.leadId === l.id).map((v) => {
+      const r = resultOf(v);
+      if (v.result) return { tags: r.tags, feedback: r.feedback, name: v.building, building: v.building, location: SH.canonCity(v.city, v.building) || v.city };
+      // portal bookings: every Done viewing with reasons or feedback (as Code.gs feedbackPrefs_ reads the portal viewings)
+      const tags = (r && r.tags) || [], text = v.feedback || '';
+      if (v.status !== 'Done' || (!tags.length && !text)) return null;
+      const x = listingById(v.listingId) || {};
+      return { tags, feedback: text, name: x.building, price: x.price, sqm: x.sizeSqm, bedrooms: x.bedrooms, building: x.building, location: x.city };
+    }).filter(Boolean);
+    return SH.feedbackPrefs(entries);
   }
 
   // ---------- Inventory Dashboard (also the property browser) ----------
@@ -1011,7 +1090,7 @@
         ${row('respond.io', r, ['RESPOND_TOKEN', 'RESPOND_SPACE_ID (optional)'], 'Contact details and chat history for a lead\'s Respond ID')}
       </tbody></table></div>
       ${t ? `<div class="pad">${t.error ? `<div class="src-err" role="alert">${esc(t.error)}</div>` : `<div>Monday token user: <b>${esc(t.user || '—')}</b></div>${Object.entries(t.boards || {}).map(([k, b]) => `<div class="sub">${esc(k)} board: ${b == null ? 'not set' : b.found ? '✓ ' + esc(b.name) : '✗ not found or no access'}</div>`).join('')}`}</div>` : ''}
-      <div class="pad sub">${mondayWritesOn() ? 'Monday updates are limited to listing Availability (Inventory edit access) and four lead fields (Budget, Target Move-in Date, Inquiry Type, Nationality; Managers only), one confirmed field at a time. Still switched off: other Monday writes (AI STATUS, Client Status, subitems, new items, deleting), sending' : 'Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending'} respond.io messages or templates, creating contacts, webhooks and background jobs.
+      <div class="pad sub">${mondayWritesOn() ? 'Monday updates are limited to listing Availability (Inventory edit access), four lead fields (Budget, Target Move-in Date, Inquiry Type, Nationality; Managers only), one confirmed field at a time, and a viewing\'s result in the Calendar (Calendar edit access: the Calendar item\'s Status, plus LOI Creation Date for an LOI). Still switched off: other Monday writes (AI STATUS, Client Status, subitems, new items, deleting), sending' : 'Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending'} respond.io messages or templates, creating contacts, webhooks and background jobs.
         Monday data is held in server memory for up to 5 minutes and is not saved to MongoDB.</div></div>`;
   }
   const MOD_KEYS = VIEWS.map((v) => v[0]).filter((k) => !MOD_ALIAS[k]);
@@ -1192,18 +1271,102 @@
     $('#modal').classList.remove('open'); $('#modal').innerHTML = '';
     if (back && document.contains(back)) back.focus(); else if (S.open) focusIn($('#drawer'), 'h2');
   }
-  function viewingModal(id) {
+  /**
+   * Viewing details. Portal bookings: the scheduling Status (Proposed / Confirmed / Done / Cancelled) and broker feedback,
+   * as before. Every viewing: its result (Create LOI / Failed, reasons, LOI confidence) with the broker feedback; for a
+   * Monday Calendar viewing the result sets its Status on Monday after a confirmation. preset: 'loi' | 'failed'.
+   */
+  function viewingModal(id, preset) {
     const v = visibleViewings().find((x) => x.id === id); if (!v) return toast('You don\'t have access to this viewing.', true);
-    const l = leadById(v.leadId) || {}, x = unitOf(v), edit = canEdit('calendar');
-    S.modal = { kind: 'viewing', id };
+    const l = leadById(v.leadId) || {}, x = unitOf(v), src = viewSrc(), mon = src === 'monday';
+    const sched = !mon && canEdit('calendar'), why = resultBlock(), res = !why, r = resultOf(v), out = preset || (r && r.outcome) || '';
+    const fbMax = mon && S.integ && S.integ.calendarFeedbackColumn ? 200 : SH.RESULT.feedbackMax;
+    S.modal = { kind: 'viewing', id, src, fbMax };
+    const where1 = mon ? `Create LOI sets this viewing's Status on Monday to “${MONDAY_RESULT.loi}” (and LOI Creation Date, if empty); Failed changes nothing on Monday. The result, reasons, broker feedback and LOI confidence are kept in the portal${S.integ && S.integ.calendarFeedbackColumn ? ', and the feedback is also copied to the Calendar board\'s feedback column' : ''}.`
+      : src === 'demo' ? 'Saved in this browser (demo).' : 'Saved in MongoDB (portal booking).';
     openModal(`<h3 id="modalTitle">${esc(fmtShort(v.date))} · ${esc(v.time || '—')} ${pill(v.status, VSTAT_COLORS[v.status])}</h3>
       <div class="grid"><div><span class="d-lbl">Client</span>${visibleLeads().includes(l) ? `<button type="button" class="linkbtn" data-act="openfrommodal" data-id="${esc(l.id)}">${esc(l.code)} · ${esc(l.name)}</button>` : esc(l.code || '—')}</div>
         <div><span class="d-lbl">Unit</span>${esc(x.building)}<div class="sub">${esc([x.code, x.city].filter(Boolean).join(' · '))}</div></div>
         <div><span class="d-lbl">Broker</span>${esc(v.broker || '—')}</div><div><span class="d-lbl">Price</span>${esc(money(x.price) || '—')}</div>
-        ${v.statusLabel ? `<div class="full"><span class="d-lbl">Monday status</span>${esc(v.statusLabel)}</div>` : ''}
-        <label>Status<select id="vStatus" ${edit ? '' : 'disabled'}>${LISTS.viewingStatuses.map((s) => `<option ${v.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
-        <label class="full">Broker feedback<textarea id="vFeedback" maxlength="500" ${edit ? '' : 'disabled'}>${esc(v.feedback)}</textarea></label></div>
-      <div class="actions"><button type="button" class="btn" data-act="mclose">Close</button>${edit ? '<button type="submit" class="btn primary">Save</button>' : ''}</div>`, { form: 'viewing' });
+        ${v.statusLabel ? `<div class="full"><span class="d-lbl">Monday status</span><span id="vMonStatus">${esc(v.statusLabel)}</span></div>` : ''}
+        ${!mon ? `<label>Status<select id="vStatus" ${sched ? '' : 'disabled'}>${LISTS.viewingStatuses.map((s) => `<option ${v.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>` : ''}
+        <fieldset class="full vres" ${res ? '' : 'disabled'}><legend>Result${r ? ` <span class="sub">· saved${r.by ? ' by ' + esc(r.by) : ''}${r.at ? ' ' + esc(ago(r.at)) : ''}</span>` : ''}</legend>
+          <div class="vres-out" role="radiogroup" aria-label="Result">
+            <label><input type="radio" name="vOutcome" value="loi" data-ch="vout" ${out === 'loi' ? 'checked' : ''} ${loiBlock() ? 'disabled' : ''}> 📄 Create LOI${mon ? ` <span class="sub">→ Monday Status “${MONDAY_RESULT.loi}”</span>` : ''}</label>
+            <label><input type="radio" name="vOutcome" value="failed" data-ch="vout" ${out === 'failed' ? 'checked' : ''}> ✕ Failed${mon ? ' <span class="sub">→ kept in the portal; Monday unchanged</span>' : ''}</label></div>
+          ${loiBlock() ? `<div class="sub" role="note">${esc(loiBlock())}</div>` : ''}
+          <div class="vres-loi grid" ${out === 'loi' ? '' : 'hidden'}><label>LOI confidence (%)<input id="vConf" type="number" min="0" max="100" step="5" inputmode="numeric" value="${r && r.loiConf ? esc(r.loiConf.pct) : ''}"></label>
+            <label>Current state<input id="vState" maxlength="500" value="${r && r.loiConf ? esc(r.loiConf.state || '') : ''}" placeholder="e.g. waiting for the owner"></label></div>
+          <div class="vres-tags" role="group" aria-label="Reasons">${Object.entries(SH.FEEDBACK_TAGS).map(([k, t]) => `<label class="tagck"><input type="checkbox" name="vTag" value="${k}" ${r && r.tags.includes(k) ? 'checked' : ''}> ${esc(t)}</label>`).join('')}</div>
+        </fieldset>
+        <label class="full">Broker feedback<textarea id="vFeedback" maxlength="${fbMax}" ${res || sched ? '' : 'disabled'} placeholder="What the client said about the unit">${esc(v.feedback || '')}</textarea></label>
+        <div class="full sub">${esc(where1)}${why ? `<div role="note" class="vwhy">${esc(why)}</div>` : ''}</div></div>
+      <div id="vConfirm"></div>
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Close</button>${res || sched ? '<button type="submit" class="btn primary" id="vSave">Save</button>' : ''}</div>`, { form: 'viewing' });
+    if (preset) focusIn($('#modal'), preset === 'loi' ? '#vConf' : '.vres-tags input');
+  }
+  /** Reads the dialog: { outcome, body } for a result, or null when no result is chosen. */
+  function viewingResultForm() {
+    const out = ($('#modal input[name=vOutcome]:checked') || {}).value || '';
+    if (!out) return null;
+    const tags = [...document.querySelectorAll('#modal input[name=vTag]:checked')].map((i) => i.value);
+    const body = { outcome: out, tags, feedback: $('#vFeedback') ? $('#vFeedback').value : '' };
+    if (out === 'loi') { body.conf = $('#vConf').value; body.state = $('#vState').value; }
+    return body;
+  }
+  /**
+   * Save from the viewing dialog. A Monday Calendar viewing first shows what changes on Monday (old → new) and is
+   * sent only after "Confirm & save"; the reply says what Monday accepted and where the feedback went.
+   */
+  async function saveViewing(confirmed) {
+    const m = S.modal; if (!m || m.kind !== 'viewing') return;
+    const v = visibleViewings().find((x) => x.id === m.id); if (!v) return;
+    const body = viewingResultForm();
+    // portal bookings: a result belongs to a viewing that happened (Done); any other Status is saved as a Status change
+    const st = $('#vStatus') ? $('#vStatus').value : '';
+    if (m.src !== 'monday' && (!body || st !== 'Done')) {
+      return setViewing(m.id, st, $('#vFeedback').value).then((ok) => { if (ok) closeModal(); });
+    }
+    if (!body) return toast('Choose Create LOI or Failed.', true);
+    if (resultBlock()) return toast(resultBlock(), true);
+    if (body.outcome === 'loi' && loiBlock()) return toast(loiBlock(), true);
+    const { errors } = SH.validateResult(body, m.fbMax);
+    if (errors.length) return toast(errors[0], true);
+    if (m.src === 'monday' && !confirmed) {
+      const target = MONDAY_RESULT[body.outcome], cur = v.statusLabel || '', changes = [];
+      if (target && cur !== target) changes.push(`<li>Status: <span>${esc(cur || '(empty)')}</span> → <b>${esc(target)}</b></li>`);
+      if (body.outcome === 'loi' && !v.loiCreated) changes.push('<li>LOI Creation Date: <span>(empty)</span> → <b>today</b></li>');
+      if (S.integ && S.integ.calendarFeedbackColumn && mondayWritesOn() && body.feedback) changes.push('<li>Broker feedback column: the feedback text</li>');
+      if (changes.length) {
+        $('#vConfirm').innerHTML = `<div class="vconfirm" role="alert"><b>Update this viewing on Monday.com?</b><ul>${changes.join('')}</ul>
+          <div class="sub">${cur && cur !== target ? 'The current Status on Monday is replaced. ' : ''}Changing the Status may trigger automations set up on the Monday Calendar board. It can't be undone from the portal.</div>
+          <div class="actions"><button type="button" class="btn" data-act="vback">Back</button><button type="button" class="btn primary" data-act="vconfirm">Confirm &amp; save</button></div></div>`;
+        const s = $('#vSave'); if (s) s.hidden = true;
+        return focusIn($('#vConfirm'), '[data-act=vconfirm]');
+      }
+    }
+    const btns = [...document.querySelectorAll('#modal [data-act=vconfirm], #vSave')];
+    btns.forEach((b) => { b.disabled = true; b.dataset.label = b.textContent; b.textContent = 'Saving…'; });
+    let r;
+    try { r = await backend.saveResult(v, m.src === 'monday' ? { ...body, expect: v.statusLabel || '', confirm: true } : body); }
+    catch (e) {
+      if (signedOut(e)) return;
+      if (e.stale || e.partial) {
+        // Monday holds something else now (or was already updated): show what it holds before anything else is tried
+        S.modalReturn = null; closeModal(); toast((e.partial ? 'Partly saved: ' : 'Not saved: ') + e.message, true);
+        if (m.src === 'monday') loadMonday(false).then(() => { renderView(); if (S.open) renderDrawer(); });
+        return;
+      }
+      btns.forEach((b) => { b.disabled = false; b.textContent = b.dataset.label; });
+      return toast('Not saved: ' + (e.message || 'Something went wrong.'), true);
+    }
+    S.modalReturn = null; closeModal();
+    if (S.pend) S.pend.rows = S.pend.rows.filter((p) => !(p.id === v.id && p.src === viewSrc()));
+    renderView(); if (S.open) renderDrawer(); loadPending();
+    if (m.src === 'monday') {
+      const w = (r.written || []).map((x) => x.column + (x.to ? ' → ' + x.to : ' updated')).join(', ');
+      toast(`Saved. ${w ? 'Monday: ' + w + '.' : 'Monday was not changed.'} Result and broker feedback ${r.feedbackSavedTo === 'monday+portal' ? 'saved in the portal (feedback also on Monday)' : 'saved in the portal'}.${(r.warnings || []).length ? ' ' + r.warnings.join(' ') : ''}`, (r.warnings || []).length > 0);
+    } else toast('Result saved ' + where() + '.');
   }
   const SLOTS = []; for (let h = 7; h <= 21; h++) ['00', '30'].forEach((m) => { if (h < 21 || m === '00') SLOTS.push(String(h).padStart(2, '0') + ':' + m); });
   function quickDates() {
@@ -1235,14 +1398,17 @@
     S.modalReturn = null; closeModal(); S.tab = 'viewings'; renderDrawer(); rerenderMain(); focusIn($('#drawer'), '.tab.on');
     toast('Viewing booked ' + where() + '. No message was sent.');
   }
+  /** Portal bookings only (Monday Calendar viewings get a result instead). true when saved. */
   async function setViewing(id, status, feedback) {
-    if (!canEdit('calendar')) return toast('You don\'t have edit access to the Calendar.', true);
-    const v = visibleViewings().find((x) => x.id === id); if (!v) return;
+    if (!canEdit('calendar')) { toast('You don\'t have edit access to the Calendar.', true); return false; }
+    const v = visibleViewings().find((x) => x.id === id); if (!v) return false;
     const patch = { status }; if (feedback != null) patch.feedback = feedback;
     const { value, errors } = SH.validateViewingPatch(patch);
-    if (errors.length) return toast(errors[0], true);
-    if (!(await attempt(() => backend.patchViewing(v, value)))) return;
+    if (errors.length) { toast(errors[0], true); return false; }
+    if (!(await attempt(() => backend.patchViewing(v, value)))) return false;
     if (S.open) { renderDrawer(); focusIn($('#drawer'), '.tab.on'); } rerenderMain(); toast('Viewing updated ' + where() + '.');
+    if (S.view === 'calendar') loadPending();
+    return true;
   }
 
   // ---------- data layer: demo = this browser's localStorage; mongo = the Express API ----------
@@ -1262,6 +1428,11 @@
       l.notes.push({ by: me().name, text: SH.bookingNote(listing.code, b.date, b.time) + ' (demo)', at: nowIso() }); persist();
     },
     async patchViewing(v, value) { Object.assign(v, value); persist(); },
+    async saveResult(v, b) {
+      Object.assign(v, { status: 'Done', outcome: b.outcome, feedbackTags: b.tags, feedback: b.feedback.trim(), loiConf: b.outcome === 'loi' ? { pct: Math.round(Number(b.conf)), state: String(b.state || '').trim() } : null,
+        outcomeAt: nowIso(), outcomeBy: me().name });
+      persist(); return { viewing: v, written: [], warnings: [] };
+    },
     async setAvailability(x, availability) { x.availability = availability; persist(); },
     async saveUser(prev, value) { const rec = { ...value, phone: prev ? prev.phone : '' }; if (prev) Object.assign(prev, rec); else D.users.push(rec); persist(); },
     async deleteUser(u) { D.users = D.users.filter((x) => x !== u); persist(); },
@@ -1299,6 +1470,11 @@
       D.calendar.push(r.viewing); Object.assign(l, r.lead); if (l.notes) l.notes.push(r.note);
     },
     async patchViewing(v, value) { Object.assign(v, (await API.patch('/api/viewings/' + v.id, value)).viewing); },
+    // a viewing's result: the server saves each part where it belongs (Monday Status / portal feedback); never a fallback
+    async saveResult(v, body) {
+      const r = await API.post(`/api/viewings/${viewSrc()}/${encodeURIComponent(v.id)}/result`, body);
+      Object.assign(v, r.viewing); return r;
+    },
     async setAvailability(x, availability) { x.availability = (await API.patch('/api/listings/' + x.id, { availability })).listing.availability; },   // keeps the normalised city
     async saveUser(prev, value) {
       const r = prev ? await API.patch('/api/team/' + prev.id, value) : await API.post('/api/team', value);
@@ -1329,7 +1505,7 @@
   /** mongo mode: a 401 means the session ended, so go back to the sign-in screen. */
   function signedOut(e) {
     if (DEMO || !e || e.status !== 401) return false;
-    S.user = null; D = EMPTY(); S.open = null; S.draft = {};
+    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null;
     $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
     renderLogin('Your session ended. Please sign in again.');
     return true;
@@ -1348,6 +1524,7 @@
     D = { leads: D.leads || [], listings: D.listings || [], calendar: D.calendar || [], users: b.users, templates: b.templates };
     if (S.source === 'mongo') useMongoRecords();
     await refreshStatus();
+    if (S.source === 'mongo' && canSee('calendar')) loadPending();
   }
   function useMongoRecords() {
     const m = S.mongoRecords || { leads: [], listings: [], calendar: [] };
@@ -1418,6 +1595,7 @@
     S.srcToken = (S.srcToken || 0) + 1;
     if (!Object.keys(S.srcErrors).length || !S.srcErrors.leads) pollReplyStates(S.srcToken);
     loadWriteOptions();
+    loadPending();   // Pending Broker Feedback (and the Calendar's red count) for the data just loaded
     return true;
   }
   /**
@@ -1561,6 +1739,11 @@
     qdate: (el) => { $('#bDate').value = el.dataset.v; $$('.qd .btn').forEach((b) => b.classList.toggle('on', b === el)); },
     vstatus: (el) => setViewing(el.dataset.id, el.dataset.v),
     viewing: (el) => viewingModal(el.dataset.id),
+    // Pending Broker Feedback: open the client, or record the result (the same dialog and save as the viewing details)
+    pfbopen: (el) => openLead(el.dataset.id),
+    pfbres: (el) => viewingModal(el.dataset.id, el.dataset.v),
+    vconfirm: () => saveViewing(true),
+    vback: () => { $('#vConfirm').innerHTML = ''; const s = $('#vSave'); if (s) { s.hidden = false; s.focus(); } },
     mclose: closeModal,
     calmove: (el) => { const d = +el.dataset.v, m = S.calMonth; S.calMonth = d === 0 ? null : new Date(m.getFullYear(), m.getMonth() + d, 1); renderView(); },
     invmore: () => { S.inv.limit = (S.inv.limit || 120) + 120; renderInventory(); },
@@ -1577,7 +1760,7 @@
     source: async (el) => {
       const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
-      prefs.source = v; S.source = v; savePrefs();
+      prefs.source = v; S.source = v; S.pend = null; savePrefs();
       if (v === 'monday') { await openMondaySource(false); toast(mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
       S.srcBusy = false;
       if (!(await attempt(loadAll))) return;
@@ -1625,8 +1808,8 @@
     },
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
-      S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
-      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null;
+      S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null;
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
     },
@@ -1695,7 +1878,7 @@
     },
   };
   const CH = {
-    as: (el) => { if (!DEMO) return; if (S.open) { closeDrawer(); if (S.open) { el.value = S.as; return; } } S.as = el.value; S.va = ''; savePrefs(); render(); toast('Viewing as ' + me().name + ' (' + me().role + ').'); },
+    as: (el) => { if (!DEMO) return; if (S.open) { closeDrawer(); if (S.open) { el.value = S.as; return; } } S.as = el.value; S.va = ''; S.pend = null; savePrefs(); render(); toast('Viewing as ' + me().name + ' (' + me().role + ').'); },
     va: (el) => { S.va = el.value; filtersChanged(); },
     ai1: (el) => { if (el.value === '__multi') return; S.ai = el.value ? [el.value] : []; filtersChanged(); },
     temp1: (el) => { if (el.value === '__multi') return; S.temp = el.value ? [el.value] : []; filtersChanged(); },
@@ -1706,6 +1889,7 @@
     prdate: (el) => { S.prDate = SH.isYmd(el.value) ? el.value : ''; renderView(); const d = $('[data-ch="prdate"]'); if (d) d.focus(); },
     invcity: (el) => { S.inv.city = el.value; renderInventory(); }, invtype: (el) => { S.inv.type = el.value; renderInventory(); },
     invbeds: (el) => { S.inv.beds = el.value; renderInventory(); }, invavail: (el) => { S.inv.avail = el.value; renderInventory(); },
+    vout: (el) => { const box = $('#modal .vres-loi'); if (box) box.hidden = el.value !== 'loi'; $('#vConfirm').innerHTML = ''; const s = $('#vSave'); if (s) s.hidden = false; },
     mwavail: (el) => {
       const x = listingById(el.dataset.id), a = mwAction('listingAvailability'); if (!x || !a) return;
       const before = x.availabilityLabel || '', value = el.value;
@@ -1758,6 +1942,10 @@
   let searchT = null;
   document.addEventListener('input', (e) => {
     const el = e.target;
+    // the viewing dialog: a confirmation shown for Monday no longer matches once the result is edited, so it is withdrawn
+    if (S.modal && S.modal.kind === 'viewing' && el.closest && el.closest('#modal') && !el.closest('#vConfirm') && $('#vConfirm') && $('#vConfirm').innerHTML) {
+      $('#vConfirm').innerHTML = ''; const s = $('#vSave'); if (s) s.hidden = false;
+    }
     if (el.dataset.in === 'q') { clearTimeout(searchT); searchT = setTimeout(() => { S.q = el.value; refreshLeads(true); }, 120); }
     else if (el.dataset.in === 'invq') { clearTimeout(searchT); searchT = setTimeout(() => { S.inv.q = el.value; renderInventory(); }, 120); }
     else if (PF_IN[el.dataset.in]) { const k = PF_IN[el.dataset.in], v = el.value; clearTimeout(searchT); searchT = setTimeout(() => pfSet(k, v, true), 200); }
@@ -1779,7 +1967,7 @@
     if (f.id === 'modalForm') {
       e.preventDefault();
       if (f.dataset.submit === 'book') saveBooking();
-      else if (f.dataset.submit === 'viewing') { const id = S.modal.id; setViewing(id, $('#vStatus').value, $('#vFeedback').value).then(() => closeModal()); }
+      else if (f.dataset.submit === 'viewing') saveViewing(false);
       else if (f.dataset.submit === 'user') saveUser();
       else if (f.dataset.submit === 'tpl') saveTpl();
       else if (f.dataset.submit === 'fail') saveFail();

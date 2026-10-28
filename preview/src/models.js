@@ -2,7 +2,7 @@
 // MongoDB models for the records the preview screens use. Monday.com remains the source for live leads;
 // these collections hold app-owned data now and an imported snapshot later (see the migration notes in README).
 const mongoose = require('mongoose');
-const { LISTS, AI_STAGES, TEMPS, ROLES } = require('../public/shared');
+const { LISTS, AI_STAGES, TEMPS, ROLES, RESULT } = require('../public/shared');
 
 const { Schema } = mongoose;
 const ObjectId = Schema.Types.ObjectId;
@@ -75,7 +75,12 @@ const Viewing = mongoose.model('Viewing', new Schema({
   time: { type: String, required: true, match: /^\d{2}:\d{2}$/ },
   broker: { type: String, required: true, index: true },
   status: { type: String, enum: LISTS.viewingStatuses, default: 'Proposed' },
-  feedback: { type: String, default: '', maxlength: 500 },
+  feedback: { type: String, default: '', maxlength: 1000 },
+  // result of a viewing that happened (Pending Broker Feedback): '' = none yet
+  outcome: { type: String, enum: [''].concat(RESULT.outcomes), default: '' },
+  feedbackTags: { type: [String], default: [] },
+  loiConf: { type: new Schema({ pct: { type: Number, min: 0, max: 100 }, state: { type: String, default: '', maxlength: 500 } }, { _id: false }), default: null },
+  outcomeAt: { type: Date, default: null }, outcomeBy: { type: String, default: '' },
   createdBy: { type: String, default: '' },
 }, opts));
 
@@ -150,7 +155,7 @@ const LeadOverride = mongoose.model('LeadOverride', new Schema({
 // worked. No tokens, client names or contact details; for free text, numbers and dates the value itself isn't kept.
 const MondayWrite = mongoose.model('MondayWrite', new Schema({
   action: { type: String, required: true, maxlength: 40 },
-  board: { type: String, enum: ['leads', 'listings'], required: true },
+  board: { type: String, enum: ['leads', 'listings', 'calendar'], required: true },
   itemId: { type: String, required: true, match: /^\d{1,20}$/ },
   column: { type: String, default: '', maxlength: 80 },
   from: { type: String, default: '', maxlength: 60 }, to: { type: String, default: '', maxlength: 60 },   // status labels only
@@ -159,4 +164,20 @@ const MondayWrite = mongoose.model('MondayWrite', new Schema({
   by,
 }, opts).index({ itemId: 1, createdAt: -1 }));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite };
+// the result of a Monday Calendar-board viewing (Code.gs bfb_): the portal keeps the reasons, broker feedback and LOI
+// confidence (they shape the client's property suggestions); the Calendar item's Status is written on Monday itself
+const ViewingResult = mongoose.model('ViewingResult', new Schema({
+  viewingId: { type: String, required: true, unique: true, match: /^\d{1,20}$/ },   // the Calendar item
+  leadId: { type: String, required: true, index: true, match: /^\d{1,20}$/ },       // the Direct Clients item
+  outcome: { type: String, enum: RESULT.outcomes, required: true },
+  tags: { type: [String], default: [] },
+  feedback: { type: String, default: '', maxlength: 1000 },
+  loiConf: { type: new Schema({ pct: { type: Number, min: 0, max: 100 }, state: { type: String, default: '', maxlength: 500 } }, { _id: false }), default: null },
+  unit: { type: new Schema({ building: { type: String, default: '', maxlength: 120 }, city: { type: String, default: '', maxlength: 80 } }, { _id: false }), default: () => ({}) },
+  date: { type: String, default: '' },
+  mondayStatus: { type: String, default: '', maxlength: 60 },     // the Status label written on the Calendar item
+  feedbackOnMonday: { type: Boolean, default: false },
+  by: { name: { type: String, default: '' }, userId: { type: ObjectId, ref: 'User' } },
+}, opts));
+
+module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult };

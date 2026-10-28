@@ -30,7 +30,7 @@
     } catch (e) { throw new Error(BASE ? 'Could not reach the portal API. Check your connection, or try again in a minute.' : 'Could not reach the local server. Is it still running?'); }
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
-    if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; err.stale = !!(data && data.stale); throw err; }
+    if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; err.stale = !!(data && data.stale); err.partial = !!(data && data.partial); throw err; }
     return data;
   }
   window.BH_API = {

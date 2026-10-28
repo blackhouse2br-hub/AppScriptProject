@@ -495,6 +495,30 @@ pre.report { white-space: pre-wrap; font: 12.5px/1.5 ui-monospace, Consolas, mon
 .mwchange span { color: var(--muted); text-decoration: line-through; }
 .mwavail { display: flex; flex-direction: column; gap: 3px; } .mwavail select { padding: 5px 8px; font-size: 12.5px; }
 
+/* Calendar + Pending Broker Feedback; viewing result */
+.cal-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+.cal-main { min-width: 0; }
+.pfb { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 12px 14px; display: grid; gap: 8px; }
+.pfb-head { display: flex; align-items: center; gap: 8px; } .pfb-head h3 { margin: 0; font-size: 15px; }
+.pfb-list { display: grid; gap: 8px; max-height: 70vh; overflow-y: auto; }
+.pfb-row { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: grid; gap: 6px; font-size: 13px; }
+.pfb-main { min-width: 0; overflow-wrap: anywhere; }
+.pfb-act { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.grid > .full { grid-column: 1 / -1; }
+#modal [hidden] { display: none !important; }   /* .btn / .grid set display, which would otherwise win over hidden */
+.vres { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 10px; margin: 0; display: grid; gap: 8px; min-width: 0; }
+.grid .vres .vres-out label, .grid .vres label.tagck { flex-direction: row; align-items: center; color: var(--text); font-size: 12.5px; }
+.vres input[type=checkbox], .vres input[type=radio] { width: auto; margin: 0; flex: none; }
+.vres legend { font-weight: 600; font-size: 12px; padding: 0 4px; }
+.vres-out { display: flex; flex-wrap: wrap; gap: 6px 16px; } .vres-out label { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.vres-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tagck { display: inline-flex; gap: 5px; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-size: 12.5px; cursor: pointer; }
+.tagck:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.vconfirm { border: 1px solid #d29922; border-radius: 10px; padding: 10px 12px; margin-top: 10px; display: grid; gap: 6px; }
+.vconfirm ul { margin: 0; padding-left: 18px; } .vconfirm li span { color: var(--muted); text-decoration: line-through; }
+.vwhy { margin-top: 4px; color: var(--text); }
+.fbhint { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; margin-bottom: 8px; overflow-wrap: anywhere; }
+
 /* Asking for Availability */
 .asklist { display: grid; gap: 12px; }
 .askcard { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px 14px; display: grid; gap: 8px; }
@@ -503,7 +527,10 @@ pre.report { white-space: pre-wrap; font: 12.5px/1.5 ui-monospace, Consolas, mon
 .ask-links, .ask-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .ask-links .btn { text-decoration: none; }
 
+/* one column: the feedback panel first, so it isn't below the whole month */
+@media (max-width: 1100px) { .cal-layout { grid-template-columns: minmax(0, 1fr); } .pfb { order: -1; } .pfb-list { max-height: none; } }
 @media (max-width: 760px) {
+  .pfb-act .btn, .vres-out label { min-height: 40px; }
   .mwrow { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .mwrow .btn { min-height: 40px; justify-content: center; }
   .pf-g { grid-template-columns: repeat(2, minmax(0, 1fr)); }

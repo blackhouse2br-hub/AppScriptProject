@@ -68,6 +68,11 @@ function writeLimit(env) {
   if (!/^\d{1,2}$/.test(v) || Number(v) < 1 || Number(v) > 60) throw new Error('MONDAY_WRITE_LIMIT must be a number from 1 to 60 (Monday updates per user per minute).');
   return Number(v);
 }
+function columnId(env, key) {
+  const v = String(env[key] || '').trim();
+  if (v && !/^[a-z0-9_]{1,64}$/.test(v)) throw new Error(`${key} must be a Monday column ID (lower-case letters, digits and _).`);
+  return v;
+}
 function loadIntegrations(env) {
   return {
     monday: {
@@ -78,6 +83,9 @@ function loadIntegrations(env) {
       // with them off, Monday stays strictly read-only
       writes: String(env.MONDAY_WRITES || '').trim().toLowerCase() === 'on',
       writeLimit: writeLimit(env),
+      // optional: the Calendar-board column (id) that also receives a viewing's broker feedback; there is no such
+      // column by default, so the feedback stays in the portal (as the Apps Script kept it) unless the owner names one
+      calFeedbackColumn: columnId(env, 'MONDAY_CALENDAR_FEEDBACK_COLUMN'),
     },
     respond: {
       token: String(env.RESPOND_TOKEN || '').trim(),
