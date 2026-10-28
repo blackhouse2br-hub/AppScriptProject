@@ -69,6 +69,20 @@ function itemOut(boardId, it, colIds, host) {
 function fakeMonday(body, auth, host) {
   if (auth === 'bad-token') return [401, { error_message: 'Not Authenticated' }];
   const { query, variables: v } = body;
+  // the portal's single allowed mutation (one column of one item); anything else is answered as an unexpected query
+  if (/^\s*mutation\b/.test(query)) {
+    if (!/^mutation \(\$b: ID!, \$i: ID!, \$c: String!, \$v: String\) \{ change_simple_column_value\(board_id: \$b, item_id: \$i, column_id: \$c, value: \$v\) \{ id \} \}$/.test(query)) return [400, { errors: [{ message: 'unexpected mutation' }] }];
+    const b = BOARDS[String(v.b)], it = b && b.items.find((x) => x.id === String(v.i)), c = b && b.columns.find((x) => x.id === v.c);
+    if (!it || !c) return [200, { errors: [{ message: 'Item or column not found' }] }];
+    it.v[v.c] = v.v;
+    return [200, { data: { change_simple_column_value: { id: it.id } } }];
+  }
+  // one item re-read after a write
+  if (/items\(ids: \$i\) \{ id name/.test(query)) {
+    const bid = Object.keys(BOARDS).find((k) => BOARDS[k].items.some((x) => x.id === String(v.i[0])));
+    const it = bid && BOARDS[bid].items.find((x) => x.id === String(v.i[0]));
+    return [200, { data: { items: it ? [itemOut(bid, it, v.c, host)] : [] } }];
+  }
   if (/next_items_page/.test(query)) {
     const [boardId, offset] = v.k.split(':');
     return [200, { data: { next_items_page: { cursor: null, items: BOARDS[boardId].items.slice(+offset).map((it) => itemOut(boardId, it, v.c, host)) } } }];

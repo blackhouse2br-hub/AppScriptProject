@@ -1,21 +1,23 @@
 'use strict';
-// Read-only integration endpoints (MongoDB mode, signed in). Every route is GET except the Manager-only
-// connection test, which itself only reads. Lead visibility rules are the same as for MongoDB records.
+// Integration endpoints (MongoDB mode, signed in). All read only, except POST /monday/write: the allowlisted,
+// confirmed Monday updates in mondayWrite.js (off unless MONDAY_WRITES=on). The POST connection test only reads.
+// Lead visibility rules are the same as for MongoDB records.
 const SH = require('../../public/shared');
 const { need, findVisibleLead, scopeExternal } = require('../access');
 const { createStatus } = require('./status');
 const { createMonday } = require('./monday');
 const { createRespond } = require('./respondio');
 const { computeLead, replyState } = require('./pipeline');
-const { LeadOverride } = require('../models');
+const { LeadOverride, MondayWrite } = require('../models');
+const { performWrite, writeOptions, createWriteLimiter } = require('./mondayWrite');
 
 /** One set of clients + status per server (shared by the integration routes and Team & Access). */
 function createIntegrations(config) {
   const ic = config.integrations;
   const mondayMissing = [!ic.monday.token && 'MONDAY_TOKEN', !Object.values(ic.monday.boards).some(Boolean) && 'MONDAY_LEADS_BOARD_ID'].filter(Boolean);
   const status = {
-    monday: createStatus(!mondayMissing.length, mondayMissing),
-    respond: createStatus(!!ic.respond.token, ic.respond.token ? [] : ['RESPOND_TOKEN']),
+    monday: createStatus(!mondayMissing.length, mondayMissing, [ic.monday.token]),
+    respond: createStatus(!!ic.respond.token, ic.respond.token ? [] : ['RESPOND_TOKEN'], [ic.respond.token]),
   };
   const monday = mondayMissing.length ? null : createMonday(ic.monday, status.monday);
   const respond = ic.respond.token ? createRespond(ic.respond, status.respond) : null;
@@ -66,7 +68,9 @@ function createIntegrations(config) {
     const all = await monday.loadAll(false);
     return all.listings.find((x) => x.id === String(id)) || null;
   }
-  return { status, monday, respond, ic, teamLabels, allowedVaLabels, enrich, mondayOverrides, visibleMondayLead, mondayListing, statusFields };
+  // rate limit for allowlisted Monday updates (MONDAY_WRITE_LIMIT per user per minute)
+  const writeLimit = monday && monday.writesEnabled ? createWriteLimiter(ic.monday.writeLimit) : null;
+  return { status, monday, respond, ic, teamLabels, allowedVaLabels, enrich, mondayOverrides, visibleMondayLead, mondayListing, statusFields, writeLimit };
 }
 
 const STATUS_FIELDS = ['ai', 'aiSub', 'aiSource', 'workStage', 'temp', 'tempWhy', 'waiting', 'since', 'lastText', 'replyChecked', 'replyError', 'onRespond', 'daysInStage', 'stageDays', 'override'];
@@ -81,7 +85,7 @@ function integrationRoutes(r, integ) {
   };
 
   r.get('/integrations/status', (req, res) => res.json({
-    readOnly: true,
+    readOnly: !(monday && monday.writesEnabled), mondayWrites: !!(monday && monday.writesEnabled),
     monday: { ...status.monday.snapshot(), boards: Object.fromEntries(Object.entries(ic.monday.boards).map(([k, v]) => [k, !!v])) },
     respond: { ...status.respond.snapshot(), inboxLinks: !!ic.respond.spaceId, listChecks: ic.respond.listChecks },
   }));
@@ -162,6 +166,31 @@ function integrationRoutes(r, integ) {
       const all = await monday.loadAll(false);
       res.json({ ...chat, lead: statusFields(integ.enrich(all, [lead], await integ.mondayOverrides())[0]) });
     } catch (err) { failed(res, err); }
+  });
+
+  // ----- allowlisted Monday updates (mondayWrite.js); off unless MONDAY_WRITES=on -----
+  // which updates this user may make, and the board's own labels for the status ones (no client data)
+  r.get('/monday/write-options', async (req, res) => {
+    try { res.json(await writeOptions(integ, req.user)); } catch (err) { failed(res, err); }
+  });
+  // one explicit change by the signed-in user; the reply says plainly whether Monday accepted it (never a MongoDB fallback)
+  const audit = {
+    start: async (e) => (await MondayWrite.create({ ...e, ok: false, error: 'Not confirmed by Monday.com yet.' }))._id,
+    finish: (id, fields) => MondayWrite.updateOne({ _id: id }, { $set: fields }),
+  };
+  r.post('/monday/write', async (req, res) => {
+    try {
+      const out = await performWrite({ integ, user: req.user, body: req.body, audit });
+      // the change is done at this point: adding AI Status etc. must not turn the reply into an error
+      let rec = out.record;
+      if (rec && out.action.board === 'leads') { try { rec = integ.enrich(await monday.loadAll(false), [rec], await integ.mondayOverrides())[0]; } catch (e) { /* shown as read */ } }
+      res.json({ ok: true, unchanged: !!out.unchanged, action: out.action.key, column: out.col.title, board: out.action.board, record: rec, refreshed: !!out.refreshed });
+    } catch (err) {
+      const code = err.httpStatus || (err.integration ? 502 : 500);
+      if (code === 500 && !err.integration) throw err;
+      if (err.retryAfter) res.set('Retry-After', String(err.retryAfter));
+      res.status(code).json({ error: err.message, ...(err.needsConfirm ? { needsConfirm: true } : {}), ...(err.writesOff ? { writesOff: true } : {}), ...(err.stale ? { stale: true } : {}), ...(err.retryAfter ? { retryAfter: err.retryAfter } : {}) });
+    }
   });
 
   // labels for Settings → Team & Access (VA Assigned / Salesperson values on the Monday board)

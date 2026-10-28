@@ -11,7 +11,7 @@ It runs in one of two **explicit** modes:
 | Sign-in | None. "View as" is a preview switch, **not authentication** | Email + password accounts stored in MongoDB |
 | API | Switched off; the page may not make any network request (`connect-src 'none'`) | Same-origin `/api/` only |
 | If MongoDB is unreachable | n/a | The server refuses to start (or the API answers 503). It never falls back to demo data |
-| Monday.com / respond.io | Off (tokens are ignored) | **Read-only**, only when you set tokens in `.env`; otherwise "Not connected" |
+| Monday.com / respond.io | Off (tokens are ignored) | **Read-only** (plus the allowlisted Monday updates when `MONDAY_WRITES=on`, see "Monday updates"), only when you set tokens in `.env`; otherwise "Not connected" |
 
 Nothing connects to Google Apps Script, Google Drive/Sign-in, Railway or GitHub. Monday.com and respond.io are
 read only in MongoDB mode, only after you add your own tokens, and nothing is ever written to them.
@@ -86,12 +86,36 @@ What the original Apps Script reads, and what this phase connects:
 3. Switch **Data source → Monday.com · read-only** in the mode bar to see live Monday records in the same screens. Editing, booking and notes are disabled for them. **Settings → Integrations** shows each service's status, last success/error and a **Test Monday connection** button (Managers).
 
 How it behaves:
-- Credentials stay on the server; the browser only sees status. Monday requests can only be GraphQL `query` operations (mutations are refused before sending); respond.io requests can only be `GET` to an allowlist of paths.
+- Credentials stay on the server; the browser only sees status. Monday requests can only be GraphQL `query` operations (mutations are refused before sending), except the one fixed single-column update used by the allowlisted "Monday updates" when `MONDAY_WRITES=on`; respond.io requests can only be `GET` to an allowlist of paths.
 - A failing service shows a red error and **no substitute data** (no demo or MongoDB records in its place).
 - Monday data is cached in server memory for 5 minutes (Refresh forces a reload, at most every 30 s) and is **not saved to MongoDB**.
 - The same visibility rules apply to Monday records: VAs see leads whose *VA Assigned* label matches their VA label; brokers see leads where they're the Salesperson or the broker on a viewing. **Settings → Team & Access** reads the VA Assigned and Salesperson labels from the board, offers them when adding a VA, refuses labels that aren't on the board, and shows a "Monday match" column per member.
 - AI Status, Temperature, Needs VA Reply / Waiting on Client and Days in Stage are computed with the original's rules (`src/integrations/pipeline.js`). Reply states are checked from respond.io in batches of 60 chats after the Monday data loads. Listing photos are shown through a server proxy.
 - What remains (Website Inquiries, older lead boards, subitems, AI chat reading, portal-only data) and what needs real accounts to verify: see **[SOURCE-COVERAGE.md](SOURCE-COVERAGE.md)**.
+
+## Monday updates (off unless `MONDAY_WRITES=on`)
+
+With `MONDAY_WRITES` unset, Monday stays read-only as described above. With `MONDAY_WRITES=on`, these explicit,
+user-confirmed changes are written to Monday, and nothing else (`src/integrations/mondayWrite.js`):
+
+| Where | Board · column (must be titled exactly this, once, and be the column the portal reads) | Values | Who |
+|---|---|---|---|
+| Inventory Dashboard → Availability on a Monday listing | Listings · Availability (status) | the board's own labels | Inventory Dashboard **edit** (the confirmation warns that Monday automations may run) |
+| Lead details → Update on Monday → Budget | Direct Clients · Budget (numbers) | a positive number | **Managers only** |
+| … Target Move-in Date | Direct Clients · Target Move-in Date (date) | YYYY-MM-DD | same |
+| … Inquiry Type | Direct Clients · Inquiry Type (status) | the board's own labels | same |
+| … Nationality | Direct Clients · Nationality (text) | one line, ≤ 60 characters | same |
+
+Each change is one `change_simple_column_value` on one item and column. A value is never cleared, and nothing is
+created, deleted, moved or archived. The page asks for confirmation (old → new) before anything is sent. The server then
+reads the item's current value from Monday itself: if it differs from what the page showed, nothing is sent; overwriting
+a value always needs the confirmation. Every attempt is logged in MongoDB *before* it is sent (`MondayWrite`: who,
+when, action, item ID, column, ok/error; status labels only, no tokens, contact details or free-text values); if it can't
+be logged, it isn't sent. Reads keep the global read-only guard; a second guard checks every write against the fixed
+mutation (Leads or Listings board only) just before it is sent. Update attempts
+are rate-limited per user (`MONDAY_WRITE_LIMIT`, default 10 per minute; the server as a whole 3×) before anything is
+read from or sent to Monday; over the limit the reply is HTTP 429 with `Retry-After`. Everything else
+stays as before: notes, bookings, viewing status, Asking for Availability and Failed overrides are portal-only.
 
 ## Scripts
 
@@ -115,7 +139,7 @@ How it behaves:
 | Settings: Team & Access, WhatsApp Templates (stored only) | Working | Working (passwords, at least one Manager kept) |
 | Manager / VA / Broker permissions and lead visibility | Simulated in the browser | Enforced by the server on every request |
 | Respond.io Chat | Read-only sample | Read-only from respond.io when `RESPOND_TOKEN` is set, else "not connected" |
-| Monday.com leads, listings, calendar, notes | n/a | Read-only, live (Data source switch) when configured |
+| Monday.com leads, listings, calendar, notes | n/a | Read-only, live (Data source switch) when configured; see "Monday updates" for the allowlisted exceptions |
 | Properties tab: the VA's own search (city, bedrooms, rent/sale, price, furnishing, pets, keyword, "ignore the client's requirements") | Working | Working |
 | Asking for Availability: units being checked with owners (one per lead + listing, up to 60 per lead), owner Call / WhatsApp / Viber links that open only when tapped (taps logged, newest 20), owner confirmed / not available. Nothing is sent and nothing goes to Monday or respond.io | This browser | MongoDB (`AvailabilityRequest`), for Monday and MongoDB leads |
 | Mark as Failed: a **portal override** with a reason, **Managers only** (set and remove; enforced by the server), labelled "Portal override" wherever AI Status shows; Monday's Client Status / AI STATUS are not changed | This browser | MongoDB (`LeadOverride`) |
@@ -157,7 +181,7 @@ src/models.js        Lead, Listing, Viewing, Note, User, Template, Session
 src/auth.js          scrypt password hashing, MongoDB sessions (HttpOnly, SameSite=Strict cookie), sign-in throttle
 src/api.js           explicit API routes with module-access and lead-visibility checks
 src/access.js        module access + lead visibility (MongoDB records and Monday records)
-src/integrations/    read-only Monday.com (monday.js) and respond.io (respondio.js) clients, status, routes
+src/integrations/    Monday.com (monday.js; reads + the guarded write in mondayWrite.js) and read-only respond.io (respondio.js) clients, status, routes
 src/app.js           Express app: security headers, /config.js, /healthz, static files
 public/shared.js     picklists, access rules, validation shared by browser and server
 public/app.js        the UI (unchanged design); data layer switches between localStorage and the API

@@ -11,11 +11,13 @@ class IntegrationError extends Error {
   }
 }
 
-function createStatus(configured, missing) {
+/** `secrets`: values (e.g. the API token) never kept in lastError, whatever message an error carries. */
+function createStatus(configured, missing, secrets = []) {
   const s = { configured, missing, state: configured ? 'not_checked' : 'not_configured', lastOkAt: null, lastError: '', lastErrorAt: null };
+  const hide = (m) => secrets.filter(Boolean).reduce((x, sec) => x.split(sec).join('***'), redact(m));
   return {
     ok() { s.state = 'ok'; s.lastOkAt = new Date().toISOString(); },
-    error(msg) { s.state = 'error'; s.lastError = redact(msg); s.lastErrorAt = new Date().toISOString(); },
+    error(msg) { s.state = 'error'; s.lastError = hide(msg); s.lastErrorAt = new Date().toISOString(); },
     snapshot: () => ({ ...s }),
   };
 }

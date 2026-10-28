@@ -69,11 +69,11 @@ function printBanner(server, config, log = console.log) {
   const url = serverUrl(server, config);
   log(url ? `Blackhouse Leads Portal preview running at ${url}` : 'Blackhouse Leads Portal preview started, but the server address is not available.');
   log(config.mode === 'mongo'
-    ? 'Mode: MONGO. Records are read from and saved to MongoDB; sign-in required. Monday.com and respond.io are read-only (see below); Google is not connected.'
+    ? 'Mode: MONGO. Records are read from and saved to MongoDB; sign-in required. Monday.com and respond.io are read-only (see below; MONDAY_WRITES=on allows only the allowlisted, confirmed Monday updates); Google is not connected.'
     : 'Mode: DEMO. Fictional data only, kept in your browser. No database, no API, no outside services.');
   if (config.integrations) {
     const m = config.integrations.monday, r = config.integrations.respond;
-    log(`Monday.com (read-only): ${m.token && Object.values(m.boards).some(Boolean) ? 'configured' : 'not connected'} · respond.io (read-only): ${r.token ? 'configured' : 'not connected'}`);
+    log(`Monday.com (${m.writes ? 'reads + allowlisted confirmed updates' : 'read-only'}): ${m.token && Object.values(m.boards).some(Boolean) ? 'configured' : 'not connected'} · respond.io (read-only): ${r.token ? 'configured' : 'not connected'}`);
   }
   if (config.ignoredIntegrationVars.length) log(`Ignored in demo mode: ${config.ignoredIntegrationVars.join(', ')} (integrations run only in MongoDB mode).`);
   log('Press Ctrl+C to stop.');

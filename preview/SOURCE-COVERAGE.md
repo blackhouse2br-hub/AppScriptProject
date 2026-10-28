@@ -1,7 +1,7 @@
 # Source coverage: Monday.com and respond.io (read-only phase)
 
 What the original Apps Script portal (`src/Code.gs` in `../blackhouse-leads-portal.zip`) reads or writes, and where
-each feature stands in this preview. Everything here is **read-only**. All of it has been checked **only against the
+each feature stands in this preview. Everything here is **read-only**, except the allowlisted Monday updates (README "Monday updates", off unless `MONDAY_WRITES=on`). All of it has been checked **only against the
 local fake API** in `test/fixtures/fake-integrations.js` (fictional records); nothing has been run against real accounts.
 
 Legend: ✅ done (fake data) · 🔑 needs real account details to verify · ⏳ later phase · ⛔ not possible without another system
@@ -31,7 +31,7 @@ Legend: ✅ done (fake data) · 🔑 needs real account details to verify · ⏳
 | respond.io contact lookup by phone/email, contact list | `/contact/phone:`, `/contact/email:`, `POST /contact/list` | ⏳ | Read-only but used to fill Respond IDs; `POST /contact/list` needs an allowlist exception |
 | Translation (Google LanguageApp) | auto-translate in chats | ⏳ | A translation service decision |
 | Inventory Dashboard extras, Leads Report KPIs, Broker Management, P&L, Data Check | many Monday reads (Calendar commissions, creation logs) | ⏳ | Column-by-column mapping from `docs/data-points.xlsx`, sheet "Monday columns used" |
-| All writes | AI STATUS write-back, subitems, Client Status/Fail, move-in, availability, new listings, respond.io messages/templates/contacts, webhooks | ⛔ in this phase | Explicit go-ahead per write, idempotency and audit (see the root migration plan) |
+| All other writes | AI STATUS write-back, subitems, Client Status/Fail, VA Assigned, Pets, viewings/calendar items, new listings, respond.io messages/templates/contacts, webhooks | ⛔ in this phase | Explicit go-ahead per write, idempotency and audit (see the root migration plan) |
 
 ## How to check with real accounts later 🔑
 

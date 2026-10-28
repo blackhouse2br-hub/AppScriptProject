@@ -11,6 +11,9 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { start } = require('../server');
+const { loadConfig } = require('../src/config');
+const { createApp } = require('../src/app');
+const { WRITE_MUTATION } = require('../src/integrations/monday');
 const { User } = require('../src/models');
 const { hashPassword } = require('../src/auth');
 const fx = require('./fixtures/fake-integrations');
@@ -25,6 +28,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // fictional extras on the fake boards: an owner number, Taguig / BGC listings, and a lead whose chat check fails
 const B = fx.BOARDS['2222222'];
 B.columns.push({ id: 'ph', title: 'Phone', type: 'phone', settings_str: '{}' });
+// the real boards' column kinds for the allowlisted Monday updates: Availability labels, Budget is a number column
+B.columns.find((c) => c.id === 'av').settings_str = JSON.stringify({ labels: { 0: 'Availability Inquired', 1: 'Closed', 2: 'Available', 3: 'Remove' } });
+fx.BOARDS['1111111'].columns.find((c) => c.id === 'bud').type = 'numbers';
 B.items[0].v.ph = '+63 900 555 0101';
 B.items.push({ id: '7004', name: 'Owner D', group: 'Available Units', v: { bn: 'Grand Hyatt Residences', loc: '', lt: 'For Rent', bed: '2 BR', pr: '210000', av: 'Available', ph: '0900 555 0104' }, assets: [['30011', 'png']] },
   { id: '7005', name: 'Owner E', group: 'Available Units', v: { bn: 'Demo Taguig Tower', loc: 'Taguig', lt: 'For Rent', bed: '2 BR', pr: '190000', av: 'Available' } });
@@ -157,6 +163,7 @@ async function cdp(wsUrl) {
       await until(`/Check Fails Client/.test(document.querySelector('#drawer h2').textContent)`);
       await click('#dbody [data-act="failmodal"]');
       await until(`!!document.querySelector('#failQuick')`);
+      check(`${label}: Monday updates switched off (default): no "Update on Monday" box in lead details`, !(await c.ev(`!!document.querySelector('#dbody .mwbox')`)));
       check(`${label}: the dialog says it's a portal override and Monday is not changed`, /portal override[\s\S]*Nothing is written to Monday\.com/.test(await text('#modal')));
       await c.ev(`(() => { document.querySelector('#failQuick').value = 'Not responsive'; document.querySelector('#modalForm').requestSubmit(); })()`);
       await until(`!document.querySelector('#modal.open')`);
@@ -183,6 +190,8 @@ async function cdp(wsUrl) {
       const ph = await c.ev(`Object.fromEntries([...document.querySelectorAll('#invGrid .lph')].filter(p => p.querySelector('img.lphoto')).map(p => { const i = p.querySelector('img.lphoto'); return [p.querySelector('.phl').dataset.pid, i.complete && i.naturalWidth > 0 ? 'shown' : p.classList.contains('ph-err') ? 'placeholder' : 'pending']; }))`);
       check(`${label}: listing photos preview in the Inventory Dashboard; an unsafe file falls back to the placeholder`, ph['7001'] === 'shown' && ph['7004'] === 'shown' && ph['7003'] === 'placeholder', JSON.stringify(ph));
       check(`${label}: no sideways scrolling on the inventory`, await noSideScroll());
+      check(`${label}: Monday updates switched off (default): no Availability control on Monday listings`, !(await c.ev(`!!document.querySelector('[data-ch="mwavail"], [data-ch="avail"]')`)));
+      check(`${label}: with updates off the page says Monday is read-only`, /read-only: nothing is written to Monday/.test(await text('#modebar')));
       await c.ev(`window.scrollTo(0, 0)`); await shot(`${label}-5-inventory`);
 
       // Client Requirements: generated from the loaded leads, numbered clients only, Copy message (clipboard stubbed)
@@ -259,10 +268,84 @@ async function cdp(wsUrl) {
     const coraNav = await c.ev(`[...document.querySelectorAll('[data-act="nav"]')].map((b) => b.dataset.v).join(',')`);
     check('VA without Property Requirements access: no Client Requirements page', !/clientreq|propreq/.test(coraNav), coraNav);
 
-    // nothing was written to Monday or respond.io, and photos were only read
+    // with Monday updates off (the default), nothing was written to Monday or respond.io, and photos were only read
     check('read-only: Monday got queries only, respond.io GETs only, file host GETs without the token',
       fx.calls.monday.every((x) => /^\s*query\b/.test(x.body.query)) && fx.calls.respond.every((x) => x.method === 'GET') && fx.calls.files.every((x) => x.method === 'GET' && !x.auth),
       `${fx.calls.monday.length} Monday, ${fx.calls.respond.length} respond.io, ${fx.calls.files.length} file reads`);
+    const beforeWrites = fx.calls.monday.length;
+
+    // ---- Monday updates switched ON (a second local server, same fake boards): explicit, confirmed, allowlisted ----
+    const app2 = createApp(loadConfig({ APP_MODE: 'mongo', MONGODB_URI: mem.getUri('bh_ui'), PORT: '0', HOST: '127.0.0.1', MONDAY_TOKEN: 'mtest',
+      MONDAY_LEADS_BOARD_ID: '1111111', MONDAY_LISTINGS_BOARD_ID: '2222222', MONDAY_CALENDAR_BOARD_ID: '3333333', MONDAY_API_URL: fake + '/monday', MONDAY_WRITES: 'on' }, ['node', 'server.js']));
+    const server2 = await new Promise((r) => { const s = app2.listen(0, '127.0.0.1', () => r(s)); });
+    const base2 = `http://127.0.0.1:${server2.address().port}`;
+    const signIn = async (email) => {
+      await c.send('Network.clearBrowserCookies'); await c.send('Page.navigate', { url: base2 + '/' }); await sleep(300);
+      await c.ev(`localStorage.clear()`); await c.send('Page.navigate', { url: base2 + '/' });
+      await until(`!!document.querySelector('#loginForm')`);
+      await c.ev(`(() => { document.querySelector('#lEmail').value = ${JSON.stringify(email)}; document.querySelector('#lPass').value = ${JSON.stringify(PW)}; document.querySelector('#loginForm').requestSubmit(); })()`);
+      await until(`document.querySelectorAll('#list .row[data-id]').length >= 3`, 20000);
+    };
+    const navTo = async (v, mobile) => { if (mobile) { await c.ev(`(() => { const b = document.querySelector('.nav-burger'); b && b.click(); })()`); await sleep(250); } await c.ev(`document.querySelector('[data-act="nav"][data-v="${v}"]').click()`); };
+    const choose = (sel, v) => c.ev(`(() => { const s = document.querySelector(${JSON.stringify(sel)}); s.value = ${JSON.stringify(v)}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const writesSent = () => fx.calls.monday.slice(beforeWrites).filter((x) => /^\s*mutation\b/.test(x.body.query));
+    const plan = [['desktop', 1440, 900, false, 'Remove', 'leadBudget', '175000'], ['phone', 390, 844, true, 'Available', 'leadInquiry', 'Buy']];
+    for (const [label, w, h, mobile, avail, field, value] of plan) {
+      await c.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: mobile ? 2 : 1, mobile });
+      await signIn('boss@example.com');
+      // Inventory: the board's own Availability labels; Cancel sends nothing; Confirm updates Monday
+      await navTo('invdash', mobile);
+      await until(`!!document.querySelector('[data-ch="mwavail"][data-id="7005"]')`, 15000);
+      const opts = await c.ev(`[...document.querySelector('[data-ch="mwavail"][data-id="7005"]').options].map((o) => o.textContent)`);
+      check(`${label} (writes on): Availability offers exactly the Monday board's labels`, JSON.stringify(opts.filter((o) => !/current|not set/.test(o))) === JSON.stringify(['Availability Inquired', 'Closed', 'Available', 'Remove']), opts.join(', '));
+      const n0 = writesSent().length;
+      await choose('[data-ch="mwavail"][data-id="7005"]', avail);
+      await until(`document.querySelector('#modal').classList.contains('open')`);
+      await click('#modal [data-act="mclose"]');
+      check(`${label} (writes on): Cancel in the confirmation sends nothing and keeps the old value`, writesSent().length === n0 && (await c.ev(`document.querySelector('[data-ch="mwavail"][data-id="7005"]').value`)) !== avail);
+      await choose('[data-ch="mwavail"][data-id="7005"]', avail);
+      await until(`document.querySelector('#modal').classList.contains('open')`);
+      const dlg = await text('#modal');
+      check(`${label} (writes on): the confirmation names the board, field, old and new value`, /Update Monday\.com\?/.test(dlg) && /Availability/.test(dlg) && /Listings/.test(dlg) && new RegExp(avail).test(dlg) && /can't be undone from the portal/.test(dlg), dlg.slice(0, 160));
+      check(`${label} (writes on): the Availability confirmation warns about Monday automations`, /may trigger automations/.test(dlg), (dlg.match(/⚠[^\n]*/) || [''])[0]);
+      await shot(`${label}-8-monday-confirm`);
+      await c.ev(`document.querySelector('#modalForm').requestSubmit()`);
+      await until(`!document.querySelector('#modal').classList.contains('open') && document.querySelector('[data-ch="mwavail"][data-id="7005"]').value === ${JSON.stringify(avail)}`, 15000);
+      check(`${label} (writes on): Availability updated on (fake) Monday and shown`, writesSent().length === n0 + 1 && /Monday updated/.test(await text('#toast')), await text('#toast'));
+      check(`${label} (writes on): no sideways scrolling on the inventory`, await noSideScroll());
+      check(`${label} (writes on): the page no longer claims Monday is read-only, and says what is written`, !/read-only/.test(await text('#modebar')) && /Only the changes you confirm/.test(await text('#modebar')), (await text('.src-note')).slice(0, 120));
+      // Lead details: "Update on Monday" (one field at a time, confirmed)
+      await navTo('leads', mobile);
+      await until(`!!document.querySelector('#list .row[data-id="9008"]')`);
+      await c.ev(`document.querySelector('#list .row[data-id="9008"]').click()`);
+      await until(`!!document.querySelector('#dbody .mwbox')`, 15000); await sleep(300);
+      const rows = await c.ev(`[...document.querySelectorAll('#dbody .mwrow > span')].map((s) => s.textContent)`);
+      // the board has a Pets column, but Pets is not on the allowlist; Nationality has no column on this fake board
+      check(`${label} (writes on): lead details offer only the allowlisted fields present on the board (no Pets)`, JSON.stringify(rows) === JSON.stringify(['Budget', 'Target Move-in Date', 'Inquiry Type']), rows.join(', '));
+      await c.ev(`(() => { const i = document.querySelector('#dbody [data-mwin="${field}"]'); i.value = ${JSON.stringify(value)}; })()`);
+      await click(`#dbody [data-act="mwsave"][data-k="${field}"]`);
+      await until(`document.querySelector('#modal').classList.contains('open')`);
+      check(`${label} (writes on): lead update asks first, naming the Direct Clients board, with readable old and new values`, /Direct Clients/.test(await text('#modal')) && !/NaN|undefined/.test(await text('#modal')), (await text('#modal')).slice(0, 140));
+      await c.ev(`document.querySelector('#modalForm').requestSubmit()`);
+      await until(`!document.querySelector('#modal').classList.contains('open')`, 15000);
+      check(`${label} (writes on): lead field updated on (fake) Monday`, writesSent().length === n0 + 2 && /Monday updated/.test(await text('#toast')), await text('#toast'));
+      check(`${label} (writes on): no sideways scrolling in the lead panel`, await c.ev(`document.querySelector('#drawer').scrollWidth <= document.querySelector('#drawer').clientWidth + 1`));
+      await shot(`${label}-9-monday-lead-update`);
+      await c.ev(`document.querySelector('#drawer [data-act="close"]').click()`);
+    }
+    // a VA with Leads edit (no Inventory access): lead fields are Managers only, so no Monday updates at all
+    await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await signIn('ana@example.com');
+    await c.ev(`document.querySelector('#list .row[data-id="9008"]').click()`);
+    await until(`!!document.querySelector('#dbody') && /Budget/.test(document.querySelector('#dbody').textContent)`, 15000); await sleep(1500);
+    check('VA (writes on): no "Update on Monday" in her own lead (Managers only); no Inventory page',
+      !(await c.ev(`!!document.querySelector('#dbody .mwbox')`)) && !(await c.ev(`!!document.querySelector('[data-act="nav"][data-v="invdash"]')`)));
+    const sent = writesSent().map((x) => [x.body.query === WRITE_MUTATION, x.body.variables]);
+    check('writes on: exactly the 4 confirmed changes reached (fake) Monday, each the fixed single-column mutation',
+      JSON.stringify(sent) === JSON.stringify([[true, { b: '2222222', i: '7005', c: 'av', v: 'Remove' }], [true, { b: '1111111', i: '9008', c: 'bud', v: '175000' }],
+        [true, { b: '2222222', i: '7005', c: 'av', v: 'Available' }], [true, { b: '1111111', i: '9008', c: 'inq', v: 'Buy' }]]), JSON.stringify(sent));
+    check('writes on: every other Monday call was a read query; respond.io untouched', fx.calls.monday.slice(beforeWrites).every((x) => /^\s*query\b/.test(x.body.query) || x.body.query === WRITE_MUTATION) && fx.calls.respond.every((x) => x.method === 'GET'));
+    server2.close();
     const errs = await c.ev(`(window.__errs || []).join(' | ')`);
     check('no uncaught page errors', !errs, errs);
     c.close();

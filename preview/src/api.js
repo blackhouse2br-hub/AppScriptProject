@@ -265,7 +265,8 @@ function apiRouter(config) {
     res.json({ ok: true });
   });
 
-  // read-only Monday.com / respond.io (status, live reads); nothing is written to either service
+  // Monday.com / respond.io (status, live reads); nothing is written to either service except the allowlisted,
+  // confirmed Monday updates (POST /monday/write, mondayWrite.js; off unless MONDAY_WRITES=on)
   integrationRoutes(r, integ);
 
   r.use((req, res) => res.status(404).json({ error: 'Unknown API route.' }));

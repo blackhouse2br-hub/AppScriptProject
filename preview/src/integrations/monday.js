@@ -1,7 +1,9 @@
 'use strict';
-// Read-only Monday.com client. Column matching follows Code.gs (FIELD_DEFS, LISTING_TITLES, calendarViewings_, loiMap_):
+// Monday.com client. Column matching follows Code.gs (FIELD_DEFS, LISTING_TITLES, calendarViewings_, loiMap_):
 // columns are found by TITLE on each board, so no column IDs are hard-coded.
-// Only GraphQL `query` operations can be sent; mutations are refused before any request is made.
+// Reads (gql) can only send GraphQL `query` operations; mutations are refused before any request is made.
+// The single exception is writeColumn(): one fixed single-column mutation, used only for the allowlisted actions in
+// mondayWrite.js, only when MONDAY_WRITES=on, and checked again by assertAllowedWrite() right before it is sent.
 const { IntegrationError, tracked } = require('./status');
 const { canonCity, normPets } = require('../../public/shared');
 
@@ -146,9 +148,10 @@ function shapeLead(it, cols) {
     status: v.clientStatus || v.nextAction || '', nextAction: v.nextAction, boardStatus: v.boardStatus, clientStatus: v.clientStatus,
     aiStatusLabel: v.aiStatusLabel, aiStatusText: v.aiStatusText,
     ai: '', temp: '', waiting: '',
-    inquiry, va: v.va, salesperson: v.salesperson, source: v.leadsFrom,
+    // inquiryLabel / budgetText keep Monday's own text (inquiry and budget are normalised), for the allowlisted updates
+    inquiry, inquiryLabel: v.inquiry, va: v.va, salesperson: v.salesperson, source: v.leadsFrom,
     origin: /respond/i.test(v.leadsFrom) ? 'respond.io' : 'Monday',
-    budget: money(v.budget), city: v.city || '', bedrooms: beds(v.bedrooms), occupants: v.occupancy,
+    budget: money(v.budget), budgetText: v.budget, city: v.city || '', bedrooms: beds(v.bedrooms), occupants: v.occupancy,
     // only a clear answer becomes No Pets / With Pets; "Not Applicable", N/A, blanks and anything else stay '' (Not specified)
     pets: normPets(v.pets),
     requirements: [v.location, v.otherReqs].filter(Boolean).join('; ').slice(0, 500),
@@ -211,11 +214,51 @@ function assertReadOnly(query) {
   }
 }
 
+// The ONE mutation the portal can send: one value into one column of one item. Nothing else (no create, delete, move,
+// archive, updates, files, several columns at once). Which board, column and value is decided by mondayWrite.js.
+const WRITE_MUTATION = 'mutation ($b: ID!, $i: ID!, $c: String!, $v: String) { change_simple_column_value(board_id: $b, item_id: $i, column_id: $c, value: $v) { id } }';
+/**
+ * Second, independent guard right before a write is sent: the exact mutation text above, exactly the four variables,
+ * the configured Leads or Listings board (never Calendar), a numeric item, a plain column id and a short one-line value.
+ */
+function assertAllowedWrite(query, variables, boards) {
+  const v = variables || {}, keys = Object.keys(v).sort().join(','), b = boards || {};
+  const ok = query === WRITE_MUTATION && keys === 'b,c,i,v'
+    && [b.leads, b.listings].filter(Boolean).includes(v.b) && /^\d{1,20}$/.test(String(v.i)) && /^[a-z0-9_]{1,64}$/.test(String(v.c))
+    && typeof v.v === 'string' && v.v.length <= 200 && !/[\r\n]/.test(v.v);
+  if (!ok) throw new IntegrationError('monday', 'Blocked: this Monday change is not on the allowed list.', { status: 500 });
+}
+
 function createMonday(cfg, status, { now = Date.now } = {}) {
   const mockApi = /^http:\/\/(127\.0\.0\.1|localhost):/.test(cfg.apiUrl);
 
+  /** Reads: queries only (the global read-only guard). */
   async function gql(query, variables) {
     assertReadOnly(query);
+    return send(query, variables);
+  }
+  /**
+   * The only write path: the fixed single-column mutation, after both guards (mondayWrite.js allowlist, then
+   * assertAllowedWrite). Called only from an explicit user action; nothing in the app writes on its own.
+   */
+  async function writeColumn({ board, itemId, columnId, value }) {
+    if (!cfg.writes) throw new IntegrationError('monday', 'Monday updates are switched off on this server (MONDAY_WRITES).', { status: 409, countsAsFailure: false });
+    const variables = { b: cfg.boards[board], i: String(itemId), c: String(columnId), v: String(value) };
+    assertAllowedWrite(WRITE_MUTATION, variables, cfg.boards);
+    // Monday's error text may echo the submitted value: it is replaced before the status, the reply or the audit see it
+    const hide = (m) => [variables.v, JSON.stringify(variables.v).slice(1, -1)].filter(Boolean).reduce((s, x) => s.split(x).join('[value]'), String(m));
+    const d = await tracked(status, async () => {
+      try { return await send(WRITE_MUTATION, variables); } catch (e) {
+        throw new IntegrationError('monday', hide(e.message), { status: e.httpStatus || 502, countsAsFailure: e.countsAsFailure !== false });
+      }
+    });
+    const done = d.change_simple_column_value;
+    if (!done || String(done.id) !== variables.i) throw new IntegrationError('monday', 'Monday.com did not confirm the change.');
+    return { id: String(done.id) };
+  }
+  // the token never appears in a message (e.g. a fetch error quoting a malformed header)
+  const scrub = (s) => (cfg.token ? String(s).split(cfg.token).join('***') : String(s));
+  async function send(query, variables) {
     let res;
     try {
       res = await fetch(cfg.apiUrl, {
@@ -224,7 +267,11 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
         body: JSON.stringify({ query, variables: variables || {} }),
         signal: AbortSignal.timeout(20000),
       });
-    } catch (e) { throw new IntegrationError('monday', 'Could not reach Monday.com (' + (e.name === 'TimeoutError' ? 'timed out' : e.message) + ').'); }
+    } catch (e) {
+      // only a known error code is reported: a fetch message may quote the request (token header, submitted values)
+      const code = e && e.cause && /^[A-Z][A-Z0-9_]{1,40}$/.test(String(e.cause.code)) ? e.cause.code : 'network error';
+      throw new IntegrationError('monday', 'Could not reach Monday.com (' + (e.name === 'TimeoutError' ? 'timed out' : code) + ').');
+    }
     let body = null;
     try { body = await res.json(); } catch (e) { /* not JSON */ }
     if (res.status === 401 || res.status === 403) throw new IntegrationError('monday', `Monday.com rejected MONDAY_TOKEN (HTTP ${res.status}).`);
@@ -232,7 +279,7 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     if (!body) throw new IntegrationError('monday', `Monday.com returned HTTP ${res.status}.`);
     if (res.status !== 200 || body.errors || body.error_message) {
       const msg = (body.errors && body.errors.map((e) => e.message).join('; ')) || body.error_message || 'HTTP ' + res.status;
-      throw new IntegrationError('monday', 'Monday.com: ' + msg);
+      throw new IntegrationError('monday', 'Monday.com: ' + scrub(msg));
     }
     return body.data || {};
   }
@@ -329,11 +376,22 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     const startedAt = now();
     e.progress = { read: 0, total: null, startedAt };
     const p = tracked(status, () => fn(e.progress)).then(
-      (value) => { Object.assign(e, { value, readFrom: startedAt, at: now(), error: '', failedAt: 0, pending: null }); },
-      (err) => { Object.assign(e, { error: err.message, failedAt: now(), pending: null }); throw err; });
+      (value) => {
+        try { keepPatches(e, value, startedAt); } catch (err) { /* never leaves the board stuck "refreshing" */ }
+        Object.assign(e, { value, readFrom: startedAt, at: now(), error: '', failedAt: 0, pending: null, patches: new Map() });
+      },
+      (err) => { Object.assign(e, { error: err.message, failedAt: now(), pending: null, patches: new Map() }); throw err; });
     p.catch(() => {});   // a background refresh reports through e.error; a first load rethrows to its caller
     e.pending = p;
     return p;
+  }
+  /** Items re-read after a write while this board read was running are newer than what it read: keep them. */
+  function keepPatches(e, value, startedAt) {
+    for (const [id, p] of e.patches || []) {
+      if (!(p.at >= startedAt && value && value[p.list])) continue;
+      value[p.list] = value[p.list].map((x) => (x.id === id ? p.rec : x));   // replaces only items the read still lists
+      if (p.assets && value.assets) p.assets.forEach(([k, v]) => value.assets.set(k, v));   // its photos stay viewable
+    }
   }
   function due(e, force) {
     if (e.pending) return false;
@@ -457,7 +515,50 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     return { column: true, rows: items.length, withId: ids.length, ids: [...new Set(ids)].slice(0, n) };
   }
 
-  return { loadAll, freshness, settled, notes, photo, test, respondIdSample };
+  /** A board's columns right now (id, title, type, label settings), for resolving where an allowlisted write goes. */
+  async function boardColumns(board) {
+    const id = cfg.boards[board];
+    if (!id) throw new IntegrationError('monday', `The Monday ${board} board is not configured.`, { status: 409 });
+    return (await tracked(status, () => boardMeta(id))).columns || [];
+  }
+  /**
+   * After a write: re-read that one item (a read query) and replace it in the in-memory copy, so the page shows what
+   * Monday now holds. The board's "read at" time is left as it was (the rest of the board wasn't re-read).
+   * { remember: false } only reads (the check before a write): the copy is left alone and nothing is kept for later.
+   */
+  async function refreshItem(board, itemId, { remember = true } = {}) {
+    const boardId = cfg.boards[board], e = cache.get(board + ':' + boardId);
+    const cols = board === 'leads' ? matchLeadCols(await boardColumns('leads')) : matchListingCols(await boardColumns('listings'));
+    const fields = board === 'leads' ? ITEM_FIELDS : LISTING_FIELDS;
+    const d = await tracked(status, () => gql(`query ($i: [ID!], $c: [String!]) { items(ids: $i) { ${fields} } }`, { i: [String(itemId)], c: Object.values(cols) }));
+    const it = (d.items || [])[0];
+    if (!it) return null;
+    if (!remember) { if (board === 'leads') return shapeLead(it, cols); const r = shapeListing(it, cols); delete r._assets; return r; }
+    // remembered until the next full read of the board, so a read that started earlier can't bring back the old value
+    const patch = (list, rec, assets) => { if (e && e.pending) (e.patches = e.patches || new Map()).set(rec.id, { list, rec, assets, at: now() }); };
+    if (board === 'leads') {
+      const l = shapeLead(it, cols);
+      if (e && e.value) e.value.leads = e.value.leads.map((x) => (x.id === l.id ? l : x));
+      patch('leads', l);
+      return l;
+    }
+    const x = shapeListing(it, cols), at = Date.now();
+    if (e && e.value) {
+      x._assets.forEach((a) => e.value.assets.set(String(a.id), { listingId: x.id, url: a.public_url, at }));
+      e.value.listings = e.value.listings.map((y) => (y.id === x.id ? x : y));
+    }
+    const assets = x._assets.map((a) => [String(a.id), { listingId: x.id, url: a.public_url, at }]);
+    delete x._assets;
+    patch('listings', x, assets);
+    return x;
+  }
+  /** The cached record (as on screen) for a board item, or null. */
+  function cachedItem(board, itemId) {
+    const e = cache.get(board + ':' + cfg.boards[board]), list = e && e.value && (board === 'leads' ? e.value.leads : e.value.listings);
+    return (list || []).find((x) => x.id === String(itemId)) || null;
+  }
+
+  return { loadAll, freshness, settled, notes, photo, test, respondIdSample, writeColumn, boardColumns, refreshItem, cachedItem, writesEnabled: !!cfg.writes };
 }
 
-module.exports = { createMonday, assertReadOnly, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, imageType, HIDE };
+module.exports = { createMonday, assertReadOnly, assertAllowedWrite, WRITE_MUTATION, matchLeadCols, matchListingCols, matchCalendarCols, labelsOf, shapeLead, shapeListing, money, time24, imageType, HIDE };

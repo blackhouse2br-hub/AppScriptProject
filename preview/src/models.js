@@ -146,4 +146,17 @@ const LeadOverride = mongoose.model('LeadOverride', new Schema({
   failed: { type: new Schema({ reason: { type: String, required: true, maxlength: 300 }, at: { type: Date, default: Date.now }, by: { type: String, default: '' }, byUserId: { type: ObjectId, ref: 'User' } }, { _id: false }), default: null },
 }, opts).index({ source: 1, leadId: 1 }, { unique: true }));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride };
+// one entry per Monday update attempt (allowlisted actions only): who, when, what column of which item, and whether it
+// worked. No tokens, client names or contact details; for free text, numbers and dates the value itself isn't kept.
+const MondayWrite = mongoose.model('MondayWrite', new Schema({
+  action: { type: String, required: true, maxlength: 40 },
+  board: { type: String, enum: ['leads', 'listings'], required: true },
+  itemId: { type: String, required: true, match: /^\d{1,20}$/ },
+  column: { type: String, default: '', maxlength: 80 },
+  from: { type: String, default: '', maxlength: 60 }, to: { type: String, default: '', maxlength: 60 },   // status labels only
+  ok: { type: Boolean, required: true },
+  error: { type: String, default: '', maxlength: 200 },
+  by,
+}, opts).index({ itemId: 1, createdAt: -1 }));
+
+module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite };

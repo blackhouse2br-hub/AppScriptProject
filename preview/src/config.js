@@ -61,12 +61,23 @@ function apiBase(env, key, official) {
   if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+(\/[\w/.-]*)?$/.test(v)) throw new Error(`${key} may only point to a local mock server (http://127.0.0.1:<port>).`);
   return v.replace(/\/$/, '');
 }
+/** Allowlisted Monday update attempts per user per minute (the server as a whole: 3×). Default 10. */
+function writeLimit(env) {
+  const v = String(env.MONDAY_WRITE_LIMIT || '').trim();
+  if (!v) return 10;
+  if (!/^\d{1,2}$/.test(v) || Number(v) < 1 || Number(v) > 60) throw new Error('MONDAY_WRITE_LIMIT must be a number from 1 to 60 (Monday updates per user per minute).');
+  return Number(v);
+}
 function loadIntegrations(env) {
   return {
     monday: {
       token: String(env.MONDAY_TOKEN || '').trim(),
       apiUrl: apiBase(env, 'MONDAY_API_URL', 'https://api.monday.com/v2'),
       boards: { leads: boardId(env, 'MONDAY_LEADS_BOARD_ID'), listings: boardId(env, 'MONDAY_LISTINGS_BOARD_ID'), calendar: boardId(env, 'MONDAY_CALENDAR_BOARD_ID') },
+      // the few allowlisted Monday updates (src/integrations/mondayWrite.js) are off unless switched on explicitly;
+      // with them off, Monday stays strictly read-only
+      writes: String(env.MONDAY_WRITES || '').trim().toLowerCase() === 'on',
+      writeLimit: writeLimit(env),
     },
     respond: {
       token: String(env.RESPOND_TOKEN || '').trim(),

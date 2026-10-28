@@ -181,7 +181,9 @@
           <div><div style="font-weight:600;font-size:13px">${esc(u.name)}</div><div class="role">${esc(u.role)}${u.vaLabel ? ' · ' + esc(u.vaLabel) : ''}</div></div></div>
       </header>`;
   }
-  const sourceLabel = () => (DEMO ? 'Demo data' : S.source === 'monday' ? 'Monday.com (live, read-only)' : 'MongoDB (local backend)');
+  // the server says whether its allowlisted Monday updates are switched on (MONDAY_WRITES); the labels say which applies
+  const mondayWritesOn = () => !DEMO && !!(S.integ && S.integ.mondayWrites);
+  const sourceLabel = () => (DEMO ? 'Demo data' : S.source === 'monday' ? (mondayWritesOn() ? 'Monday.com (live)' : 'Monday.com (live, read-only)') : 'MongoDB (local backend)');
   const IST = { not_configured: ['off', 'Not connected'], not_checked: ['idle', 'Configured'], ok: ['ok', 'Connected'], error: ['err', 'Error'] };
   function istChip(name, s) {
     if (!s) return '';
@@ -199,7 +201,9 @@
     const old = !!S.srcFetchedAt && Date.now() - new Date(S.srcFetchedAt).getTime() > staleMs;
     const refreshing = Object.values(live).some((b) => b.refreshing);
     const failed = Object.entries(live).filter(([k, b]) => b.refreshError && shown[k] && shown[k].loaded);
-    let h = `<div class="src-note${old ? ' stale' : ''}" role="status">Live Monday.com data, read-only: nothing is written to Monday or saved to MongoDB or this browser.`;
+    let h = `<div class="src-note${old ? ' stale' : ''}" role="status">${mondayWritesOn()
+      ? 'Live Monday.com data. Only the changes you confirm (Availability in the Inventory Dashboard, “Update on Monday” in a lead\'s details) are written to Monday; nothing else is, and Monday data isn\'t saved to MongoDB or this browser.'
+      : 'Live Monday.com data, read-only: nothing is written to Monday or saved to MongoDB or this browser.'}`;
     if (S.srcFetchedAt) h += ` Data on screen was read from Monday at <b>${esc(hhmm(S.srcFetchedAt))}</b> (${esc(ago(S.srcFetchedAt))}).${old ? ' <b>It may be out of date.</b>' : ''}`;
     if (refreshing) h += ' Refreshing in the background… the data on screen stays until the new copy is ready.';
     if (S.srcNewer) h += ' <b>Newer data is ready</b> and appears when you close the open panel.';
@@ -219,7 +223,7 @@
       return `<div class="demo-bar live-bar ${S.source === 'monday' ? 'ext' : ''}"><span class="demo-tag live">MongoDB</span>
         <div class="seg" role="group" aria-label="Data source">
           <button data-act="source" data-v="mongo" aria-pressed="${S.source === 'mongo'}">MongoDB</button>
-          <button data-act="source" data-v="monday" aria-pressed="${S.source === 'monday'}" title="${canMonday ? 'Show live Monday.com data (read-only) — the default' : 'Monday.com is not connected: set MONDAY_TOKEN and the board IDs in preview/.env'}">Monday.com · read-only</button></div>
+          <button data-act="source" data-v="monday" aria-pressed="${S.source === 'monday'}" title="${canMonday ? (mondayWritesOn() ? 'Show live Monday.com data (only confirmed, allowlisted updates are written) — the default' : 'Show live Monday.com data (read-only) — the default') : 'Monday.com is not connected: set MONDAY_TOKEN and the board IDs in preview/.env'}">${mondayWritesOn() ? 'Monday.com · live' : 'Monday.com · read-only'}</button></div>
         ${S.srcBusy ? '<span class="muted">Loading from Monday.com…</span>' : ''}
         ${S.source === 'monday' && S.rsInfo ? (S.rsInfo.busy ? `<span class="muted" role="status">Checking respond.io chats… ${Math.max(0, (S.rsInfo.linked || 0) - (S.rsInfo.pending || 0))} of ${S.rsInfo.linked || '?'}</span>`
           : S.rsInfo.error ? '' : `<span class="muted" role="status">Reply states checked ${S.rsInfo.at ? esc(ago(S.rsInfo.at)) : ''}</span>`)
@@ -255,7 +259,7 @@
       ${canSee('leads') ? `<h4>Response</h4>${navWait('va', 'Needs VA Reply', 'var(--danger)')}${navWait('client', 'Waiting on Client', 'var(--muted)')}
       <h4>AI Status</h4>${AI_STAGES.map((st) => `<button class="nav ${S.view === 'leads' && S.ai.includes(st) ? 'on' : ''}" data-act="navai" data-v="${esc(st)}" aria-pressed="${S.view === 'leads' && S.ai.includes(st)}"><span class="dot" style="background:${AI_COLORS[st]}"></span><span class="nl">${esc(st)}</span><span class="cnt">${aiN[st] || ''}</span></button>`).join('')}
       <h4>Temperature</h4>${TEMPS.map((t) => `<button class="nav ${S.view === 'leads' && S.temp.includes(t) ? 'on' : ''}" data-act="navtemp" data-v="${esc(t)}" aria-pressed="${S.view === 'leads' && S.temp.includes(t)}"><span style="width:16px;text-align:center" aria-hidden="true">${TEMP_STYLE[t][1]}</span><span class="nl">${esc(t)}</span><span class="cnt">${tempN[t] || ''}</span></button>`).join('')}` : ''}
-      <div class="side-note">${DEMO ? 'Local preview · demo data' : 'Local backend · ' + esc(S.source === 'monday' ? 'Monday.com (read-only)' : 'MongoDB')}<br>
+      <div class="side-note">${DEMO ? 'Local preview · demo data' : 'Local backend · ' + esc(S.source === 'monday' ? (mondayWritesOn() ? 'Monday.com (confirmed updates only)' : 'Monday.com (read-only)') : 'MongoDB')}<br>
         <button class="linkbtn" data-act="theme">${S.theme === 'dark' ? 'Switch to light' : 'Switch to dark'}</button><br>
         <span class="keys">Keys: <kbd>/</kbd> search · <kbd>↑</kbd><kbd>↓</kbd> rows · <kbd>Enter</kbd> open · <kbd>B</kbd> book · <kbd>[</kbd><kbd>]</kbd> prev/next</span></div>
     </aside>`;
@@ -588,7 +592,7 @@
   }
   function footHtml() {
     const dirty = Object.keys(S.draft).length;
-    const ro = readOnlySource() ? 'Read-only (Monday.com)' : !canEdit('leads') ? 'View-only access' : '';
+    const ro = readOnlySource() ? (mondayWritesOn() ? 'Monday.com: only the fields under "Update on Monday" can be changed' : 'Read-only (Monday.com)') : !canEdit('leads') ? 'View-only access' : '';
     return `<div class="d-foot"><span class="muted" style="font-size:12px" id="dirtyNote">${ro || (dirty ? dirty + ' Unsaved Change' + (dirty > 1 ? 's' : '') : 'No Changes')}</span><div class="spacer"></div>
       <button class="btn" data-act="discard" ${dirty ? '' : 'disabled'}>Discard</button><button class="btn primary" data-act="save" ${dirty && canEdit('leads') ? '' : 'disabled'} title="Save (Ctrl+S)">Save Changes</button></div>`;
   }
@@ -614,6 +618,7 @@
         <div><span class="d-lbl">Lead Value</span><b style="font-size:16px">${esc(money(l.budget) || '—')}</b><div class="sub" style="margin-top:4px">Client's budget${countsInReports(l) ? '' : ' · below report minimum'}</div></div>
         ${l.stageDays ? `<div style="grid-column:1/-1"><span class="d-lbl">Days in Stage</span><div class="dboxes">${['Property Matching', 'Scheduling', 'LOI', 'Contract', 'Collection'].map((s) => `<span class="dbox ${l.ai === s ? 'on' : ''}" style="--c:${AI_COLORS[s]}" title="${esc(s)}"><b>${l.stageDays[s] != null ? Math.round(l.stageDays[s]) : '–'}</b><small>${esc(s === 'Property Matching' ? 'Matching' : s)}</small></span>`).join('')}</div></div>` : ''}</div>
       ${FIELD_GROUPS.map(([t, keys]) => (t ? `<div class="section-title">${t}</div>` : '') + `<div class="grid">${keys.map(fieldInput).join('')}</div>`).join('')}
+      ${readOnlySource() ? mondayUpdateBox(l) : ''}
       <div class="section-title">Notes${readOnlySource() ? ' <span class="muted" style="text-transform:none;font-weight:400">(Monday updates, read-only)</span>' : ''}</div>
       ${canEdit('leads') ? `<textarea id="noteText" maxlength="2000" aria-label="New note" placeholder="Add a note (saved ${DEMO ? 'in this browser only' : 'to MongoDB'}, not to Monday)"></textarea>
       <div style="display:flex;justify-content:flex-end;margin:8px 0 14px"><button class="btn" data-act="addnote">Add Note</button></div>` : ''}
@@ -915,8 +920,10 @@
     const edit = canEdit('invdash');
     $('#invCount').textContent = `${xs.length} of ${D.listings.length} ${DEMO ? 'demo ' : ''}listings`;
     // drawn in pages, so a board with thousands of listings doesn't ask for thousands of photos at once
-    const lim = S.inv.limit || 120;
-    $('#invGrid').innerHTML = (xs.slice(0, lim).map((x) => listingCard(x, { action: edit ? `<select data-ch="avail" data-id="${esc(x.id)}" style="padding:5px 8px;font-size:12.5px" aria-label="Availability">${LISTS.availability.map((a) => `<option ${x.availability === a ? 'selected' : ''}>${a}</option>`).join('')}</select>` : '' })).join('') || '<div class="empty">No listings match.</div>')
+    const lim = S.inv.limit || 120, mwa = mwAction('listingAvailability');
+    // Monday listings: the board's own Availability labels, updated on Monday after a confirmation (when switched on)
+    const mwSelect = (x) => `<label class="mwavail"><span class="sub">Availability on Monday</span><select data-ch="mwavail" data-id="${esc(x.id)}" aria-label="Availability on Monday">${x.availabilityLabel && !mwa.labels.includes(x.availabilityLabel) ? `<option selected value="">${esc(x.availabilityLabel)} (current)</option>` : !x.availabilityLabel ? '<option selected value="">(not set)</option>' : ''}${mwa.labels.map((a) => `<option ${x.availabilityLabel === a ? 'selected' : ''}>${esc(a)}</option>`).join('')}</select></label>`;
+    $('#invGrid').innerHTML = (xs.slice(0, lim).map((x) => listingCard(x, { action: mwa ? mwSelect(x) : edit ? `<select data-ch="avail" data-id="${esc(x.id)}" style="padding:5px 8px;font-size:12.5px" aria-label="Availability">${LISTS.availability.map((a) => `<option ${x.availability === a ? 'selected' : ''}>${a}</option>`).join('')}</select>` : '' })).join('') || '<div class="empty">No listings match.</div>')
       + (xs.length > lim ? `<div style="grid-column:1/-1;text-align:center"><button class="btn" data-act="invmore">Show more (${xs.length - lim} left)</button></div>` : '');
   }
 
@@ -997,14 +1004,14 @@
       <td><code>${vars.join('</code><br><code>')}</code></td><td>${when(s.lastOkAt)}</td><td style="white-space:normal;max-width:280px" class="${s.lastError ? 'hotnum' : ''}">${esc(s.lastError || '—')}${s.lastErrorAt ? `<div class="sub">${when(s.lastErrorAt)}</div>` : ''}</td></tr>`;
     const boards = m.boards || {};
     const t = S.mTest;
-    return `<div class="panel"><h3>Integrations <span class="muted">read-only · credentials are read from preview/.env on the server and never sent to the browser</span><span class="spacer"></span>
+    return `<div class="panel"><h3>Integrations <span class="muted">${mondayWritesOn() ? 'reads, plus the allowlisted Monday updates you confirm' : 'read-only'} · credentials are read from preview/.env on the server and never sent to the browser</span><span class="spacer"></span>
         <button class="btn sm" data-act="integstatus">Refresh status</button>${canEdit('team') && m.configured ? ' <button class="btn sm" data-act="mtest">Test Monday connection</button>' : ''}</h3>
       <div class="scroll-x"><table class="t"><thead><tr><th>Service</th><th>Status</th><th>Reads (this phase)</th><th>Environment variables</th><th>Last success</th><th>Last error</th></tr></thead><tbody>
         ${row('Monday.com', m, ['MONDAY_TOKEN', 'MONDAY_LEADS_BOARD_ID', 'MONDAY_LISTINGS_BOARD_ID', 'MONDAY_CALENDAR_BOARD_ID'], `Leads ${boards.leads ? '✓' : '✗'} · Listings ${boards.listings ? '✓' : '✗'} · Calendar ${boards.calendar ? '✓' : '✗'}<div class="sub">Lead fields and notes (updates), listings, calendar viewings</div>`)}
         ${row('respond.io', r, ['RESPOND_TOKEN', 'RESPOND_SPACE_ID (optional)'], 'Contact details and chat history for a lead\'s Respond ID')}
       </tbody></table></div>
       ${t ? `<div class="pad">${t.error ? `<div class="src-err" role="alert">${esc(t.error)}</div>` : `<div>Monday token user: <b>${esc(t.user || '—')}</b></div>${Object.entries(t.boards || {}).map(([k, b]) => `<div class="sub">${esc(k)} board: ${b == null ? 'not set' : b.found ? '✓ ' + esc(b.name) : '✗ not found or no access'}</div>`).join('')}`}</div>` : ''}
-      <div class="pad sub">Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending respond.io messages or templates, creating contacts, webhooks and background jobs.
+      <div class="pad sub">${mondayWritesOn() ? 'Monday updates are limited to listing Availability (Inventory edit access) and four lead fields (Budget, Target Move-in Date, Inquiry Type, Nationality; Managers only), one confirmed field at a time. Still switched off: other Monday writes (AI STATUS, Client Status, subitems, new items, deleting), sending' : 'Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending'} respond.io messages or templates, creating contacts, webhooks and background jobs.
         Monday data is held in server memory for up to 5 minutes and is not saved to MongoDB.</div></div>`;
   }
   const MOD_KEYS = VIEWS.map((v) => v[0]).filter((k) => !MOD_ALIAS[k]);
@@ -1130,6 +1137,55 @@
     if (!(await attempt(() => backend.setOverride(l, value.reason)))) return;
     IDX.delete(l); S.modalReturn = null; closeModal(); renderDrawer(); rerenderMain();
     toast('Marked as Failed in the portal (override).' + (!DEMO && S.source === 'monday' ? ' Monday.com was not changed.' : ''));
+  }
+  // ---------- allowlisted Monday updates (server: src/integrations/mondayWrite.js; off unless MONDAY_WRITES=on) ----------
+  /** Which Monday updates this user may make, with the board's own labels (asked once per Monday load). */
+  async function loadWriteOptions() {
+    if (DEMO) return;
+    try { S.mw = await API.get('/api/monday/write-options'); } catch (e) { if (signedOut(e)) return; S.mw = { enabled: false, actions: {}, error: e.message }; }
+    if (S.view === 'invdash') renderInventory();
+    if (S.open && S.tab === 'details') renderDrawerBody();
+  }
+  const mwAction = (k) => (!DEMO && S.source === 'monday' && S.mw && S.mw.enabled && S.mw.actions[k] && S.mw.actions[k].allowed ? S.mw.actions[k] : null);
+  // the lead fields that can be updated on Monday, with the value Monday holds now (status fields: the board's own label)
+  const MW_LEAD = [['leadBudget', (l) => (l.budgetText || '').trim()], ['leadMoveIn', (l) => l.moveIn || ''],
+    ['leadInquiry', (l) => (l.inquiryLabel || '').trim()], ['leadNationality', (l) => l.nationality || '']];
+  /** Details tab, Monday leads: the few fields that update the Direct Clients board, each saved on its own after a confirmation. */
+  function mondayUpdateBox(l) {
+    const rows = MW_LEAD.map(([k, cur]) => [k, mwAction(k), cur(l)]).filter(([, a]) => a);
+    if (!rows.length) return '';
+    const input = (k, a, v) => a.kind === 'status' ? `<select data-mwin="${k}" aria-label="${esc(a.label)}">${v && !a.labels.includes(v) ? `<option value="" selected>${esc(v)} (current)</option>` : !v ? '<option value="" selected>(not set)</option>' : ''}${a.labels.map((x) => `<option ${x === v ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`
+      : `<input data-mwin="${k}" aria-label="${esc(a.label)}" ${a.kind === 'number' ? 'type="number" min="1" step="1000" inputmode="numeric"' : a.kind === 'date' ? 'type="date"' : 'type="text" maxlength="60"'} value="${esc(v)}">`;
+    return `<div class="section-title">Update on Monday <span class="muted" style="text-transform:none;font-weight:400">· saved straight to the Direct Clients board, one field at a time, after you confirm</span></div>
+      <div class="mwbox">${rows.map(([k, a, v]) => `<label class="mwrow"><span>${esc(a.label)}</span>${input(k, a, v)}<button type="button" class="btn sm" data-act="mwsave" data-k="${k}">Save to Monday</button></label>`).join('')}</div>`;
+  }
+  // Monday's own text when it isn't a plain number (shown as it is, never "NaN")
+  const mwShow = (a, v) => (!v ? '(empty)' : a.kind === 'number' && Number.isFinite(Number(v)) ? '₱' + Number(v).toLocaleString('en-PH') : v);
+  /** Confirmation before any Monday change: board, field, old → new, and that it can't be undone from the portal. */
+  function mwConfirm(key, itemId, value, before, title, onDone) {
+    const a = S.mw.actions[key], board = a.board === 'leads' ? 'Direct Clients' : 'Listings';
+    S.modal = { kind: 'mw', key, itemId, value, before, onDone };
+    openModal(`<h3 id="modalTitle">Update Monday.com?</h3>
+      <p>This changes <b>${esc(a.label)}</b> for <b>${esc(title)}</b> on the Monday <b>${esc(board)}</b> board:</p>
+      <p class="mwchange"><span>${esc(mwShow(a, before))}</span> → <b>${esc(mwShow(a, value))}</b></p>
+      <p class="sub">${before ? 'The current value on Monday is replaced. ' : ''}This is saved on Monday right away and can't be undone from the portal (change it back the same way). Only this one field is changed.</p>
+      ${a.warn ? `<p class="sub" role="note"><b>⚠ ${esc(a.warn)}</b></p>` : ''}
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="submit" class="btn primary">Update Monday</button></div>`, { form: 'mw' });
+    focusIn($('#modal'), 'button[type=submit]');
+  }
+  async function mwSubmit() {
+    const m = S.modal; if (!m || m.kind !== 'mw') return;
+    const btn = $('#modal button[type=submit]'); if (btn) { btn.disabled = true; btn.textContent = 'Updating Monday…'; }
+    let r;
+    // `expect`: the value this dialog showed; the server refuses if Monday holds something else by now
+    try { r = await API.post('/api/monday/write', { action: m.key, itemId: m.itemId, value: m.value, expect: m.before || '', confirm: true }); }
+    catch (e) {
+      if (signedOut(e)) return;
+      if (e.stale) { S.modalReturn = null; closeModal(); return toast('Monday was not updated: ' + e.message, true); }
+      if (btn) { btn.disabled = false; btn.textContent = 'Update Monday'; } return toast('Monday was not updated: ' + e.message, true);
+    }
+    S.modalReturn = null; closeModal(); m.onDone(r);
+    toast(r.unchanged ? 'Monday already had that value; nothing was changed.' : `Monday updated: ${S.mw.actions[m.key].label}${r.refreshed ? '' : ' (reload to see the board\'s copy)'}.`);
   }
   function closeModal() {
     const back = S.modalReturn; S.modal = null; S.modalReturn = null;
@@ -1361,6 +1417,7 @@
     await refreshStatus();
     S.srcToken = (S.srcToken || 0) + 1;
     if (!Object.keys(S.srcErrors).length || !S.srcErrors.leads) pollReplyStates(S.srcToken);
+    loadWriteOptions();
     return true;
   }
   /**
@@ -1521,7 +1578,7 @@
       const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
       prefs.source = v; S.source = v; savePrefs();
-      if (v === 'monday') { await openMondaySource(false); toast('Showing live Monday.com data (read-only).'); return; }
+      if (v === 'monday') { await openMondaySource(false); toast(mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
       S.srcBusy = false;
       if (!(await attempt(loadAll))) return;
       useMongoRecords(); S.list = null; render(); toast('Showing MongoDB records (chosen by hand; Monday.com stays the default until you switch back).');
@@ -1569,7 +1626,7 @@
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
       S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
-      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null;
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
     },
@@ -1585,6 +1642,15 @@
       if (cnt) cnt.textContent = (i + 1) + '/' + x.photos.length;
     },
     notwired: (el) => toast(el.dataset.v + ' is switched off in the preview (read-only; no messages are sent).'),
+    // Monday updates (allowlisted, confirmed first)
+    mwsave: (el) => {
+      const l = leadById(S.open), k = el.dataset.k, a = mwAction(k); if (!l || !a) return;
+      const inp = $(`#dbody [data-mwin="${k}"]`), value = inp ? inp.value.trim() : '';
+      const before = (MW_LEAD.find(([x]) => x === k) || [, () => ''])[1](l);
+      if (!value) return toast(a.label + ': enter a value first (the portal never clears Monday values).', true);
+      if (value === before) return toast(a.label + ' already has that value.');
+      mwConfirm(k, l.id, value, before, l.name || 'this lead', (r) => { if (r.record) Object.assign(l, r.record); IDX.delete(l); renderDrawer(); rerenderMain(); });
+    },
     // Properties tab filters
     pfchip: (el) => { const l = leadById(S.open); if (!l) return; const f = pfFor(l); toggle(f[el.dataset.k], el.dataset.v); S.pf.limit = 24; S.pfOpen = true; refreshPropsPanel(l, `[data-act="pfchip"][data-k="${el.dataset.k}"][data-v="${CSS.escape(el.dataset.v)}"]`); },
     pfclear: () => { const l = leadById(S.open); if (!l) return; S.pf = { lead: l.id, f: PF0(), limit: 24 }; S.pfOpen = true; refreshPropsPanel(l, '[data-in="pfq"]'); },
@@ -1640,6 +1706,16 @@
     prdate: (el) => { S.prDate = SH.isYmd(el.value) ? el.value : ''; renderView(); const d = $('[data-ch="prdate"]'); if (d) d.focus(); },
     invcity: (el) => { S.inv.city = el.value; renderInventory(); }, invtype: (el) => { S.inv.type = el.value; renderInventory(); },
     invbeds: (el) => { S.inv.beds = el.value; renderInventory(); }, invavail: (el) => { S.inv.avail = el.value; renderInventory(); },
+    mwavail: (el) => {
+      const x = listingById(el.dataset.id), a = mwAction('listingAvailability'); if (!x || !a) return;
+      const before = x.availabilityLabel || '', value = el.value;
+      el.value = a.labels.includes(before) ? before : '';   // stays as it was until Monday confirms the change
+      if (!value || value === before) return;
+      mwConfirm('listingAvailability', x.id, value, before, x.building, (r) => {
+        if (r.record) { const i = D.listings.indexOf(x); if (i >= 0) D.listings[i] = Object.assign({}, x, r.record); }
+        renderInventory(); const again = $(`[data-ch="mwavail"][data-id="${CSS.escape(x.id)}"]`); if (again) again.focus();
+      });
+    },
     pftype: (el) => pfSet('type', el.value), pffurn: (el) => pfSet('furnishing', el.value),
     pfpets: (el) => pfSet('pets', el.checked), pfall: (el) => pfSet('all', el.checked),
     avail: async (el) => {
@@ -1707,6 +1783,7 @@
       else if (f.dataset.submit === 'user') saveUser();
       else if (f.dataset.submit === 'tpl') saveTpl();
       else if (f.dataset.submit === 'fail') saveFail();
+      else if (f.dataset.submit === 'mw') mwSubmit();
     }
   });
 

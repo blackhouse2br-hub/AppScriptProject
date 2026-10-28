@@ -4,7 +4,7 @@
  GitHub Pages ── redirect ──►  https://<service>.up.railway.app   Railway: the whole portal
  (static page, no code,                                            page + API + Google sign-in + all secrets
   no settings, no cookies)                                          ├─► MongoDB Atlas   team, sessions, app records
-                                                                    ├─► Monday.com      read-only
+                                                                    ├─► Monday.com      read-only (+ allowlisted updates if MONDAY_WRITES=on)
                                                                     └─► respond.io      read-only
 ```
 
@@ -52,10 +52,12 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 | `GOOGLE_ALLOWED_DOMAIN` | optional | your Google Workspace domain (e.g. `yourcompany.com`) to refuse personal Gmail accounts. Leave it unset if the team uses Gmail. |
 | `NODE_ENV` | see step 6 | Railway sets `production` by default, which the guard refuses. Leave it as it is until the new code is deployed, then set `staging` for the test run. |
 | `SESSION_HOURS` | optional | sign-in length in hours, 1–720 (default `12`) |
-| `MONDAY_TOKEN` | yes 🔒 | Monday API token (read-only use) |
+| `MONDAY_TOKEN` | yes 🔒 | Monday API token (read-only use; with `MONDAY_WRITES=on` it also needs write access to the Leads and Listings boards) |
 | `MONDAY_LEADS_BOARD_ID` | yes | digits only (Direct Clients board) |
 | `MONDAY_LISTINGS_BOARD_ID` | yes | digits only |
 | `MONDAY_CALENDAR_BOARD_ID` | yes | digits only |
+| `MONDAY_WRITES` | optional | leave **unset** (off): Monday is read-only. `on` enables only the allowlisted, user-confirmed updates in README "Monday updates" (the token then needs write access to those boards). |
+| `MONDAY_WRITE_LIMIT` | optional | Monday update attempts per user per minute, 1–60 (default 10; the server as a whole allows 3×). |
 | `RESPOND_TOKEN` | optional 🔒 | respond.io API token (read-only use); without it the Chat tab says "not connected" |
 | `RESPOND_SPACE_ID` | optional | digits only; only adds "Open in respond.io" links |
 | `RESPOND_LIST_CHECKS` | optional | leave **unset** (off): respond.io is read only when someone opens a lead's Chat tab. `on` checks every visible lead. |
