@@ -33,7 +33,11 @@ B.columns.find((c) => c.id === 'av').settings_str = JSON.stringify({ labels: { 0
 fx.BOARDS['1111111'].columns.find((c) => c.id === 'bud').type = 'numbers';
 B.items[0].v.ph = '+63 900 555 0101';
 B.items.push({ id: '7004', name: 'Owner D', group: 'Available Units', v: { bn: 'Grand Hyatt Residences', loc: '', lt: 'For Rent', bed: '2 BR', pr: '210000', av: 'Available', ph: '0900 555 0104' }, assets: [['30011', 'png']] },
-  { id: '7005', name: 'Owner E', group: 'Available Units', v: { bn: 'Demo Taguig Tower', loc: 'Taguig', lt: 'For Rent', bed: '2 BR', pr: '190000', av: 'Available' } });
+  { id: '7005', name: 'Owner E', group: 'Available Units', v: { bn: 'Demo Taguig Tower', loc: 'Taguig', lt: 'For Rent', bed: '2 BR', pr: '190000', av: 'Available' } },
+  // an incomplete listing (no price, bedrooms, city or photo) and a complete one with a photo that misses the budget:
+  // blank fields must not rank the incomplete one higher
+  { id: '7008', name: 'Owner H', group: 'Incomplete', v: { bn: 'Blank Fields Tower', lt: 'For Rent', av: 'Available' } },
+  { id: '7009', name: 'Owner I', group: 'Available Units', v: { bn: 'Priced Photo Tower', loc: 'Pasig', lt: 'For Rent', bed: '3 BR', pr: '400000', av: 'Available' }, assets: [['30030', 'png']] });
 fx.BOARDS['1111111'].items.push({ id: '9007', name: 'BH-T7', group: 'ALL CLIENTS', v: { cn: 'Check Fails Client', va1: 'Ana', inq: 'Rent', rid: '555777', dq: '2026-10-20', na: 'Unresponsive' } });
 // Client Requirements: two active Property Sourcing clients without a respond.io ID (Ana's rental, Bea's sale with a building)
 fx.BOARDS['1111111'].columns.push({ id: 'bldg', title: 'Building Name', type: 'text', settings_str: '{}' },
@@ -152,6 +156,17 @@ async function cdp(wsUrl) {
       await click('#dbody .pf-ck [data-act="pfclear"]').catch(() => click('#propsResults [data-act="pfclear"]'));
       await until(`document.querySelectorAll('#propsResults .lcard').length >= 3`);
       check(`${label}: Clear all filters restores the matches`, (await text('#propsResults [role=status]')) === before, await text('#propsResults [role=status]'));
+      // photos in lead matching: real photos load through the server; a listing with blank fields doesn't outrank a
+      // complete one, and a listing without photos says so
+      await c.ev(`document.querySelectorAll('#propsResults img.lphoto').forEach(i => i.scrollIntoView())`); await sleep(1200);
+      const mp = await c.ev(`[...document.querySelectorAll('#propsResults .lcard')].map(card => { const p = card.querySelector('.lph'), i = p.querySelector('img.lphoto');
+        return { t: card.querySelector('.lt').textContent, photo: !i ? 'none' : i.complete && i.naturalWidth > 0 ? 'shown' : p.classList.contains('ph-err') ? 'placeholder' : 'pending', ph: p.querySelector('.ini').textContent }; })`);
+      const at = (t) => mp.findIndex((x) => x.t === t);
+      check(`${label}: lead matching shows listing photos (Fake Tower, Priced Photo Tower)`, mp[at('Fake Tower')].photo === 'shown' && mp[at('Priced Photo Tower')].photo === 'shown', JSON.stringify(mp.map((x) => x.t + ':' + x.photo)));
+      check(`${label}: a listing with no price / bedrooms / city ranks below a complete one`, at('Blank Fields Tower') > at('Priced Photo Tower') && at('Priced Photo Tower') >= 0, mp.map((x) => x.t).join(' > '));
+      check(`${label}: a listing without photos shows a clear "No photo" placeholder`, mp[at('Blank Fields Tower')].photo === 'none' && /No photo$/.test(mp[at('Blank Fields Tower')].ph), mp[at('Blank Fields Tower')].ph);
+      check(`${label}: a photo the server refuses shows "Photo unavailable"`, mp[at('Svg Tower')].photo === 'placeholder' && /Photo unavailable$/.test(mp[at('Svg Tower')].ph)
+        && await c.ev(`[...document.querySelectorAll('#propsResults .lcard')].some(c => /Svg Tower/.test(c.textContent) && getComputedStyle(c.querySelector('.ini')).display !== 'none')`), JSON.stringify(mp[at('Svg Tower')]));
       await shot(`${label}-2-filters`);
       // ask twice for the same unit → one record
       await click('#propsResults [data-act="askadd"][data-id="7004"]');
@@ -208,7 +223,8 @@ async function cdp(wsUrl) {
       await c.ev(`document.querySelectorAll('#invGrid img.lphoto').forEach(i => i.scrollIntoView())`); await sleep(1200);
       // the fake board's "Svg Tower" (7003) has an SVG with a script in it as its only "photo": the proxy must refuse it
       const ph = await c.ev(`Object.fromEntries([...document.querySelectorAll('#invGrid .lph')].filter(p => p.querySelector('img.lphoto')).map(p => { const i = p.querySelector('img.lphoto'); return [p.querySelector('.phl').dataset.pid, i.complete && i.naturalWidth > 0 ? 'shown' : p.classList.contains('ph-err') ? 'placeholder' : 'pending']; }))`);
-      check(`${label}: listing photos preview in the Inventory Dashboard; an unsafe file falls back to the placeholder`, ph['7001'] === 'shown' && ph['7004'] === 'shown' && ph['7003'] === 'placeholder', JSON.stringify(ph));
+      check(`${label}: listing photos preview in the Inventory Dashboard; an unsafe file falls back to the placeholder`, ph['7001'] === 'shown' && ph['7004'] === 'shown' && ph['7009'] === 'shown' && ph['7003'] === 'placeholder', JSON.stringify(ph));
+      check(`${label}: Inventory: a listing without photos shows "No photo"`, await c.ev(`[...document.querySelectorAll('#invGrid .lcard')].some(c => /Blank Fields Tower/.test(c.textContent) && !c.querySelector('img.lphoto') && /No photo$/.test(c.querySelector('.ini').textContent))`));
       check(`${label}: no sideways scrolling on the inventory`, await noSideScroll());
       check(`${label}: Monday updates switched off (default): no Availability control on Monday listings`, !(await c.ev(`!!document.querySelector('[data-ch="mwavail"], [data-ch="avail"]')`)));
       check(`${label}: with updates off the page says Monday is read-only`, /read-only: nothing is written to Monday/.test(await text('#modebar')));

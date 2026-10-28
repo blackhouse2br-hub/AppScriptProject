@@ -498,8 +498,10 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
    * One listing photo through the server (the browser never gets Monday's file links).
    * Always Monday's signed public_url: url_thumbnail is a monday.com/protected_static link that only answers a signed-in
    * Monday user, so thumbnails failed (the page now scales the photo instead). public_url links expire after about an
-   * hour, so links older than 40 minutes are refreshed with a read query. The Monday token is NOT sent to the file host.
-   * Only JPEG/PNG/GIF/WebP up to 10 MB are passed on, recognised by their first bytes when S3 labels them generically.
+   * hour, so links older than 40 minutes are refreshed with a read query, and a link the file host refuses (expired early or
+   * replaced) is renewed once. The Monday token is NOT sent to the file host.
+   * Only JPEG/PNG/GIF/WebP up to 10 MB are passed on (the download stops past 10 MB), recognised by their first bytes
+   * when S3 labels them generically.
    * Read-only: this never changes, replaces or deletes a file on Monday.
    */
   async function photo(assetId) {
@@ -507,29 +509,57 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     const map = entry && entry.value && entry.value.assets;
     const a = map && map.get(String(assetId));
     if (!a) return null;   // only photos of listings on the configured Listings board
-    if (Date.now() - a.at > PHOTO_URL_TTL || !a.url) {
+    const fresh = async () => {
       const d = await tracked(status, () => gql('query ($ids: [ID!]!) { assets(ids: $ids) { id public_url } }', { ids: [String(assetId)] }));
       const f = (d.assets || [])[0];
       if (!f || !f.public_url) throw new IntegrationError('monday', 'That photo is no longer on Monday.', { status: 404, countsAsFailure: false });
       Object.assign(a, { url: f.public_url, at: Date.now() });
+    };
+    let renewed = false;
+    if (Date.now() - a.at > PHOTO_URL_TTL || !a.url) { await fresh(); renewed = true; }
+    let res = await fetchPhoto(a.url);
+    // a signed link that expired early or was replaced answers 400/403/404: ask Monday for a new link once
+    if ([400, 403, 404].includes(res.status) && !renewed) {
+      res.body && res.body.cancel().catch(() => {});
+      await fresh();
+      res = await fetchPhoto(a.url);
     }
-    const url = a.url;
+    if (res.status !== 200) {
+      res.body && res.body.cancel().catch(() => {});
+      throw new IntegrationError('monday', `Photo request returned HTTP ${res.status}.`, { status: res.status === 404 ? 404 : 502, countsAsFailure: false });
+    }
+    const tooBig = () => new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
+    const notPhoto = () => new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
+    const declared = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!PHOTO_TYPES.includes(declared) && !/^(application\/octet-stream|binary\/octet-stream|)$/.test(declared)) { res.body && res.body.cancel().catch(() => {}); throw notPhoto(); }
+    if (Number(res.headers.get('content-length') || 0) > PHOTO_MAX_BYTES) { res.body && res.body.cancel().catch(() => {}); throw tooBig(); }
+    // read at most 10 MB: a file host that sends more (or no length) is cut off, not buffered
+    const parts = []; let size = 0;
+    try {
+      for await (const chunk of res.body || []) {
+        size += chunk.length;
+        if (size > PHOTO_MAX_BYTES) throw tooBig();
+        parts.push(Buffer.from(chunk));
+      }
+    } catch (e) {
+      if (e instanceof IntegrationError) { res.body.cancel().catch(() => {}); throw e; }
+      throw new IntegrationError('monday', 'Could not load the photo from Monday.', { countsAsFailure: false });
+    }
+    const buf = Buffer.concat(parts);
+    // the bytes decide: a file labelled image/png that isn't one (or an SVG/HTML page) is refused
+    const type = imageType(buf);
+    if (!type) throw notPhoto();
+    return { type, body: buf };
+  }
+  /** GET one Monday file link: HTTPS only (local fake in tests), no Authorization header, 20 s limit. */
+  async function fetchPhoto(url) {
     const okUrl = (u) => /^https:\/\//.test(u) || (mockApi && /^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(u));
     if (!okUrl(url)) throw new IntegrationError('monday', 'Photo link is not HTTPS.', { status: 502, countsAsFailure: false });
     let res;
     try { res = await fetch(url, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(20000) }); }   // no Authorization header
     catch (e) { throw new IntegrationError('monday', 'Could not load the photo from Monday.', { countsAsFailure: false }); }
-    if (!okUrl(res.url || url)) throw new IntegrationError('monday', 'Photo link redirected to a non-HTTPS address.', { countsAsFailure: false });
-    if (res.status !== 200) throw new IntegrationError('monday', `Photo request returned HTTP ${res.status}.`, { status: res.status === 404 ? 404 : 502, countsAsFailure: false });
-    const declared = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    if (!PHOTO_TYPES.includes(declared) && !/^(application\/octet-stream|binary\/octet-stream|)$/.test(declared)) throw new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
-    if (Number(res.headers.get('content-length') || 0) > PHOTO_MAX_BYTES) throw new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > PHOTO_MAX_BYTES) throw new IntegrationError('monday', 'Photo is too large.', { status: 413, countsAsFailure: false });
-    // the bytes decide: a file labelled image/png that isn't one (or an SVG/HTML page) is refused
-    const type = imageType(buf);
-    if (!type) throw new IntegrationError('monday', 'That file is not a supported photo type.', { status: 415, countsAsFailure: false });
-    return { type, body: buf };
+    if (!okUrl(res.url || url)) { res.body && res.body.cancel().catch(() => {}); throw new IntegrationError('monday', 'Photo link redirected to a non-HTTPS address.', { countsAsFailure: false }); }
+    return res;
   }
 
   async function test() {

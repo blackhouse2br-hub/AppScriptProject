@@ -639,11 +639,14 @@
   // fb: rules from the client's viewing feedback (SH.feedbackPrefs) hide or move units, as the Apps Script suggestions did.
   function matchListing(l, x, anyType, fb) {
     if (x.availability === 'Not Available' || (!anyType && x.type !== (l.inquiry === 'Rent' ? 'For Rent' : 'For Sale'))) return null;
-    const chips = [];
+    const chips = [], known = (v) => v != null && v !== '';
+    // a field the listing leaves blank is never a hit (Code.gs matchListing0_: "no price on listing" is a miss), so
+    // incomplete listings don't rank above complete ones
     // "BGC", "Taguig" and "Taguig (BGC)" are the same place; a lead may name several areas
-    chips.push(['Location', x.city === l.city || SH.citiesIn(l.city + ' ' + (l.location || '')).includes(x.city)]);
-    chips.push(['Bedrooms', x.bedrooms === l.bedrooms]);
-    if (l.budget) chips.push(['Budget', x.price <= l.budget * 1.15]);
+    const hasCity = known(x.city) && x.city !== 'City not set';
+    chips.push(['Location', hasCity && (x.city === l.city || SH.citiesIn(l.city + ' ' + (l.location || '')).includes(x.city))]);
+    chips.push(['Bedrooms', known(x.bedrooms) && known(l.bedrooms) && x.bedrooms === l.bedrooms]);
+    if (l.budget) chips.push(['Budget', x.price > 0 && x.price <= l.budget * 1.15]);
     if (l.pets === 'With Pets') chips.push(['Pets', x.petFriendly]);
     let score = chips.reduce((s, [k, hit]) => s + (hit ? (k === 'Location' || k === 'Budget' ? 3 : 2) : 0), 0);
     if (fb && fb.rules.length) {
@@ -662,7 +665,7 @@
     const ph = !DEMO && x.photos && x.photos.length ? x.photos : null;
     const photo = ph ? `<a class="phl" href="${esc(photoUrl(ph[0]))}" target="_blank" rel="noopener" data-pid="${esc(x.id)}" aria-label="Open photo of ${esc(x.building)}"><img class="lphoto" src="${esc(photoUrl(ph[0], true))}" alt="Photo of ${esc(x.building)}" loading="lazy" decoding="async"></a>
       ${ph.length > 1 ? `<button type="button" class="pnav prev" data-act="photonav" data-id="${esc(x.id)}" data-v="-1" aria-label="Previous photo">‹</button><button type="button" class="pnav next" data-act="photonav" data-id="${esc(x.id)}" data-v="1" aria-label="Next photo">›</button><span class="count" data-pc="${esc(x.id)}">1/${ph.length}</span>` : ''}` : '';
-    return `<div class="lcard"><div class="lph ${ph ? 'has-photo' : ''}" style="--h:${x.hue}">${photo}<span class="badge ${cls}" title="${esc(x.availabilityLabel || x.availability)}">${esc(x.availability)}</span>${extra && extra.score != null ? `<span class="score">Match ${extra.score}</span>` : ''}<span class="ini">${esc(initials(x.building))}</span></div>
+    return `<div class="lcard"><div class="lph ${ph ? 'has-photo' : ''}" style="--h:${x.hue}">${photo}<span class="badge ${cls}" title="${esc(x.availabilityLabel || x.availability)}">${esc(x.availability)}</span>${extra && extra.score != null ? `<span class="score">Match ${extra.score}</span>` : ''}<span class="ini">${esc(initials(x.building))}<small>${ph ? 'Photo unavailable' : 'No photo'}</small></span></div>
       <div class="lbody"><div><div class="lt">${esc(x.building)}</div><div class="sub">${esc(where1)}</div></div>
         <div class="lprice">${esc(money(x.price) || '—')}<small>${x.type === 'For Rent' ? ' / month' : ' · for sale'}</small></div>
         <div class="lspecs"><span>🛏 ${esc(bedsTxt(x.bedrooms) || '—')}</span><span>🛁 ${x.bathrooms || '—'} bath</span><span>📐 ${x.sizeSqm || '—'} sqm</span><span>🪑 ${esc(x.furnishing || '—')}</span>
@@ -681,7 +684,9 @@
     const f = pfFor(l), fb = f.all ? null : leadFeedback(l);   // "ignore the client's requirements" also ignores feedback
     const scored = D.listings.map((x) => [x, matchListing(l, x, f.all || !!f.type, fb)]).filter(([, m]) => m);
     const xs = SH.filterListings(scored.map(([x]) => x), { ...f, available: true }), keep = new Set(xs);
-    return scored.filter(([x]) => keep.has(x)).sort((a, b) => b[1].score - a[1].score);
+    // ties: cheapest first, listings without a price last (Code.gs apiGetMatches)
+    const pr = (x) => (x.price > 0 ? x.price : 9e15);
+    return scored.filter(([x]) => keep.has(x)).sort((a, b) => b[1].score - a[1].score || pr(a[0]) - pr(b[0]));
   }
   function propsPanel(l) {
     const f = pfFor(l), req = [l.inquiry, l.city, bedsTxt(l.bedrooms), l.budget ? 'up to ' + money(l.budget) : 'budget unknown', l.pets === 'With Pets' ? 'with pets' : ''].filter(Boolean);

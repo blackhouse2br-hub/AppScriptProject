@@ -92,7 +92,8 @@ function fakeMonday(body, auth, host) {
     return [200, { data: { boards: b ? [{ items_page: { cursor: boardId + ':2', items: b.items.slice(0, 2).map((it) => itemOut(boardId, it, v.c, host)) } }] : [] } }];
   }
   if (/updates/.test(query)) return [200, { data: { items: [{ id: v.i[0], updates: [{ id: 'u1', text_body: 'Monday update text', created_at: '2026-10-05T00:00:00Z', creator: { name: 'Fake VA' } }] }] } }];
-  if (/assets\(ids/.test(query)) return [200, { data: { assets: v.ids.map((id) => ({ id, public_url: `http://${host}/files/${id}.png`, url_thumbnail: `http://${host}/files/${id}.png` })) } }];
+  // a renewed link (?renewed=1); 30026 was deleted on Monday, so it has none
+  if (/assets\(ids/.test(query)) return [200, { data: { assets: v.ids.filter((id) => id !== '30026').map((id) => ({ id, public_url: `http://${host}/files/${id}.png?renewed=1`, url_thumbnail: `http://${host}/files/${id}.png` })) } }];
   if (/me \{/.test(query)) return [200, { data: { me: { name: 'Fake Token User' }, boards: v.b.filter((id) => BOARDS[id]).map((id) => ({ id, name: BOARDS[id].name })) } }];
   if (/columns/.test(query)) { const b = BOARDS[String(v.b[0])]; return [200, { data: { boards: b ? [{ id: v.b[0], name: b.name, columns: b.columns }] : [] } }]; }
   return [400, { errors: [{ message: 'unexpected query' }] }];
@@ -120,7 +121,21 @@ function createFakeServer() {
     req.on('end', () => {
       if (req.url.startsWith('/files/')) {
         calls.files.push({ method: req.method, auth: req.headers.authorization || '', path: req.url });
-        if (/\.png$/.test(req.url) && !/30009/.test(req.url)) { res.writeHead(200, { 'content-type': 'image/png' }); return res.end(PNG); }
+        const [file, qs] = req.url.split('?'), renewed = /renewed=1/.test(qs || '');
+        // 30020/30026: the cached signed link has expired (S3 answers 403); 30021: the file host fails; 30022: a PDF
+        // labelled image/jpeg; 30025: an HTML page; 30023: over 10 MB by its length; 30024: over 10 MB with no length
+        if (/3002[06]/.test(file) && !renewed) { res.writeHead(403, { 'content-type': 'application/xml' }); return res.end('<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>'); }
+        if (/30021/.test(file)) { res.writeHead(500, { 'content-type': 'application/xml' }); return res.end('<Error/>'); }
+        if (/30022/.test(file)) { res.writeHead(200, { 'content-type': 'image/jpeg' }); return res.end('%PDF-1.4 fake document'); }
+        if (/30025/.test(file)) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<!doctype html><title>Log in</title>'); }
+        if (/30023/.test(file)) { res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(11 * 1024 * 1024) }); return res.end(); }
+        if (/30024/.test(file)) {
+          res.writeHead(200, { 'content-type': 'image/png' });   // chunked: no content-length
+          const chunk = Buffer.alloc(1024 * 1024); let n = 0;
+          const more = () => { while (n < 12) { n++; if (!res.write(n === 1 ? Buffer.concat([PNG, chunk]) : chunk)) return res.once('drain', more); } res.end(); };
+          res.on('error', () => {}); req.socket.on('error', () => {}); return more();
+        }
+        if (/\.png$/.test(file) && !/30009/.test(file)) { res.writeHead(200, { 'content-type': 'image/png' }); return res.end(PNG); }
         res.writeHead(200, { 'content-type': 'image/svg+xml' }); return res.end('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
       }
       let out;
