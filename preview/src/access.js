@@ -2,7 +2,7 @@
 // Module-access and lead-visibility checks shared by the MongoDB API and the read-only integration routes.
 const mongoose = require('mongoose');
 const SH = require('../public/shared');
-const { Lead, Viewing } = require('./models');
+const { Lead, Viewing, User } = require('./models');
 
 const isId = (id) => typeof id === 'string' && mongoose.isValidObjectId(id) && /^[a-f0-9]{24}$/i.test(id);
 
@@ -30,20 +30,38 @@ async function findVisibleLead(user, id) {
   return Lead.findOne({ $and: [{ _id: id }, await leadScope(user)] });
 }
 
-// ----- the same rules for records read live from Monday.com (matched by label / name) -----
+// ----- the same rules for records read live from Monday.com (matched by label) -----
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/**
+ * A Broker's identity on Monday: their exact Salesperson label, set by an admin in Team & Access (user.salesLabel).
+ * Missing, or held by more than one active broker → no label (no Monday viewings or clients) and a notice saying why.
+ * Resolved once per request (resolveBrokerLabel); scopeExternal denies a Broker whose label wasn't resolved.
+ */
+async function resolveBrokerLabel(user) {
+  if (!user || user.role !== 'Broker') return null;
+  const label = String(user.salesLabel || '');
+  let r;
+  if (!label) r = { label: '', notice: 'Your account has no Monday Salesperson label yet, so no Monday viewings or clients are shown. Ask an admin to set it in Settings → Team & Access.' };
+  else if ((await User.countDocuments({ role: 'Broker', active: true, salesLabel: label })) > 1) r = { label: '', notice: `The Monday Salesperson label "${label}" is set for more than one broker, so it can't identify you and no Monday viewings or clients are shown. Ask an admin to fix it in Settings → Team & Access.` };
+  else r = { label };
+  if (user.$locals) user.$locals.brokerLabel = r; else user._brokerLabel = r;
+  return r;
+}
+const brokerLabelOf = (user) => (user.$locals && user.$locals.brokerLabel) || user._brokerLabel || { label: '' };
 function scopeExternal(user, data) {
   if (user.role === 'Manager') return data;
-  let leads;
+  let leads, label = '';
   if (user.role === 'VA') leads = user.vaLabel ? data.leads.filter((l) => norm(l.va) === norm(user.vaLabel)) : [];
   else {
-    const mine = new Set(data.viewings.filter((v) => norm(v.broker) === norm(user.name)).map((v) => v.leadId));
-    leads = data.leads.filter((l) => norm(l.salesperson) === norm(user.name) || mine.has(l.id));
+    // Broker: exact Salesperson label only (no name or first-name matching); none → nothing from Monday
+    label = brokerLabelOf(user).label;
+    const mine = new Set(label ? data.viewings.filter((v) => v.broker === label).map((v) => v.leadId) : []);
+    leads = label ? data.leads.filter((l) => l.salesperson === label || mine.has(l.id)) : [];
   }
   const ids = new Set(leads.map((l) => l.id));
-  const viewings = user.role === 'Broker' ? data.viewings.filter((v) => norm(v.broker) === norm(user.name)) : data.viewings.filter((v) => ids.has(v.leadId));
+  const viewings = user.role === 'Broker' ? (label ? data.viewings.filter((v) => v.broker === label) : []) : data.viewings.filter((v) => ids.has(v.leadId));
   const listings = ['leads', 'invdash', 'calendar'].some((m) => SH.access(user, m) !== 'none') ? data.listings : [];
   return { leads, viewings, listings };
 }
 
-module.exports = { isId, need, leadScope, viewingScope, findVisibleLead, scopeExternal };
+module.exports = { isId, need, leadScope, viewingScope, findVisibleLead, scopeExternal, resolveBrokerLabel, brokerLabelOf };

@@ -121,9 +121,11 @@
   /**
    * Team member. password is optional here (required on create by the caller).
    * opts.vaLabels: allowed VA labels (the preview list plus the Monday board's VA Assigned labels when connected).
+   * opts.salesLabels: allowed Monday Salesperson labels for a Broker (exact board labels). A Broker's salesLabel is the
+   * one label that identifies them on Monday; it may be left empty (they then see no Monday viewings until it is set).
    */
   function validateUser(u, opts) {
-    const vaAllowed = (opts && opts.vaLabels) || LISTS.vas;
+    const vaAllowed = (opts && opts.vaLabels) || LISTS.vas, salesAllowed = (opts && opts.salesLabels) || LISTS.brokers;
     if (!isPlainObject(u)) return { errors: ['Invalid request.'] };
     const name = typeof u.name === 'string' ? u.name.trim() : '', email = typeof u.email === 'string' ? u.email.trim().toLowerCase() : '';
     if (!name || name.length > 80) return { errors: ['Name is required (80 characters max).'] };
@@ -131,13 +133,15 @@
     if (!ROLES.includes(u.role)) return { errors: ['Pick a role.'] };
     const vaLabel = u.role === 'VA' ? u.vaLabel : '';
     if (u.role === 'VA' && (typeof vaLabel !== 'string' || !vaAllowed.includes(vaLabel))) return { errors: ['Pick the VA label this person uses on Monday.'] };
+    const salesLabel = u.role === 'Broker' && u.salesLabel !== undefined ? u.salesLabel : '';
+    if (typeof salesLabel !== 'string' || (salesLabel && !salesAllowed.includes(salesLabel))) return { errors: ['Pick this broker\'s exact Salesperson label on Monday (or leave it empty).'] };
     const modules = {};
     if (u.modules !== undefined && !isPlainObject(u.modules)) return { errors: ['Invalid module access.'] };
     for (const [k, a] of Object.entries(u.modules || {})) {
       if (!MODULES.includes(k) || !['none', 'view', 'edit'].includes(a)) return { errors: ['Invalid module access.'] };
       if (a !== 'none') modules[k] = a;
     }
-    const value = { name, email, role: u.role, vaLabel: vaLabel || '', modules };
+    const value = { name, email, role: u.role, vaLabel: vaLabel || '', salesLabel, modules };
     if (u.password !== undefined && u.password !== '') {
       if (typeof u.password !== 'string' || u.password.length < MIN_PASSWORD || u.password.length > 200) return { errors: [`Password must be at least ${MIN_PASSWORD} characters.`] };
       value.password = u.password;

@@ -85,7 +85,8 @@ async function cdp(wsUrl) {
   await User.create([{ email: 'boss@example.com', name: 'Demo Manager', role: 'Manager', passwordHash: await hashPassword(PW) },
     { email: 'ana@example.com', name: 'Ana Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit', propreq: 'view' }, passwordHash: await hashPassword(PW) },
     { email: 'cora@example.com', name: 'Cora Demo', role: 'VA', vaLabel: 'Cora Fake', modules: { leads: 'edit' }, passwordHash: await hashPassword(PW) },
-    { email: 'vcal@example.com', name: 'Vcal Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit', calendar: 'view' }, passwordHash: await hashPassword(PW) }]);
+    { email: 'vcal@example.com', name: 'Vcal Demo', role: 'VA', vaLabel: 'Ana', modules: { leads: 'edit', calendar: 'view' }, passwordHash: await hashPassword(PW) },
+    { email: 'brk@example.com', name: 'Broker Demo', role: 'Broker', modules: { leads: 'view', calendar: 'edit' }, passwordHash: await hashPassword(PW) }]);
 
   const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'bhui-'));
   const port = 9300 + Math.floor(Math.random() * 500);
@@ -392,6 +393,21 @@ async function cdp(wsUrl) {
     check('VA with Calendar view only: result and Broker feedback are disabled, no Save, and it says why',
       await c.ev(`document.querySelector('#vFeedback').disabled && document.querySelector('#modal fieldset.vres').disabled && !document.querySelector('#vSave') && /view-only/.test(document.querySelector('#modal').textContent)`));
     await click('#modal [data-act="mclose"]');
+    // Team & Access: a Manager sets a broker's exact Monday Salesperson label (picked from the board's labels)
+    await signIn('boss@example.com');
+    await navTo('team', false);
+    await until(`!!document.querySelector('[data-act="user"][data-v="brk@example.com"]')`, 15000);
+    await sleep(800);
+    check('Team & Access: a broker without a Salesperson label is flagged (sees no Monday viewings)', /No Salesperson label/.test(await text('[data-act="user"][data-v="brk@example.com"]')));
+    await click('[data-act="user"][data-v="brk@example.com"]');
+    await until(`!!document.querySelector('#mSales')`);
+    const sOpts = await c.ev(`[...document.querySelector('#mSales').options].map((o) => o.value)`);
+    check('Team & Access: the Salesperson choices are the board\'s exact labels (no free text)', ['Ely Santos', 'Gia Cruz', 'Hal Fake'].every((x) => sOpts.includes(x)) && sOpts[0] === '', sOpts.join(', '));
+    await choose('#mSales', 'Ely Santos');
+    await c.ev(`document.querySelector('#modalForm').requestSubmit()`);
+    await until(`!document.querySelector('#modal').classList.contains('open')`, 15000);
+    await until(`/Ely Santos/.test((document.querySelector('[data-act="user"][data-v="brk@example.com"]') || {}).textContent || '')`, 10000);
+    check('Team & Access: the label is saved and matches a Salesperson on the board', /Ely Santos \(Salesperson\)/.test(await text('[data-act="user"][data-v="brk@example.com"]')) && /✓ Salesperson/.test(await text('[data-act="user"][data-v="brk@example.com"]')), await text('[data-act="user"][data-v="brk@example.com"]'));
     // a VA with Leads edit (no Inventory access): lead fields are Managers only, so no Monday updates at all
     await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await signIn('ana@example.com');

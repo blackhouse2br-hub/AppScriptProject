@@ -111,8 +111,14 @@ user-confirmed changes are written to Monday, and nothing else (`src/integration
 **Failed** changes nothing on Monday, as in the Apps Script. A viewing's result, reasons, broker feedback and LOI
 confidence are kept in the portal (`ViewingResult` for Monday Calendar viewings — the Apps Script's `bfb_` store — and the
 viewing itself for portal bookings); they shape that client's property suggestions. **Broker feedback is not written to
-any Monday column**: the Calendar board has no unique feedback column ("Remarks" appears twice). It would be copied only
-if the owner sets `MONDAY_CALENDAR_FEEDBACK_COLUMN` to one unique Calendar text column (one line, ≤ 200 characters).
+any Monday column**: the Calendar board has no unique feedback column ("Remarks" appears twice). It is copied only if the
+owner sets `MONDAY_CALENDAR_FEEDBACK_COLUMN` to the id of one dedicated Calendar column of type **text** whose title no
+other column has (one line, ≤ 200 characters). If the setting is absent or the column doesn't qualify, nothing is copied,
+the save still goes through with a warning, and Settings → Integrations → Test Monday connection shows why.
+
+**Brokers on Monday** are identified only by the exact Salesperson label an admin sets for them in Settings → Team &
+Access (one broker per label). Without a label, or with a label shared by two active brokers, a broker sees no Monday
+viewings or clients and is told what to ask for. Their portal name is never matched to Monday.
 
 Each change is one `change_simple_column_value` on one item and column. A value is never cleared, and nothing is
 created, deleted, moved or archived. The page asks for confirmation (old → new) before anything is sent. The server then

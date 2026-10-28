@@ -369,7 +369,10 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
         o.files += fileIds(v._file).length; o.cfiles += fileIds(v._cfile).length; o.sfiles += fileIds(v._sfile).length;
         o.paid += money(v.paid);
       });
-      return { viewings, lm };
+      // the Calendar board's own Salesperson labels (and any value in use): what a broker's label must match exactly
+      const spCol = meta.columns.find((c) => c.id === cols.broker);
+      const salesperson = [...new Set(labelsOf(spCol).concat(viewings.map((x) => x.broker).filter(Boolean)))];
+      return { viewings, lm, salesperson };
     },
   };
   const BOARD_OF = { leads: 'leads', listings: 'listings', calendar: 'calendar' };
@@ -447,7 +450,7 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     return {
       leads: raw.leads ? raw.leads.leads : [], labels: raw.leads ? raw.leads.labels : null,
       listings: raw.listings ? raw.listings.listings : [], viewings: raw.calendar ? raw.calendar.viewings : [], lm: raw.calendar ? raw.calendar.lm : {},
-      calendarOk: !!raw.calendar, errors, notConfigured, ...summary(boards),
+      calendarOk: !!raw.calendar, calendarSalesperson: raw.calendar ? raw.calendar.salesperson || [] : null, errors, notConfigured, ...summary(boards),
     };
   }
 

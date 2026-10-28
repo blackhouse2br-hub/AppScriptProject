@@ -13,14 +13,15 @@
 // confirmation and audit as the other allowlisted Monday updates. If Monday refuses the Status, nothing is saved.
 const SH = require('../../public/shared');
 const { matchCalendarCols, labelsOf } = require('./monday');
-const { isId, viewingScope, scopeExternal } = require('../access');
+const { isId, viewingScope, scopeExternal, brokerLabelOf } = require('../access');
 const { Viewing, Lead, Listing, Note, ViewingResult, MondayWrite } = require('../models');
 
 const CAL = Object.freeze({
   // the only Status a result sets (Create LOI); Failed leaves the Calendar Status as it is
   status: { key: 'status', title: 'Status', types: ['status', 'color'], labels: Object.freeze({ loi: 'Under Negotiations' }) },
   loiDate: { key: 'loi2', title: 'LOI Creation Date', types: ['date'] },
-  feedback: { types: ['text', 'long_text'], max: 200 },
+  // the optional broker-feedback copy: one dedicated text column, named by id, whose title is unique on the board
+  feedback: { types: ['text'], max: 200 },
 });
 // Calendar-board statuses / groups that are past the viewing stage (Code.gs pendingFeedback_)
 const PAST_VIEWING = /fail|closed|renew|negotiat|owner approval|signature|payment/i;
@@ -47,14 +48,27 @@ async function calendarColumns(monday, outcome, feedbackId) {
     if (!spec.types.includes(c.type)) throw fail(`The Monday Calendar "${c.title}" column is a ${c.type} column, not the expected kind; nothing was changed.`, 409);
     return { id: c.id, title: c.title, type: c.type, labels: labelsOf(c) };
   };
-  const loi = outcome === 'loi', out = { status: loi ? one(CAL.status) : null, loiDate: loi ? one(CAL.loiDate) : null, feedback: null };
+  const loi = outcome === 'loi', out = { status: loi ? one(CAL.status) : null, loiDate: loi ? one(CAL.loiDate) : null, feedback: null, feedbackProblem: '' };
   if (feedbackId) {
-    const c = cols.find((x) => x.id === feedbackId);
-    if (!c) throw fail(`MONDAY_CALENDAR_FEEDBACK_COLUMN (${feedbackId}) is not a column of the Calendar board; nothing was changed.`, 409);
-    if (!CAL.feedback.types.includes(c.type)) throw fail(`MONDAY_CALENDAR_FEEDBACK_COLUMN names "${c.title}", a ${c.type} column, not a text column; nothing was changed.`, 409);
-    if (Object.values(mapped).includes(c.id)) throw fail(`MONDAY_CALENDAR_FEEDBACK_COLUMN names "${c.title}", which the portal already reads for something else; nothing was changed.`, 409);
-    out.feedback = { id: c.id, title: c.title, type: c.type };
+    // an unusable feedback column never blocks the result: the feedback stays in the portal and the reply says why
+    const chk = feedbackColumnCheck(cols, feedbackId);
+    if (chk.valid) out.feedback = { id: chk.id, title: chk.title, type: chk.type }; else out.feedbackProblem = chk.problem;
   }
+  return out;
+}
+/**
+ * MONDAY_CALENDAR_FEEDBACK_COLUMN against the Calendar board's columns: it must exist, be a text column, have a title no
+ * other column has (so neither duplicated "Remarks" column can qualify), and not be a column the portal reads.
+ * → { id, found, title, type, valid, problem } (no data values).
+ */
+function feedbackColumnCheck(cols, id) {
+  const c = cols.find((x) => x.id === id), mapped = matchCalendarCols(cols);
+  const out = { id, found: !!c, title: c ? c.title : '', type: c ? c.type : '', valid: false, problem: '' };
+  if (!c) out.problem = `MONDAY_CALENDAR_FEEDBACK_COLUMN (${id}) is not a column of the Calendar board.`;
+  else if (!CAL.feedback.types.includes(c.type)) out.problem = `MONDAY_CALENDAR_FEEDBACK_COLUMN names "${c.title}", a ${c.type} column, not a text column.`;
+  else if (cols.filter((x) => norm(x.title) === norm(c.title)).length > 1) out.problem = `MONDAY_CALENDAR_FEEDBACK_COLUMN names "${c.title}", but more than one Calendar column has that title.`;
+  else if (Object.values(mapped).includes(c.id)) out.problem = `MONDAY_CALENDAR_FEEDBACK_COLUMN names "${c.title}", which the portal already reads for something else.`;
+  else out.valid = true;
   return out;
 }
 
@@ -79,7 +93,8 @@ async function saveMondayResult({ integ, user, id, body }) {
   if (expect !== undefined && typeof expect !== 'string') throw fail('Invalid request.', 400);
   if (confirm !== undefined && typeof confirm !== 'boolean') throw fail('Invalid request.', 400);
   const fbCol = integ.ic.monday.calFeedbackColumn;
-  const { value, errors } = SH.validateResult(rest, fbCol ? CAL.feedback.max : undefined);
+  // the one-line 200-character limit applies only while the feedback can actually be copied to Monday
+  const { value, errors } = SH.validateResult(rest, fbCol && monday.writesEnabled ? CAL.feedback.max : undefined);
   if (errors.length) throw fail(errors[0], 400);
   if (!/^\d{1,20}$/.test(String(id))) throw fail('Viewing not found.', 404);
   // counted before anything is read from or sent to Monday
@@ -122,6 +137,7 @@ async function saveMondayResult({ integ, user, id, body }) {
   const done = [], warnings = [], by = { name: user.name, userId: user._id };
   const prev = await ViewingResult.findOne({ viewingId: String(id) }, { feedbackOnMonday: 1 }).lean();
   if (fbCol && !copyFeedback && value.feedback) warnings.push('Monday updates are switched off, so the feedback was not copied to the Calendar feedback column.');
+  if (cols.feedbackProblem && value.feedback) warnings.push(`Broker feedback was kept in the portal only: ${cols.feedbackProblem} Ask the owner to set it to the id of one dedicated Calendar text column.`);
   if (cols.feedback && !value.feedback && prev && prev.feedbackOnMonday) warnings.push(`The earlier feedback stays in Monday's "${cols.feedback.title}" column (the portal never clears Monday values).`);
   for (const w of writes) {
     // every Monday change counts toward the rate limit (the request itself counted the first one)
@@ -131,20 +147,20 @@ async function saveMondayResult({ integ, user, id, body }) {
       ...(w.label ? { from: w.from.slice(0, 60), to: w.value.slice(0, 60) } : {}) };
     let auditId;
     try { auditId = await audit.start(entry); } catch (e) {
-      if (!done.length) throw fail('The change could not be logged in the portal, so it was not sent to Monday.com.', 503);
+      if (!done.length && w.label) throw fail('The change could not be logged in the portal, so it was not sent to Monday.com.', 503);
       warnings.push(`${w.col.title} was not updated (the change could not be logged).`); continue;
     }
     try {
       await monday.writeColumn({ board: 'calendar', itemId: String(id), columnId: w.col.id, value: w.value });
       await audit.finish(auditId, { ok: true, error: '' });
-      done.push({ column: w.col.title, ...(w.label ? { from: w.from, to: w.value } : w.action === 'viewingLoiDate' ? { to: w.value } : {}) });
+      done.push({ action: w.action, column: w.col.title, ...(w.label ? { from: w.from, to: w.value } : w.action === 'viewingLoiDate' ? { to: w.value } : {}) });
     } catch (err) {
       await audit.finish(auditId, { ok: false, error: String(err.message || err).slice(0, 200) });
       if (!done.length && w.label) throw err;   // the Status itself was refused: nothing changed anywhere
       warnings.push(`${w.col.title} was not updated on Monday: ${err.message}`);
     }
   }
-  const feedbackOnMonday = done.some((d) => cols.feedback && d.column === cols.feedback.title);
+  const feedbackOnMonday = done.some((d) => d.action === 'viewingFeedback');
   let rec;
   try {
     rec = await ViewingResult.findOneAndUpdate({ viewingId: String(id) }, { $set: {
@@ -159,9 +175,9 @@ async function saveMondayResult({ integ, user, id, body }) {
   // only a change on Monday needs the copy re-read (and the board reloaded for the clients' LOI evidence)
   let fresh = null;
   if (done.length) { try { fresh = await monday.refreshItem('calendar', String(id)); } catch (e) { /* saved; the page reloads the board later */ } }
-  const statusDone = cols.status && done.find((d) => d.column === cols.status.title);
+  const statusDone = done.find((d) => d.action === 'viewingResultStatus');
   const shown = fresh || { ...live, ...(statusDone ? { statusLabel: target, status: 'Done' } : {}) };
-  return { ok: true, source: 'monday', viewing: { ...shown, feedback: rec.feedback, result: publicResult(rec) }, written: done,
+  return { ok: true, source: 'monday', viewing: { ...shown, feedback: rec.feedback, result: publicResult(rec) }, written: done.map(({ action, ...d }) => d),
     feedbackSavedTo: feedbackOnMonday ? 'monday+portal' : 'portal', feedbackColumn: cols.feedback ? cols.feedback.title : '', warnings };
 }
 
@@ -217,7 +233,8 @@ async function pendingFeedback({ integ, user, now }) {
     } catch (e) { if (!e.integration) throw e; errors.monday = e.message; }
   }
   rows.sort((a, b) => b.when - a.when);
-  return { rows, errors, since: new Date(since).toISOString() };
+  const b = brokerLabelOf(user);
+  return { rows, errors, since: new Date(since).toISOString(), ...(user.role === 'Broker' && b.notice ? { scopeNotice: b.notice } : {}) };
 }
 
 /** Saved results for these Calendar items (shown on the viewings; they also shape the clients' property suggestions). */
@@ -226,4 +243,4 @@ async function mondayResults(viewingIds) {
   return new Map(rs.map((r) => [r.viewingId, { ...publicResult(r), unit: r.unit || {} }]));
 }
 
-module.exports = { CAL, saveMondayResult, saveMongoResult, pendingFeedback, mondayResults, publicResult };
+module.exports = { CAL, saveMondayResult, saveMongoResult, pendingFeedback, mondayResults, publicResult, feedbackColumnCheck };

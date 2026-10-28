@@ -6,7 +6,7 @@ const SH = require('../public/shared');
 const { Lead, Listing, Viewing, Note, User, Template, AvailabilityRequest, LeadOverride } = require('./models');
 const { authRoutes, requireUser, hashPassword, revokeSessions } = require('./auth');
 const { dbReady } = require('./db');
-const { isId, need, leadScope, viewingScope, findVisibleLead } = require('./access');
+const { isId, need, leadScope, viewingScope, findVisibleLead, resolveBrokerLabel } = require('./access');
 const { integrationRoutes, createIntegrations } = require('./integrations/routes');
 const { saveMondayResult, saveMongoResult, pendingFeedback } = require('./integrations/viewingResult');
 
@@ -36,6 +36,8 @@ function apiRouter(config) {
   r.use(express.json({ limit: '100kb' }));
   authRoutes(r, config);
   r.use(requireUser);
+  // a Broker's exact Monday Salesperson label (admin-set; missing or shared → no Monday viewings), resolved once per request
+  r.use(async (req, res, next) => { await resolveBrokerLabel(req.user); next(); });
 
   r.get('/bootstrap', async (req, res) => {
     const u = req.user, sees = (mods) => mods.some((m) => SH.access(u, m) !== 'none');
@@ -227,9 +229,23 @@ function apiRouter(config) {
 
   // ----- team (Settings → Team & Access) -----
   const managers = () => User.countDocuments({ role: 'Manager', active: true });
+  /**
+   * Checks a member against the board's labels. A Broker's Salesperson label must be an exact label on Monday (the
+   * labels must be readable) and not already held by another active broker. → { value } or { errors }.
+   */
+  async function checkMember(body, selfId) {
+    const salesLabels = await integ.allowedSalesLabels();
+    if (body && body.role === 'Broker' && body.salesLabel && !salesLabels) return { errors: ['The Monday Salesperson labels could not be read, so a broker\'s label can\'t be checked. Try again shortly, or save without a label.'] };
+    const { value, errors } = SH.validateUser(body, { vaLabels: await integ.allowedVaLabels(), salesLabels: salesLabels || [] });
+    if (errors.length) return { errors };
+    if (value.salesLabel && await User.exists({ _id: { $ne: selfId || null }, role: 'Broker', active: true, salesLabel: value.salesLabel })) {
+      return { errors: [`The Salesperson label "${value.salesLabel}" is already set for another broker. Each broker needs their own label.`] };
+    }
+    return { value, errors: [] };
+  }
   r.get('/team', need('team', 'view'), async (req, res) => res.json({ users: await User.find().sort({ role: 1, name: 1 }) }));
   r.post('/team', need('team', 'edit'), async (req, res) => {
-    const { value, errors } = SH.validateUser(req.body, { vaLabels: await integ.allowedVaLabels() });
+    const { value, errors } = await checkMember(req.body);
     if (errors.length) return bad(res, errors);
     const { password, ...rec } = value;
     if (google) { const user = await User.create(rec); return res.status(201).json({ user }); }   // they sign in with this email's Google account
@@ -240,7 +256,7 @@ function apiRouter(config) {
   r.patch('/team/:id', need('team', 'edit'), async (req, res) => {
     const user = isId(req.params.id) ? await User.findById(req.params.id).select('+googleSub') : null;
     if (!user) return res.status(404).json({ error: 'Member not found.' });
-    const { value, errors } = SH.validateUser(req.body, { vaLabels: await integ.allowedVaLabels() });
+    const { value, errors } = await checkMember(req.body, user._id);
     if (errors.length) return bad(res, errors);
     if (user.role === 'Manager' && value.role !== 'Manager' && (await managers()) < 2) return bad(res, ['Keep at least one Manager.']);
     let { password, ...rec } = value;

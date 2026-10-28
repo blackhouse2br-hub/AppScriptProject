@@ -446,6 +446,7 @@
   function emptyLeadsMsg() {
     if (!DEMO && S.source === 'monday') {
       if (S.srcBusy || !S.srcFetchedAt && !Object.keys(S.srcErrors || {}).length) return `Loading leads from Monday.com (read-only)…${loadProgressHtml()}<br><span class="sub">The first load after the app starts can take a few minutes. No other data is shown meanwhile.</span>`;
+      if (S.scopeNotice) return esc(S.scopeNotice);   // a broker without a (unique) Salesperson label: a setup step, not an error
       return S.srcErrors && Object.keys(S.srcErrors).length ? 'Monday.com leads could not be loaded (see the error above). No MongoDB or demo records are shown in their place.<br><span class="sub">Fix the problem and press Refresh, or choose <b>MongoDB</b> under Data source to work with MongoDB records.</span>' : 'Monday.com returned no leads you can see.';
     }
     return (isManager() ? 'No leads on the board yet.' : 'No leads are assigned to you yet.') + (!DEMO && isManager() ? '<br><span class="sub">MongoDB has no leads. Importing from Monday.com is a later phase; for fictional sample records run <b>npm run seed:demo</b> on an empty database.</span>' : '');
@@ -926,7 +927,7 @@
           if (src === viewSrc()) loadPending();
           return;
         }
-        S.pend = { rows: r.rows || [], errors: r.errors || {}, at: Date.now(), loading: false };
+        S.pend = { rows: r.rows || [], errors: r.errors || {}, notice: r.scopeNotice || '', at: Date.now(), loading: false };
       }
     } catch (e) { if (signedOut(e)) return; S.pend = { rows: [], errors: { all: e.message }, at: Date.now(), loading: false }; }
     const box = $('#pendingFb'); if (box) box.innerHTML = pendingHtml();
@@ -947,7 +948,7 @@
           ${v && !block ? `${loiBlock() ? '' : `<button type="button" class="btn sm" data-act="pfbres" data-id="${esc(v.id)}" data-v="loi">📄 Create LOI</button>`}<button type="button" class="btn sm" data-act="pfbres" data-id="${esc(v.id)}" data-v="failed">✕ Failed</button>` : ''}
           ${!local ? `<span class="sub">Switch the data source to ${r.src === 'monday' ? 'Monday.com' : 'MongoDB'} to record it.</span>` : ''}</div></div>`;
     }).join('');
-    return head + (errs.length ? `<div class="src-err" role="alert">${esc(errs[0])}</div>` : '') + (block && rows.length ? `<div class="sub" role="note">${esc(block)}</div>` : '')
+    return head + (errs.length ? `<div class="src-err" role="alert">${esc(errs[0])}</div>` : '') + (p.notice ? `<div class="sub vwhy" role="note">${esc(p.notice)}</div>` : '') + (block && rows.length ? `<div class="sub" role="note">${esc(block)}</div>` : '')
       + (rows.length ? `<div class="pfb-list">${list}</div>` : '<div class="empty">Nothing waiting for feedback.</div>');
   }
   /** Feedback from this client's viewings (results recorded on viewings that happened) → rules for the property suggestions. */
@@ -1089,7 +1090,8 @@
         ${row('Monday.com', m, ['MONDAY_TOKEN', 'MONDAY_LEADS_BOARD_ID', 'MONDAY_LISTINGS_BOARD_ID', 'MONDAY_CALENDAR_BOARD_ID'], `Leads ${boards.leads ? '✓' : '✗'} · Listings ${boards.listings ? '✓' : '✗'} · Calendar ${boards.calendar ? '✓' : '✗'}<div class="sub">Lead fields and notes (updates), listings, calendar viewings</div>`)}
         ${row('respond.io', r, ['RESPOND_TOKEN', 'RESPOND_SPACE_ID (optional)'], 'Contact details and chat history for a lead\'s Respond ID')}
       </tbody></table></div>
-      ${t ? `<div class="pad">${t.error ? `<div class="src-err" role="alert">${esc(t.error)}</div>` : `<div>Monday token user: <b>${esc(t.user || '—')}</b></div>${Object.entries(t.boards || {}).map(([k, b]) => `<div class="sub">${esc(k)} board: ${b == null ? 'not set' : b.found ? '✓ ' + esc(b.name) : '✗ not found or no access'}</div>`).join('')}`}</div>` : ''}
+      ${t ? `<div class="pad">${t.error ? `<div class="src-err" role="alert">${esc(t.error)}</div>` : `<div>Monday token user: <b>${esc(t.user || '—')}</b></div>${Object.entries(t.boards || {}).map(([k, b]) => `<div class="sub">${esc(k)} board: ${b == null ? 'not set' : b.found ? '✓ ' + esc(b.name) : '✗ not found or no access'}</div>`).join('')}
+          <div class="sub">Broker feedback column (MONDAY_CALENDAR_FEEDBACK_COLUMN): ${!t.calendarFeedback ? 'not set — broker feedback stays in the portal' : t.calendarFeedback.valid ? `✓ “${esc(t.calendarFeedback.title)}” (text) — feedback is also copied there` : `✗ ${esc(t.calendarFeedback.problem)} Broker feedback stays in the portal.`}</div>`}</div>` : ''}
       <div class="pad sub">${mondayWritesOn() ? 'Monday updates are limited to listing Availability (Inventory edit access), four lead fields (Budget, Target Move-in Date, Inquiry Type, Nationality; Managers only), one confirmed field at a time, and a viewing\'s result in the Calendar (Calendar edit access: the Calendar item\'s Status, plus LOI Creation Date for an LOI). Still switched off: other Monday writes (AI STATUS, Client Status, subitems, new items, deleting), sending' : 'Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending'} respond.io messages or templates, creating contacts, webhooks and background jobs.
         Monday data is held in server memory for up to 5 minutes and is not saved to MongoDB.</div></div>`;
   }
@@ -1103,12 +1105,18 @@
   }
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const vaChoices = () => [...new Set(LISTS.vas.concat(!DEMO && S.teamLabels ? S.teamLabels.va || [] : []))];
+  // a Broker's exact Monday Salesperson label (Leads and Calendar boards); the preview's fictional list when not connected
+  const salesChoices = () => (!DEMO && S.teamLabels && S.teamLabels.source !== 'error' ? S.teamLabels.salesperson || [] : LISTS.brokers);
   /** Does this member match a label on the Monday board (the visibility rules depend on it)? */
   function boardMatch(u) {
     const t = S.teamLabels; if (DEMO || !t || t.source !== 'monday') return '';
     const has = (list, v) => (list || []).some((x) => norm(x) === norm(v));
     if (u.role === 'VA') return !u.vaLabel ? '<span class="hotnum">No VA label: sees no leads</span>' : has(t.va, u.vaLabel) ? '<span class="okc">✓ on board</span>' : '<span class="hotnum">✗ not a VA Assigned label</span>';
-    if (u.role === 'Broker') return has(t.salesperson, u.name) ? '<span class="okc">✓ Salesperson</span>' : '<span class="hotnum">✗ name isn\'t a Salesperson label</span>';
+    if (u.role === 'Broker') {
+      if (!u.salesLabel) return '<span class="hotnum">No Salesperson label: sees no Monday viewings</span>';
+      if (D.users.filter((x) => x.role === 'Broker' && x.active !== false && x.salesLabel === u.salesLabel).length > 1) return '<span class="hotnum">✗ label shared with another broker: sees none</span>';
+      return (t.salesperson || []).includes(u.salesLabel) ? '<span class="okc">✓ Salesperson</span>' : '<span class="hotnum">✗ not a Salesperson label on the board</span>';
+    }
     return '<span class="muted">all leads</span>';
   }
   function teamView() {
@@ -1120,12 +1128,12 @@
       : '<span class="muted">Monday is not connected: the preview\'s fictional VA labels are used.</span>';
     return `<div class="panel"><h3>Team &amp; Access <span class="muted">${DEMO ? 'demo members (example.com addresses)' : GOOGLE ? 'stored in MongoDB · members sign in with the Google account of this email' : 'stored in MongoDB · members sign in with their email and password'}</span><span class="spacer"></span>${edit ? '<button class="btn sm" data-act="user" data-v="">+ Add member</button>' : ''}</h3>
       ${note ? `<div class="pad" style="padding-bottom:0">${note}</div>` : ''}
-      <div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>VA label</th>${t && t.source === 'monday' ? '<th>Monday match</th>' : ''}<th>Access</th></tr></thead><tbody>
-      ${D.users.map((u) => `<tr class="${edit ? 'click' : ''}" ${edit ? `data-act="user" data-v="${esc(u.email)}"` : ''}><td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc(u.vaLabel || '—')}</td>
+      <div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Monday label</th>${t && t.source === 'monday' ? '<th>Monday match</th>' : ''}<th>Access</th></tr></thead><tbody>
+      ${D.users.map((u) => `<tr class="${edit ? 'click' : ''}" ${edit ? `data-act="user" data-v="${esc(u.email)}"` : ''}><td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${esc((u.role === 'Broker' ? u.salesLabel : u.vaLabel) || '—')}${u.role === 'Broker' && u.salesLabel ? ' <span class="sub">(Salesperson)</span>' : ''}</td>
         ${t && t.source === 'monday' ? `<td>${boardMatch(u)}</td>` : ''}
         <td class="sub">${u.role === 'Manager' ? 'Everything (edit)' : MOD_KEYS.filter((k) => (u.modules || {})[k] && u.modules[k] !== 'none').map((k) => VIEW_LABEL[k] + (u.modules[k] === 'view' ? ' (view)' : '')).join(', ') || 'No access'}</td></tr>`).join('')}
       </tbody></table></div></div>
-      <div class="sub">VAs see only leads assigned to their VA label; brokers see only leads they handle. ${DEMO ? 'In the live portal, sign-in uses Google accounts listed here.' : 'Changes to role and access apply on the member\'s next request.' + (GOOGLE ? ' Removing a member, or changing their email, signs them out.' : ' On the hosted portal, members sign in with Google instead of a password.')}</div>`;
+      <div class="sub">VAs see only leads assigned to their VA label; brokers see only the Monday viewings and clients of their own Salesperson label (set here; one broker per label). ${DEMO ? 'In the live portal, sign-in uses Google accounts listed here.' : 'Changes to role and access apply on the member\'s next request.' + (GOOGLE ? ' Removing a member, or changing their email, signs them out.' : ' On the hosted portal, members sign in with Google instead of a password.')}</div>`;
   }
   function userModal(email) {
     const u = D.users.find((x) => x.email === email) || { email: '', name: '', role: 'VA', vaLabel: '', modules: {} };
@@ -1134,7 +1142,8 @@
       <div class="grid"><label>Name<input id="mName" value="${esc(u.name)}" maxlength="80"></label><label>Email<input id="mEmail" type="email" value="${esc(u.email)}" maxlength="120"></label>
         <label>Role<select id="mRole">${['Manager', 'VA', 'Broker'].map((r) => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
         <label>VA label${!DEMO && S.teamLabels && S.teamLabels.source === 'monday' ? ' <span class="muted">(from Monday)</span>' : ''}<select id="mVa"><option value="">(none)</option>${vaChoices().concat(u.vaLabel && !vaChoices().includes(u.vaLabel) ? [u.vaLabel] : []).map((v) => `<option ${u.vaLabel === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
-        ${!DEMO && S.teamLabels && S.teamLabels.source === 'monday' ? '<div class="full sub">Brokers see Monday leads where their <b>name</b> matches a Salesperson label exactly.</div>' : ''}
+        <label>Monday Salesperson label <span class="muted">(brokers)</span><select id="mSales"><option value="">(none: no Monday viewings)</option>${salesChoices().concat(u.salesLabel && !salesChoices().includes(u.salesLabel) ? [u.salesLabel] : []).map((v) => `<option ${u.salesLabel === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+        <div class="full sub">A broker sees only the Monday viewings and clients whose Salesperson is exactly this label. Each label can belong to one broker only.${!DEMO && S.teamLabels && S.teamLabels.source === 'error' ? ' <b>The Monday labels could not be loaded, so a label can\'t be picked right now.</b>' : ''}</div>
         ${DEMO ? '' : GOOGLE ? '<div class="full sub">They sign in with "Sign in with Google" using this email address. No password is needed.</div>' : `<label class="full">${email ? 'New password (leave blank to keep the current one)' : 'Temporary password'}<input id="mPass" type="password" autocomplete="new-password" minlength="${SH.MIN_PASSWORD}" maxlength="200" placeholder="At least ${SH.MIN_PASSWORD} characters"></label>`}</div>
       <div class="section-title">Module access <span class="muted" style="text-transform:none;font-weight:400">(Managers always have edit access)</span></div>
       <div class="grid">${MOD_KEYS.map((k) => `<label>${esc(VIEW_LABEL[k])}<select data-mod="${k}">${['none', 'view', 'edit'].map((a) => `<option value="${a}" ${((u.modules || {})[k] || 'none') === a ? 'selected' : ''}>${a === 'none' ? 'No access' : a === 'view' ? 'View' : 'Edit'}</option>`).join('')}</select></label>`).join('')}</div>
@@ -1144,10 +1153,11 @@
     if (!canEdit('team')) return toast('You don\'t have edit access to Settings.', true);
     const orig = S.modal.orig, modules = {};
     $$('[data-mod]').forEach((s) => { modules[s.dataset.mod] = s.value; });
-    const input = { name: $('#mName').value, email: $('#mEmail').value, role: $('#mRole').value, vaLabel: $('#mVa').value, modules };
+    const input = { name: $('#mName').value, email: $('#mEmail').value, role: $('#mRole').value, vaLabel: $('#mVa').value, salesLabel: $('#mSales').value, modules };
     if (!DEMO && !GOOGLE) input.password = $('#mPass').value;
-    const { value, errors } = SH.validateUser(input, { vaLabels: vaChoices() });
+    const { value, errors } = SH.validateUser(input, { vaLabels: vaChoices(), salesLabels: salesChoices() });
     if (errors.length) return toast(errors[0], true);
+    if (value.salesLabel && D.users.some((x) => x.email !== orig && x.role === 'Broker' && x.active !== false && x.salesLabel === value.salesLabel)) return toast(`The Salesperson label "${value.salesLabel}" is already set for another broker.`, true);
     if (!DEMO && !GOOGLE && !orig && !value.password) return toast(`Set a temporary password (at least ${SH.MIN_PASSWORD} characters).`, true);
     if (D.users.some((x) => x.email === value.email && x.email !== orig)) return toast('That email is already on the team.', true);
     const prev = D.users.find((x) => x.email === orig);
@@ -1280,7 +1290,8 @@
     const v = visibleViewings().find((x) => x.id === id); if (!v) return toast('You don\'t have access to this viewing.', true);
     const l = leadById(v.leadId) || {}, x = unitOf(v), src = viewSrc(), mon = src === 'monday';
     const sched = !mon && canEdit('calendar'), why = resultBlock(), res = !why, r = resultOf(v), out = preset || (r && r.outcome) || '';
-    const fbMax = mon && S.integ && S.integ.calendarFeedbackColumn ? 200 : SH.RESULT.feedbackMax;
+    // one line, 200 characters, only while the feedback can be copied to a configured Calendar column
+    const fbMax = mon && S.integ && S.integ.calendarFeedbackColumn && mondayWritesOn() ? 200 : SH.RESULT.feedbackMax;
     S.modal = { kind: 'viewing', id, src, fbMax };
     const where1 = mon ? `Create LOI sets this viewing's Status on Monday to “${MONDAY_RESULT.loi}” (and LOI Creation Date, if empty); Failed changes nothing on Monday. The result, reasons, broker feedback and LOI confidence are kept in the portal${S.integ && S.integ.calendarFeedbackColumn ? ', and the feedback is also copied to the Calendar board\'s feedback column' : ''}.`
       : src === 'demo' ? 'Saved in this browser (demo).' : 'Saved in MongoDB (portal booking).';
@@ -1583,7 +1594,7 @@
       const r = await API.get('/api/monday/bootstrap' + (force ? '?refresh=1' : ''));
       if (stale()) return false;
       D.leads = r.leads; D.listings = r.listings; D.calendar = r.viewings;
-      S.srcErrors = r.errors || {}; S.srcNotConfigured = r.notConfigured || []; S.srcFetchedAt = r.fetchedAt || '';
+      S.srcErrors = r.errors || {}; S.srcNotConfigured = r.notConfigured || []; S.srcFetchedAt = r.fetchedAt || ''; S.scopeNotice = r.scopeNotice || '';
       S.srcBoards = r.boards || {}; S.srcLive = { boards: r.boards || {}, refreshing: !!r.refreshing }; S.srcStaleMs = r.staleAfterMs; S.srcNewer = false;
     } catch (e) {
       if (signedOut(e) || stale()) return false;

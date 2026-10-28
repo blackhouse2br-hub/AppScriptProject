@@ -92,11 +92,14 @@ const Note = mongoose.model('Note', new Schema({
   at: { type: Date, default: Date.now },
 }, { toJSON }));
 
+// salesLabel: a Broker's exact Salesperson label on Monday (set by an admin in Team & Access); it is what links the
+// signed-in broker to Monday Calendar viewings and clients. Empty = no Monday viewings until it is set.
 const User = mongoose.model('User', new Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true, maxlength: 120 },
   name: { type: String, required: true, trim: true, maxlength: 80 },
   role: { type: String, enum: ROLES, required: true },
   vaLabel: { type: String, default: '' },
+  salesLabel: { type: String, default: '', maxlength: 80 },
   phone: { type: String, default: '' },
   modules: { type: Schema.Types.Mixed, default: {} },   // { moduleKey: 'view' | 'edit' }, validated by shared.validateUser
   passwordHash: { type: String, select: false },

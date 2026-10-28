@@ -3,14 +3,14 @@
 // confirmed Monday updates in mondayWrite.js (off unless MONDAY_WRITES=on). The POST connection test only reads.
 // Lead visibility rules are the same as for MongoDB records.
 const SH = require('../../public/shared');
-const { need, findVisibleLead, scopeExternal } = require('../access');
+const { need, findVisibleLead, scopeExternal, brokerLabelOf } = require('../access');
 const { createStatus } = require('./status');
 const { createMonday } = require('./monday');
 const { createRespond } = require('./respondio');
 const { computeLead, replyState } = require('./pipeline');
 const { LeadOverride, MondayWrite } = require('../models');
 const { performWrite, writeOptions, createWriteLimiter } = require('./mondayWrite');
-const { mondayResults } = require('./viewingResult');
+const { mondayResults, feedbackColumnCheck } = require('./viewingResult');
 
 /** One set of clients + status per server (shared by the integration routes and Team & Access). */
 function createIntegrations(config) {
@@ -29,12 +29,19 @@ function createIntegrations(config) {
     if (!monday || !leadsBoard) return { source: 'preview', va: SH.LISTS.vas, salesperson: SH.LISTS.brokers };
     const all = await monday.loadAll(false);
     if (all.errors.leads || !all.labels) return { source: 'error', error: all.errors.leads || 'Leads board not loaded.', va: [], salesperson: [] };
-    return { source: 'monday', va: all.labels.va, salesperson: all.labels.salesperson, vaColumn: all.labels.vaColumn, salespersonColumn: all.labels.salespersonColumn };
+    // Salesperson: the Leads board's labels plus the Calendar board's (viewings are matched on the Calendar's)
+    const salesperson = [...new Set(all.labels.salesperson.concat(all.calendarSalesperson || []))];
+    return { source: 'monday', va: all.labels.va, salesperson, vaColumn: all.labels.vaColumn, salespersonColumn: all.labels.salespersonColumn };
   }
   /** VA labels a team member may be given (preview list plus the Monday board's labels when available). */
   async function allowedVaLabels() {
     const t = await teamLabels().catch(() => ({ va: [] }));
     return [...new Set(SH.LISTS.vas.concat(t.va || []))];
+  }
+  /** Exact Salesperson labels a Broker may be given; null when Monday is connected but its labels can't be read. */
+  async function allowedSalesLabels() {
+    const t = await teamLabels().catch(() => ({ source: 'error' }));
+    return t.source === 'error' ? null : t.salesperson;
   }
   const rsFor = (l) => (respond ? respond.cachedState(String(l.contactId || '').replace(/\D/g, '')) : null);
   /**
@@ -71,7 +78,7 @@ function createIntegrations(config) {
   }
   // rate limit for allowlisted Monday updates (MONDAY_WRITE_LIMIT per user per minute)
   const writeLimit = monday && monday.writesEnabled ? createWriteLimiter(ic.monday.writeLimit) : null;
-  return { status, monday, respond, ic, teamLabels, allowedVaLabels, enrich, mondayOverrides, visibleMondayLead, mondayListing, statusFields, writeLimit };
+  return { status, monday, respond, ic, teamLabels, allowedVaLabels, allowedSalesLabels, enrich, mondayOverrides, visibleMondayLead, mondayListing, statusFields, writeLimit };
 }
 
 const STATUS_FIELDS = ['ai', 'aiSub', 'aiSource', 'workStage', 'temp', 'tempWhy', 'waiting', 'since', 'lastText', 'replyChecked', 'replyError', 'onRespond', 'daysInStage', 'stageDays', 'override'];
@@ -95,7 +102,12 @@ function integrationRoutes(r, integ) {
 
   r.post('/integrations/monday/test', need('team', 'edit'), async (req, res) => {
     if (!monday) return notConnected(res, 'Monday.com', status.monday.snapshot().missing);
-    try { res.json(await monday.test()); } catch (err) { failed(res, err); }
+    try {
+      const out = await monday.test();
+      // the optional broker-feedback column, checked the same way a save checks it (read-only; never created)
+      if (ic.monday.calFeedbackColumn && ic.monday.boards.calendar) out.calendarFeedback = feedbackColumnCheck(await monday.boardColumns('calendar'), ic.monday.calFeedbackColumn);
+      res.json(out);
+    } catch (err) { failed(res, err); }
   });
 
   r.get('/monday/bootstrap', need('leads', 'view'), async (req, res) => {
@@ -105,7 +117,8 @@ function integrationRoutes(r, integ) {
     // results saved for Calendar-board viewings (broker feedback is kept in the portal unless a Monday column is configured)
     const results = await mondayResults(scoped.viewings.map((v) => v.id));
     scoped.viewings = scoped.viewings.map((v) => { const r = results.get(v.id); return r ? { ...v, feedback: r.feedback, result: r } : v; });
-    res.json({ ...scoped, errors: all.errors, notConfigured: all.notConfigured, calendarOk: all.calendarOk,
+    const b = brokerLabelOf(req.user);
+    res.json({ ...scoped, ...(req.user.role === 'Broker' && b.notice ? { scopeNotice: b.notice } : {}), errors: all.errors, notConfigured: all.notConfigured, calendarOk: all.calendarOk,
       fetchedAt: all.fetchedAt, boards: all.boards, refreshing: all.refreshing, staleAfterMs: all.staleAfterMs });
   });
 

@@ -27,7 +27,10 @@ const todayManila = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Man
 // fictional Calendar board for this file: the real board's column kinds and Status labels
 const C = fx.BOARDS['3333333'];
 C.columns.find((c) => c.id === 'st').settings_str = JSON.stringify({ labels: { 0: 'Viewing Scheduled', 1: 'Under Negotiations', 2: 'Failed', 3: 'Closed', 4: 'Pending', 5: 'Confirmed' } });
-C.columns.push({ id: 'lcd', title: 'LOI Creation Date', type: 'date', settings_str: '{}' }, { id: 'fbk', title: 'Broker Feedback', type: 'text', settings_str: '{}' });
+C.columns.push({ id: 'lcd', title: 'LOI Creation Date', type: 'date', settings_str: '{}' }, { id: 'fbk', title: 'Broker Feedback', type: 'text', settings_str: '{}' },
+  // the real board's two "Remarks" columns, and two text columns sharing a title: none may receive feedback
+  { id: 'remarks__1', title: 'Remarks', type: 'long_text', settings_str: '{}' }, { id: 'status_18', title: 'Remarks', type: 'status', settings_str: '{}' },
+  { id: 'notes_a', title: 'Broker Notes', type: 'text', settings_str: '{}' }, { id: 'notes_b', title: 'Broker Notes', type: 'text', settings_str: '{}' });
 const cal = (id, days, lead, st, extra) => C.items.push({ id, name: 'Viewing ' + id, group: 'Viewings', created: ymd(days - 3), v: { fs: ymd(days), ...(lead ? { cl: { linked: [lead] } } : {}), b: 'Tower ' + id, c: 'Makati', tm: '10:00', sp: 'Ely Santos', st, ...(extra || {}) } });
 cal('6101', -3, '9001', 'Viewing Scheduled');            // pending (Ana's client)
 cal('6102', -4, '9006', 'Failed');                       // result already on Monday
@@ -42,6 +45,8 @@ cal('6110', -4, '9003', 'Viewing Scheduled', { sp: 'Gia Cruz' });   // another b
 cal('6111', -5, '9001', 'Viewing Scheduled');            // relinked on Monday after the page loaded
 cal('6112', -2, '9001', 'Viewing Scheduled');            // rate-limit test
 cal('6113', -3, '9001', 'Viewing Scheduled');            // Failed with Monday writes off
+cal('6114', -4, '9001', 'Viewing Scheduled');            // Create LOI with a feedback column
+cal('6115', -5, '9001', 'Viewing Scheduled');            // Create LOI with an unusable feedback column
 
 const fake = fx.createFakeServer();
 let failNextMutation = false, passBeforeFail = 0;   // passBeforeFail: let that many mutations through, then fail the next
@@ -229,24 +234,59 @@ test('a Monday failure is reported, audited and saves nothing in the portal; the
   assert.ok(keys((await pending(on, ck.boss)).data.rows).includes('monday:6109'));
 });
 
-test('only an owner-named unique text column would receive feedback (one line, 200 max); a wrong one is refused', async () => {
+test('feedback is copied to Monday only through one dedicated, uniquely titled text column (by id); the portal keeps it too', async () => {
   assert.throws(() => loadConfig(env({ MONDAY_CALENDAR_FEEDBACK_COLUMN: 'Bad-Id' }), ARGV), /MONDAY_CALENDAR_FEEDBACK_COLUMN/);
   const withFb = await instance({ MONDAY_WRITES: 'on', MONDAY_WRITE_LIMIT: '60', MONDAY_CALENDAR_FEEDBACK_COLUMN: 'fbk' });
   assert.strictEqual((await call(withFb, 'GET', '/api/integrations/status', ck.boss)).data.calendarFeedbackColumn, true);
+  const chk = (await call(withFb, 'POST', '/api/integrations/monday/test', ck.boss, {})).data.calendarFeedback;
+  assert.deepStrictEqual([chk.valid, chk.title, chk.type], [true, 'Broker Feedback', 'text'], 'Managers can check the configured column (read-only)');
   const n = mutations().length;
-  assert.strictEqual((await result(withFb, ck.boss, '6109', { outcome: 'failed', feedback: 'x'.repeat(201), expect: 'Viewing Scheduled', confirm: true })).status, 400);
-  const r = await result(withFb, ck.boss, '6109', { outcome: 'failed', tags: ['too_expensive'], feedback: 'Over budget,\nwants cheaper', expect: 'Viewing Scheduled', confirm: true });
+  assert.strictEqual((await result(withFb, ck.boss, '6109', { outcome: 'failed', feedback: 'x'.repeat(201) })).status, 400, 'one line, 200 characters at most while it is copied');
+  const r = await result(withFb, ck.boss, '6109', { outcome: 'failed', tags: ['too_expensive'], feedback: 'Over budget,\n\twants   cheaper' });
   assert.strictEqual(r.status, 200, r.text);
   assert.deepStrictEqual(mutations().slice(n).map((m) => [m.body.variables.c, m.body.variables.v]), [['fbk', 'Over budget, wants cheaper']], 'Failed: the feedback copy only, never a Status');
   assert.strictEqual(r.data.feedbackSavedTo, 'monday+portal');
-  assert.strictEqual((await ViewingResult.findOne({ viewingId: '6109' }).lean()).feedback, 'Over budget,\nwants cheaper', 'the portal keeps the full text');
-  // a non-text column, or a text column the portal already reads (here Time), is never used for feedback
-  const status = await instance({ MONDAY_WRITES: 'on', MONDAY_CALENDAR_FEEDBACK_COLUMN: 'st' });
-  assert.match((await result(status, ck.boss, '6109', { outcome: 'failed', feedback: 'x', expect: 'Failed', confirm: true })).data.error, /not a text column/);
-  const wrong = await instance({ MONDAY_WRITES: 'on', MONDAY_CALENDAR_FEEDBACK_COLUMN: 'tm' });
-  const m2 = mutations().length;
-  const w = await result(wrong, ck.boss, '6109', { outcome: 'failed', feedback: 'x', expect: 'Failed', confirm: true });
-  assert.strictEqual(w.status, 409); assert.match(w.data.error, /already reads/); assert.strictEqual(mutations().length, m2);
+  const rec = await ViewingResult.findOne({ viewingId: '6109' }).lean();
+  assert.deepStrictEqual([rec.feedback, rec.feedbackOnMonday], ['Over budget,\n\twants   cheaper', true], 'the portal keeps the full text');
+  const au = await MondayWrite.findOne({ itemId: '6109', action: 'viewingFeedback' }).lean();
+  assert.deepStrictEqual([au.column, au.ok, au.from, au.to], ['Broker Feedback', true, '', '']); assert.ok(!/budget/i.test(JSON.stringify(au)), 'no feedback text in the audit');
+  // removing the feedback later never clears Monday: it says so
+  const rm = await result(withFb, ck.boss, '6109', { outcome: 'failed', tags: ['too_expensive'] });
+  assert.match(rm.data.warnings.join(' '), /earlier feedback stays in Monday's "Broker Feedback" column/);
+  // Create LOI with the column: Status, LOI Creation Date and the feedback copy
+  const n2 = mutations().length;
+  const loi = await result(withFb, ck.boss, '6114', { outcome: 'loi', conf: 65, feedback: 'Wants the unit', expect: 'Viewing Scheduled', confirm: true });
+  assert.strictEqual(loi.status, 200, loi.text);
+  assert.deepStrictEqual(mutations().slice(n2).map((m) => [m.body.variables.c, m.body.variables.v]), [['st', 'Under Negotiations'], ['lcd', todayManila()], ['fbk', 'Wants the unit']]);
+});
+
+test('an unusable feedback column (duplicated "Remarks", non-text, shared title, already read, missing) is never written; feedback stays in the portal', async () => {
+  const cases = [['remarks__1', /a long_text column, not a text column/], ['status_18', /a status column, not a text column/], ['notes_a', /more than one Calendar column has that title/],
+    ['tm', /already reads/], ['nope_col', /is not a column of the Calendar board/]];
+  for (const [id, why] of cases) {
+    const base = await instance({ MONDAY_WRITES: 'on', MONDAY_WRITE_LIMIT: '60', MONDAY_CALENDAR_FEEDBACK_COLUMN: id });
+    const chk = (await call(base, 'POST', '/api/integrations/monday/test', ck.boss, {})).data.calendarFeedback;
+    assert.strictEqual(chk.valid, false, id); assert.match(chk.problem, why, id);
+    const n = mutations().length;
+    const r = await result(base, ck.boss, '6109', { outcome: 'failed', tags: ['layout'], feedback: 'Zz-kept-in-portal ' + id });
+    assert.strictEqual(r.status, 200, id + ': ' + r.text);
+    assert.strictEqual(mutations().length, n, id + ': nothing written to Monday');
+    assert.strictEqual(r.data.feedbackSavedTo, 'portal'); assert.match(r.data.warnings.join(' '), /kept in the portal only/);
+    assert.strictEqual((await ViewingResult.findOne({ viewingId: '6109' }).lean()).feedback, 'Zz-kept-in-portal ' + id);
+  }
+  // Create LOI still writes its two fields; only the feedback copy is skipped
+  const bad = await instance({ MONDAY_WRITES: 'on', MONDAY_WRITE_LIMIT: '60', MONDAY_CALENDAR_FEEDBACK_COLUMN: 'remarks__1' });
+  const n = mutations().length;
+  const loi = await result(bad, ck.boss, '6115', { outcome: 'loi', conf: 50, feedback: 'Zz-not-on-monday', expect: 'Viewing Scheduled', confirm: true });
+  assert.strictEqual(loi.status, 200, loi.text);
+  assert.deepStrictEqual(mutations().slice(n).map((m) => m.body.variables.c), ['st', 'lcd']);
+  assert.ok(!mutations().some((m) => /Zz-not-on-monday|Zz-kept-in-portal/.test(m.body.variables.v)), 'feedback never sent');
+  // Monday writes off with a valid column: Failed saves in the portal (1000 characters), nothing is copied
+  const off = await instance({ MONDAY_CALENDAR_FEEDBACK_COLUMN: 'fbk' });
+  const n3 = mutations().length;
+  const f = await result(off, ck.boss, '6109', { outcome: 'failed', feedback: 'y'.repeat(300) });
+  assert.strictEqual(f.status, 200, f.text); assert.strictEqual(mutations().length, n3);
+  assert.match(f.data.warnings.join(' '), /switched off, so the feedback was not copied/);
 });
 
 test('portal booking: the result stays in MongoDB (viewing Done, note on the lead) and leaves the pending list', async () => {
@@ -306,6 +346,48 @@ test('rate limit: every Monday change counts; over the limit the request is refu
   const again = await result(lim, ck.boss, '6109', { outcome: 'loi', conf: 55, expect: 'Under Negotiations', confirm: true });
   assert.strictEqual(again.status, 429); assert.ok(again.data.retryAfter >= 1);
   assert.strictEqual(fx.calls.monday.length, calls, 'no Monday call at all');
+});
+
+test('broker identity: only an admin-set exact Salesperson label; missing or shared → no Monday viewings, with a setup notice', async () => {
+  const me = await User.findOne({ email: 'broker@example.com' });
+  // no label yet (the portal name "Ely Santos" alone gives nothing): denied, with a notice saying what to set
+  let b = (await call(on, 'GET', '/api/monday/bootstrap', ck.broker)).data;
+  assert.deepStrictEqual([b.viewings.length, b.leads.length], [0, 0]); assert.match(b.scopeNotice, /no Monday Salesperson label/);
+  let p = (await pending(on, ck.broker)).data;
+  assert.ok(!p.rows.some((r) => r.src === 'monday')); assert.match(p.scopeNotice, /Team & Access/);
+  assert.strictEqual((await result(on, ck.broker, '6105', { outcome: 'failed', tags: ['layout'] })).status, 404);
+  // the label must be an exact board label: no first names, no case-insensitive or partial matches
+  const patch = (who, id, body) => call(on, 'PATCH', '/api/team/' + id, who, body);
+  const base = { name: 'Ely Santos', email: 'broker@example.com', role: 'Broker', modules: { leads: 'view', calendar: 'edit' } };
+  for (const bad of ['Ely', 'ely santos', 'Santos', 'Nobody Fake']) assert.strictEqual((await patch(ck.boss, me.id, { ...base, salesLabel: bad })).status, 400, bad);
+  assert.strictEqual((await patch(ck.broker, me.id, { ...base, salesLabel: 'Ely Santos' })).status, 403, 'only Team & Access editors set labels');
+  assert.strictEqual((await patch(ck.boss, me.id, { ...base, salesLabel: 'Ely Santos' })).status, 200);
+  b = (await call(on, 'GET', '/api/monday/bootstrap', ck.broker)).data;
+  assert.ok(!b.scopeNotice && b.viewings.length > 0 && b.viewings.every((v) => v.broker === 'Ely Santos'), 'their own viewings only');
+  assert.ok(!b.viewings.some((v) => v.id === '6110'), "not another broker's viewing");
+  assert.ok(b.leads.some((l) => l.id === '9001') && b.leads.every((l) => l.salesperson === 'Ely Santos' || b.viewings.some((v) => v.leadId === l.id)));
+  // a second broker with the same portal name: names don't matter, labels do; a label can belong to one broker only
+  const add = (body) => call(on, 'POST', '/api/team', ck.boss, { ...base, password: PW, ...body });
+  assert.strictEqual((await add({ email: 'ely2@example.com', salesLabel: 'Ely Santos' })).status, 400, 'label already taken');
+  const two = await add({ email: 'ely2@example.com', salesLabel: 'Gia Cruz' });
+  assert.strictEqual(two.status, 201, two.text);
+  const r2 = await fetch(on + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'ely2@example.com', password: PW }) });
+  const ck2 = r2.headers.get('set-cookie').split(';')[0];
+  const b2 = (await call(on, 'GET', '/api/monday/bootstrap', ck2)).data;
+  assert.ok(b2.viewings.length > 0 && b2.viewings.every((v) => v.broker === 'Gia Cruz'), 'same name, different label: only their own label\'s viewings');
+  assert.ok(!b2.viewings.some((v) => v.broker === 'Ely Santos'));
+  // a broker can record a result for their own viewing, never for another broker's
+  assert.strictEqual((await result(on, ck.broker, '6110', { outcome: 'failed', tags: ['layout'] })).status, 404);
+  assert.strictEqual((await result(on, ck.broker, '6105', { outcome: 'failed', tags: ['layout'] })).status, 200);
+  // a label shared by two active brokers (e.g. set outside the portal) identifies no one: both are denied
+  await User.updateOne({ email: 'ely2@example.com' }, { $set: { salesLabel: 'Ely Santos' } });
+  for (const c of [ck.broker, ck2]) {
+    const d = (await call(on, 'GET', '/api/monday/bootstrap', c)).data;
+    assert.deepStrictEqual([d.viewings.length, d.leads.length], [0, 0]); assert.match(d.scopeNotice, /more than one broker/);
+    assert.strictEqual((await result(on, c, '6105', { outcome: 'failed', tags: ['layout'] })).status, 404);
+  }
+  await User.updateOne({ email: 'ely2@example.com' }, { $set: { active: false } });
+  assert.ok((await call(on, 'GET', '/api/monday/bootstrap', ck.broker)).data.viewings.length > 0, 'an inactive broker no longer counts');
 });
 
 test('feedback shapes the suggestions with the Apps Script rules (hide, boost, reasons read from text)', () => {
