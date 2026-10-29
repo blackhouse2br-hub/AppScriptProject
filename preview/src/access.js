@@ -31,7 +31,7 @@ async function findVisibleLead(user, id) {
 }
 
 // ----- the same rules for records read live from Monday.com (matched by label) -----
-const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const norm = SH.vaKey;   // the same VA-label match as the Leads VA filter and VA Management
 /**
  * A Broker's identity on Monday: their exact Salesperson label, set by an admin in Team & Access (user.salesLabel).
  * Missing, or held by more than one active broker → no label (no Monday viewings or clients) and a notice saying why.

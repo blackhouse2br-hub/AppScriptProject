@@ -266,3 +266,10 @@ test('GitHub Pages build: public settings only, CSP for the API, same-site check
     for (const f of r.files) assert.ok(!SECRET_PATTERNS.some((re) => re.test(fs.readFileSync(path.join(out, f), 'utf8'))), f);
   } finally { fs.rmSync(out, { recursive: true, force: true }); }
 });
+
+test('split hosting (portal on another address): the API still serves published project pages\' one script', async () => {
+  const r = await fetch(base + '/project-page.js');
+  assert.strictEqual(r.status, 200); assert.match(r.headers.get('content-type'), /javascript/);
+  assert.match(await r.text(), /project_inquiry/);
+  assert.strictEqual((await fetch(base + '/app.js')).status, 404, 'the portal itself is not served here');
+});

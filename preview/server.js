@@ -58,7 +58,7 @@ async function start(env = process.env, argv = process.argv, { dbTimeoutMs } = {
 
 /** Prints an error and its causes (messages only for known startup errors; stack for unexpected ones). Credentials are redacted. */
 function reportStartupError(err, log = console.error) {
-  const known = err && (err.code || /^(APP_MODE|MONGODB_URI|PORT|SESSION_HOURS|Demo mode|Email-and-password|Could not connect to MongoDB|MONDAY_|RESPOND_|PUBLIC_API_URL|PORTAL_URL|AUTH_PROVIDER|GOOGLE_|Google sign-in needs|The portal \(|Production start is still blocked)/.test(err.message || ''));
+  const known = err && (err.code || /^(APP_MODE|MONGODB_URI|PORT|SESSION_HOURS|Demo mode|Email-and-password|Could not connect to MongoDB|MONDAY_|RESPOND_|KPI_REVIEWER|GOOGLE_DRIVE_|ANTHROPIC_|PUBLIC_API_URL|PORTAL_URL|AUTH_PROVIDER|GOOGLE_|Google sign-in needs|The portal \(|Production start is still blocked)/.test(err.message || ''));
   log('[startup] ' + redact(err && err.message ? err.message : String(err)));
   let c = err && err.cause, depth = 0;
   while (c && depth++ < 5) { log('  caused by: ' + redact(c.code ? `${c.code}: ${c.message}` : c.message || String(c))); c = c.cause; }
@@ -73,7 +73,7 @@ function printBanner(server, config, log = console.log) {
     : 'Mode: DEMO. Fictional data only, kept in your browser. No database, no API, no outside services.');
   if (config.integrations) {
     const m = config.integrations.monday, r = config.integrations.respond;
-    log(`Monday.com (${m.writes ? 'reads + allowlisted confirmed updates' : 'read-only'}): ${m.token && Object.values(m.boards).some(Boolean) ? 'configured' : 'not connected'} · respond.io (read-only): ${r.token ? 'configured' : 'not connected'}`);
+    log(`Monday.com (${m.writes ? 'reads + allowlisted confirmed updates' : 'read-only'}): ${m.token && Object.values(m.boards).some(Boolean) ? 'configured' : 'not connected'} · respond.io (${r.sends ? 'reads + Upselling sends, each confirmed' : 'read-only'}): ${r.token ? 'configured' : 'not connected'}`);
   }
   if (config.ignoredIntegrationVars.length) log(`Ignored in demo mode: ${config.ignoredIntegrationVars.join(', ')} (integrations run only in MongoDB mode).`);
   log('Press Ctrl+C to stop.');

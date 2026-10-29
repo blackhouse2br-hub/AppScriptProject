@@ -5,16 +5,18 @@
  (static page, no code,                                            page + API + Google sign-in + all secrets
   no settings, no cookies)                                          ├─► MongoDB Atlas   team, sessions, app records
                                                                     ├─► Monday.com      read-only (+ allowlisted updates if MONDAY_WRITES=on)
-                                                                    └─► respond.io      read-only
+                                                                    ├─► respond.io      read-only (+ Upselling sends if RESPOND_SENDS=on)
+                                                                    ├─► Google Drive    optional, read-only (Project Pages; service account)
+                                                                    └─► Anthropic API   optional (Project Pages: Build from Google Drive)
 ```
 
 * **Railway** runs the portal: it serves the page and the API from one address, and handles Google sign-in.
 * **GitHub Pages** only publishes a redirect page to that address. It has no app code, no settings and no
   secrets, and it is published only after the Railway address answers as this portal (see step 5).
 
-> **Status:** the code is ready and tested locally against fake Google, Monday and respond.io servers. It has not been
-> deployed. `NODE_ENV=production` is still refused on purpose (the production sign-in guard) until a staging run
-> passes "Before production" below.
+> **Status:** running on Railway as a staging deployment (`NODE_ENV` is not `production`). Every change is tested locally
+> against fake Google, Monday, respond.io, Drive and AI servers first. `NODE_ENV=production` is still refused on purpose
+> (the production sign-in guard) until the staging run passes "Before production" below.
 
 ## Does this need a custom domain? No.
 
@@ -59,9 +61,35 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 | `MONDAY_WRITES` | optional | leave **unset** (off): Monday is read-only. `on` enables only the allowlisted, user-confirmed updates in README "Monday updates" (the token then needs write access to those boards). |
 | `MONDAY_CALENDAR_FEEDBACK_COLUMN` | optional | the id of one dedicated Calendar-board column of type **text**, with a title no other column has, that also receives a viewing's broker feedback (one line, ≤ 200 characters). Not one the portal already reads; never "Remarks" (duplicated). Unset or unusable: the feedback stays in the portal only (Settings → Integrations → Test Monday connection shows the check). |
 | `MONDAY_WRITE_LIMIT` | optional | Monday update attempts per user per minute, 1–60 (default 10; the server as a whole allows 3×). |
-| `RESPOND_TOKEN` | optional 🔒 | respond.io API token (read-only use); without it the Chat tab says "not connected" |
+| `RESPOND_TOKEN` | optional 🔒 | respond.io API token (read-only use, unless `RESPOND_SENDS=on`); without it the Chat tab says "not connected" |
 | `RESPOND_SPACE_ID` | optional | digits only; only adds "Open in respond.io" links |
 | `RESPOND_LIST_CHECKS` | optional | leave **unset** (off): respond.io is read only when someone opens a lead's Chat tab. `on` checks every visible lead. |
+| `KPI_REVIEWER_TOBY_EMAIL` | for KPI Review | Toby's **own** Google account email, exactly as in Team & Access. Only he and Jonjo can open KPI Review. |
+| `KPI_REVIEWER_JONJO_EMAIL` | for KPI Review | Jonjo's own Google account email, as in Team & Access. Must differ from Toby's. `blackhouse2br@gmail.com` is refused. |
+| `RESPOND_SENDS` | optional | leave **unset** (off). `on` lets Upselling send 1:1 messages and tag contacts through respond.io, each batch reviewed and confirmed by the operator. `RESPOND_TOKEN` must be allowed to send and tag. |
+| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` | optional 🔒 | Project Pages "Add from Drive" / "Build from Google Drive": a service account's JSON key (or base64 of it). See "Google Drive for Project Pages" below. Unset: projects, uploads and pages still work. |
+| `ANTHROPIC_API_KEY` | optional 🔒 | lets "Build from Google Drive" fill empty fields from the folder's documents (Claude Opus 5.5; results are reviewed before saving). Unset: Build only adds the folder's media. |
+
+**Google Drive for Project Pages (optional, read-only).** No callback URL, consent screen or user sign-in is involved:
+1. Google Cloud Console → a project → **APIs & Services → Library → Google Drive API → Enable**.
+2. **IAM & Admin → Service Accounts → Create** (no roles needed) → **Keys → Add key → JSON**. If key creation is
+   blocked, your organization enforces `iam.disableServiceAccountKeyCreation` (default for organizations created since
+   May 2024); an Org Policy Admin must allow it for this project.
+3. Paste the JSON (or base64 of it) into `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`.
+4. In Drive, **share each project folder with the service account's email as Viewer** (for a shared drive, add it as
+   a member). The portal reads only what is shared with it (scope `drive.readonly`) and never changes Drive.
+
+**Upselling images** are sent to respond.io as links to `<PUBLIC_API_URL>/upsell-media/<random token>`; respond.io
+must be able to reach that address (it can on Railway). **Project inquiry form:** set the form endpoint in Project
+Pages to the Apps Script public deployment's `/exec` link (the existing path that files Website Inquiries on Monday).
+
+**KPI Review access.** Coaching, feedback, the reviewers' discussion records and the monthly snapshots are private to
+the two accounts above. Managers (including the shared Blackhouse account) can't open KPI Review; their other
+permissions are unchanged. Each reviewer must also be an active member in Team & Access (any role; give them only the
+other modules they need) and must have signed in once with that Google account. Changing a reviewer's email in Team &
+Access removes their KPI Review access until they sign in again with the Google account for the new address. Each VA
+to be reviewed (Lara included) needs a Team & Access member with the VA role, their Monday VA label and their own Google
+email: that member ID is their employee ID, and it's how they acknowledge "We discussed this review" themselves.
 
 **Do not set:**
 * `PORT`: Railway sets it.
@@ -133,6 +161,10 @@ Production (`NODE_ENV=production`) stays blocked in `src/config.js` until all of
 - [ ] Removing a member signs them out on their next action.
 - [ ] Monday leads, listings and calendar load; nothing is written to Monday.
 - [ ] The GitHub Pages address forwards to the Railway address.
+- [ ] KPI Review: Toby and Jonjo (signed in again with Google) open it; the Blackhouse account and other members don't.
+- [ ] Upselling: with `RESPOND_SENDS` unset nothing can be sent; before turning it on, Team & Access `upsell: edit` grants are
+      reviewed and one small batch to a test contact is sent and checked in respond.io.
+- [ ] Project Pages: a test project's brochure downloads and photos show on its published page, then it is unpublished.
 
 After that, a small code change removes the block (the "Production start is still blocked" check in `src/config.js`),
 and `NODE_ENV` can be set to `production`.

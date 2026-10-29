@@ -9,6 +9,9 @@ const { dbReady } = require('./db');
 const { isId, need, leadScope, viewingScope, findVisibleLead, resolveBrokerLabel, scopeExternal } = require('./access');
 const { integrationRoutes, createIntegrations } = require('./integrations/routes');
 const { saveMondayResult, saveMongoResult, pendingFeedback } = require('./integrations/viewingResult');
+const { kpiReviewRoutes } = require('./kpiReview');
+const { projectRoutes } = require('./projects');
+const { upsellRoutes } = require('./upsell');
 
 const bad = (res, errors) => res.status(400).json({ error: errors[0], errors });
 const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'propreq', 'brokers'];
@@ -30,7 +33,9 @@ function apiRouter(config) {
       let host = ''; try { host = new URL(origin).host; } catch (e) { /* invalid */ }
       if (host !== req.headers.host) return res.status(403).json({ error: 'Cross-site request blocked.' });
     }
-    if (!req.is('application/json') && req.headers['content-length'] !== '0' && req.method !== 'DELETE') return res.status(415).json({ error: 'Send JSON.' });
+    // JSON only; the one exception is a Project Pages file upload (the file itself, checked by projects.js / projectMedia.js)
+    const upload = req.method === 'POST' && /^\/(projects\/[a-f0-9]{24}\/media|upsell\/campaigns\/[a-f0-9]{24}\/image)$/.test(req.path);
+    if (!upload && !req.is('application/json') && req.headers['content-length'] !== '0' && req.method !== 'DELETE') return res.status(415).json({ error: 'Send JSON.' });
     next();
   });
   r.use(express.json({ limit: '100kb' }));
@@ -351,6 +356,14 @@ function apiRouter(config) {
     if (!t) return res.status(404).json({ error: 'Template not found.' });
     res.json({ ok: true });
   });
+
+  // KPI Review: coaching and feedback per VA and month, acknowledgment and monthly snapshots (MongoDB only; reads the
+  // VA Management data, writes nothing to Monday.com or respond.io)
+  kpiReviewRoutes(r, config, integ);
+  // Project Pages: projects, units, media (MongoDB / GridFS), preview, optional read-only Google Drive
+  projectRoutes(r, config);
+  // Upselling: offers to clients, sent 1:1 or tagged through respond.io (sending off unless RESPOND_SENDS=on)
+  upsellRoutes(r, config, integ);
 
   // Monday.com / respond.io (status, live reads); nothing is written to either service except the allowlisted,
   // confirmed Monday updates (POST /monday/write, mondayWrite.js; off unless MONDAY_WRITES=on)

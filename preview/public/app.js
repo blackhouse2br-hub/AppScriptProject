@@ -28,6 +28,8 @@
     ['leads', 'Leads', P('<path d="M4 6h16M4 12h16M4 18h10"/>')],
     ['vaportal', 'VA Portal', P('<path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/>')],
     ['monitor', 'VA Management', P('<path d="M3 12h4l3 8 4-16 3 8h4"/>')],
+    ['kpireview', 'KPI Review', P('<path d="M9 11l2 2 4-4"/><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 17h8"/>')],
+    ['kpiack', 'Review acknowledgment', P('<path d="M20 6 9 17l-5-5"/>')],
     ['calendar', 'Calendar', P('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>')],
     ['invdash', 'Inventory Dashboard', P('<path d="M3 21h18M5 21V8l7-5 7 5v13"/><path d="M9 21v-6h6v6"/>')],
     ['ldash', 'Leads Report', P('<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>')],
@@ -133,7 +135,10 @@
   // screens that share another module's permission (same data, same people): no separate Team & Access setting
   const MOD_ALIAS = { clientreq: 'propreq' };
   const access = (mod) => SH.access(me(), MOD_ALIAS[mod] || mod);
-  const canSee = (mod) => access(mod) !== 'none';
+  // KPI Review isn't a Team & Access module: the server decides who may open it (Toby and Jonjo only, no Manager
+  // exception); a VA gets only the acknowledgment screen for their own reviews
+  const krMe = () => (S.kr && S.kr.me) || {};
+  const canSee = (mod) => (mod === 'kpireview' ? !DEMO && !!krMe().canView : mod === 'kpiack' ? !DEMO && !!krMe().canAck : access(mod) !== 'none');
   // records read live from Monday.com are read-only in this phase, whatever the user's role
   const canEdit = (mod) => access(mod) === 'edit' && !(!DEMO && S.source === 'monday' && ['leads', 'calendar', 'invdash'].includes(mod));
   function visibleLeads() {
@@ -183,6 +188,8 @@
   }
   // the server says whether its allowlisted Monday updates are switched on (MONDAY_WRITES); the labels say which applies
   const mondayWritesOn = () => !DEMO && !!(S.integ && S.integ.mondayWrites);
+  /** Monday.com data is read for members with Leads access (the server's rule for /api/monday/bootstrap). */
+  const mondayAllowed = () => DEMO || access('leads') !== 'none';
   const sourceLabel = () => (DEMO ? 'Demo data' : S.source === 'monday' ? (mondayWritesOn() ? 'Monday.com (live)' : 'Monday.com (live, read-only)') : 'MongoDB (local backend)');
   const IST = { not_configured: ['off', 'Not connected'], not_checked: ['idle', 'Configured'], ok: ['ok', 'Connected'], error: ['err', 'Error'] };
   function istChip(name, s) {
@@ -231,7 +238,7 @@
         ${istChip('Monday.com', m)}${istChip('respond.io', S.integ && S.integ.respond)}
         <span class="spacer"></span><span class="mb-text">Signed in as <b>${esc(me().name)}</b> (${esc(me().role)})</span>
         <button class="btn sm" data-act="logout">Sign out</button></div>
-        ${S.source === 'monday' ? mondayDataNote() : ''}
+        ${S.source === 'monday' ? (S.srcNoAccess ? '<div class="src-note" role="status">No Monday.com data is loaded for your account: it needs Leads access in Settings → Team &amp; Access.</div>' : mondayDataNote()) : ''}
         ${errs.length ? `<div class="src-err" role="alert">${errs.map(([k, v]) => `<div><b>${esc(k === 'all' ? 'Monday.com' : 'Monday ' + k)}:</b> ${esc(v)}</div>`).join('')}<div class="sub">No substitute data is shown for these.${S.srcErrors.viewings ? ' Without the Calendar board, AI Status uses Monday AI STATUS / status rules only, and Days in Stage starts from the inquiry date.' : ''}</div></div>` : ''}
         ${S.source === 'monday' && S.rsInfo && S.rsInfo.error ? `<div class="src-err" role="alert"><b>respond.io:</b> ${esc(S.rsInfo.error)} <span class="sub">Reply state and Temperature for those leads stay unchecked (no substitute data).${S.rsInfo.retryAt ? ' Trying again at ' + esc(hhmm(new Date(S.rsInfo.retryAt).toISOString())) + '.' : ' Failed chats are tried again automatically.'}</span></div>` : ''}
         ${nc.length ? `<div class="src-note">Not configured: ${nc.map((k) => esc(k)).join(', ')} (set the board IDs in preview/.env).</div>` : ''}`;
@@ -267,10 +274,10 @@
   }
   function viewHtml() {
     const fn = { leads: leadsView, vaportal: vaPortalView, monitor: monitorView, calendar: calendarView, invdash: invView, ldash: ldashView,
-      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView, pl: plView }[S.view];
+      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView, pl: plView, kpireview: kpiReviewView, kpiack: kpiAckView, pages: DEMO ? null : pagesView, upsell: DEMO ? null : upsellView }[S.view];
     return fn ? fn() : laterView(S.view);
   }
-  const laterBox = (title, what) => `<div class="later-box"><b>${esc(title)} isn't in this preview yet.</b><br>In the live portal: ${esc(what)}<br><span class="sub">It will be built in a later migration phase. Nothing here connects to the live system.</span></div>`;
+  const laterBox = (title, what) => `<div class="later-box"><b>${esc(title)} isn't in this portal yet.</b><br>In the original Apps Script portal: ${esc(what)}<br><span class="sub">It will be built in a later migration phase. Nothing on this screen reads or changes any data.</span></div>`;
   const laterView = (k) => `<div class="panel"><div class="pad">${laterBox(VIEW_LABEL[k], LATER[k] || '')}</div></div>`;
 
   // ---------- Leads ----------
@@ -300,7 +307,8 @@
     const q = S.q.trim().toLowerCase(), qd = q.replace(/\D/g, '');
     const list = visibleLeads().filter((l) =>
       (!q || indexOf(l).includes(q) || (qd.length >= 3 && String(l.phone || '').replace(/\D/g, '').includes(qd))) &&
-      (!S.va || (S.va === '__none' ? !l.va : l.va === S.va)) &&
+      // VA filter (Managers only; the same label match as the server): a VA or Broker never has one applied
+      (!S.va || !isManager() || (S.va === '__none' ? !SH.vaKey(l.va) : SH.sameVa(l.va, S.va))) &&
       (skip === 'ai' || !S.ai.length || S.ai.includes(l.ai)) &&
       (skip === 'temp' || !S.temp.length || S.temp.includes(l.temp)) &&
       (!S.type || l.inquiry === S.type) && (!S.from || l.source === S.from) &&
@@ -324,7 +332,12 @@
   function filterControls() {
     const opt = (v, cur, label) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(label || v)}</option>`;
     const fsel = (key, cap, cur, options, all) => `<label class="fsel ${cur ? 'on' : ''}"><span class="cap">${cap}</span><select data-ch="${key}" aria-label="${cap}">${opt('', cur, all)}${options}</select></label>`;
-    const vas = isManager() ? fsel('va', 'VA', S.va, opt('__none', S.va, 'Unassigned') + LISTS.vas.concat(uniqueVals('va')).filter((v, i, a) => a.indexOf(v) === i).map((v) => opt(v, S.va)).join(''), 'All') : '';
+    // VA choices: the board's labels for live Monday data (as VA Management), the preview's list otherwise; a chosen VA
+    // that isn't in the data any more stays visible and selected, so the select never says "All" while it applies
+    const vaList = viewSrc() === 'monday' ? vaNames() : SH.vaLabels(LISTS.vas.concat(uniqueVals('va')));
+    const vaCur = S.va === '__none' ? '__none' : vaList.find((v) => SH.sameVa(v, S.va)) || S.va;
+    const vaMissing = S.va && S.va !== '__none' && !vaList.some((v) => SH.sameVa(v, S.va));
+    const vas = isManager() ? fsel('va', 'VA', vaCur, opt('__none', vaCur, 'Unassigned') + vaList.map((v) => opt(v, vaCur)).join('') + (vaMissing ? opt(S.va, vaCur, S.va + ' (no leads)') : ''), 'All') : '';
     return `${vas}
         ${fsel('ai1', 'AI Status', S.ai.length === 1 ? S.ai[0] : S.ai.length ? '__multi' : '', (S.ai.length > 1 ? opt('__multi', '__multi', S.ai.length + ' selected') : '') + AI_STAGES.map((s) => opt(s, S.ai.length === 1 ? S.ai[0] : '')).join(''), 'Any')}
         ${fsel('temp1', 'Temperature', S.temp.length === 1 ? S.temp[0] : S.temp.length ? '__multi' : '', (S.temp.length > 1 ? opt('__multi', '__multi', S.temp.length + ' selected') : '') + TEMPS.map((s) => opt(s, S.temp.length === 1 ? S.temp[0] : '')).join(''), 'Any')}
@@ -332,7 +345,7 @@
         ${fsel('from', 'Source', S.from, LISTS.sources.concat(uniqueVals('source')).filter((v, i, a) => a.indexOf(v) === i).map((s) => opt(s, S.from)).join(''), 'All')}
         <label class="fsel ${S.sortCol ? 'on' : ''}"><span class="cap">Sort</span><select data-ch="sort" aria-label="Sort">${S.sortCol ? `<option value="" selected>${esc(COLS.find((c) => c[0] === S.sortCol)[1])} ${S.sortDir === 'desc' ? '↓' : '↑'}</option>` : ''}${SORTS.map(([v, l]) => opt(v, S.sortCol ? '' : S.sort, l)).join('')}</select></label>`;
   }
-  const activeFilters = () => (S.va ? 1 : 0) + S.ai.length + S.temp.length + (S.wait ? 1 : 0) + (S.type ? 1 : 0) + (S.from ? 1 : 0);
+  const activeFilters = () => (S.va && isManager() ? 1 : 0) + S.ai.length + S.temp.length + (S.wait ? 1 : 0) + (S.type ? 1 : 0) + (S.from ? 1 : 0);
   /** Phones: all filters (plus the Response shortcuts) in a bottom sheet. */
   function filterSheetHtml() {
     const n = S.list ? S.list.length : 0, wait = (k, label) => `<button type="button" class="btn ${S.wait === k ? 'on' : ''}" data-act="navwait" data-v="${k}" aria-pressed="${S.wait === k}">${label}</button>`;
@@ -479,7 +492,7 @@
   function renderChips() {
     const chips = [];
     if (S.q.trim()) chips.push(['q', '', `Search: “${S.q.trim()}”`]);
-    if (S.va) chips.push(['va', '', 'VA: ' + (S.va === '__none' ? 'Unassigned' : S.va)]);
+    if (S.va && isManager()) chips.push(['va', '', 'VA: ' + (S.va === '__none' ? 'Unassigned' : S.va)]);
     S.ai.forEach((v) => chips.push(['ai', v, 'AI: ' + v]));
     S.temp.forEach((v) => chips.push(['temp', v, v]));
     if (S.wait) chips.push(['wait', '', S.wait === 'va' ? 'Needs VA Reply' : 'Waiting on Client']);
@@ -847,13 +860,12 @@
       </tbody></table></div></div>`;
   }
   // people on screen: the board's own labels for live Monday data; the preview's lists for MongoDB / demo records
-  const vaNames = () => (viewSrc() === 'monday' ? [...new Set(D.leads.map((l) => l.va).filter(Boolean))].sort() : LISTS.vas);
+  // (one entry per VA: "Ana" and "ana" on the board are the same VA, as the server's lead scoping treats them)
+  const vaNames = () => (viewSrc() === 'monday' ? SH.vaLabels(D.leads.map((l) => l.va)) : LISTS.vas);
   const brokerNames = () => (viewSrc() === 'monday' ? [...new Set(visibleViewings().map((v) => v.broker).filter(Boolean))].sort() : LISTS.brokers);
   function monitorView() {
     const vis = visibleLeads(), vv = visibleViewings(), vas = isManager() ? vaNames() : [me().vaLabel].filter(Boolean);
-    const rows = vas.map((va) => { const ls = vis.filter((l) => l.va === va), ids = new Set(ls.map((l) => l.id));
-      return [va, ls.length, ls.filter((l) => l.waiting === 'va' && l.onRespond).length, ls.filter((l) => l.temp === 'Hot').length,
-        vv.filter((v) => ids.has(v.leadId) && v.status !== 'Cancelled').length, ls.filter((l) => LEAD_PLUS.includes(l.ai)).length, ls.filter((l) => l.ai === 'Failed').length]; });
+    const rows = vas.map((va) => { const w = SH.vaWorkload(vis, vv, va); return [va, w.leads, w.needsReply, w.hot, w.viewings, w.loiPlus, w.failed]; });
     const needs = vis.filter((l) => l.onRespond && l.waiting === 'va').length;
     return `<div class="cards"><div class="card"><div class="n">${needs}</div><div class="l">Needs VA Reply</div></div><div class="card"><div class="n">${vis.filter((l) => l.onRespond && l.waiting === 'client').length}</div><div class="l">Waiting on Client</div></div>
         <div class="card"><div class="n">${vis.filter((l) => !l.va).length}</div><div class="l">Unassigned leads</div></div><div class="card"><div class="n">${vis.filter((l) => l.temp === 'Hot').length}</div><div class="l">🔥 Hot leads</div></div></div>
@@ -905,7 +917,7 @@
   }
   const monLabel = (m) => { const d = parseYmd(m + '-01'); return d ? d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }) : m; };
   const peso = (n) => (n ? '₱' + Math.round(n).toLocaleString('en-PH') : '—');
-  const dFailed = (d) => /fail/i.test(d.status) || /failed|archive/i.test(d.group);
+  const dFailed = SH.dealFailed;
   const dType = (d) => (/sale/i.test(d.type) ? 'Sale' : /renewal/i.test(d.type) ? 'Renewal' : 'Rental');
   // collected commission (Code.gs collectedByLead_ / apiGetPL): Total Paid on a "Closed" row with a Date of Payment
   const dCollected = (d) => (!dFailed(d) && /^closed$/i.test(String(d.status || '').trim()) && d.pay ? d.paid || 0 : 0);
@@ -1123,18 +1135,622 @@
     const head = `<div class="panel"><h3>VA Performance &amp; Ranking <span class="muted">clients assigned in the period · Monday leads + Calendar</span><span class="spacer"></span>${rangeSel('monitor', '3')}</h3>`;
     if (!st.at || st.error) return head + dealsNote(st) + '</div>';
     const months = monthsIn(rangeOf('monitor', '3')), from = months[0] + '-01', t = today();
-    const viewed = new Set(st.rows.filter((d) => d.fin && d.fin <= t && !/renewal/i.test(d.type)).map((d) => d.leadId));
-    const sold = new Set(st.rows.filter((d) => !dFailed(d) && !/renewal/i.test(d.type) && (d.contract || /^closed$/i.test(String(d.status).trim()))).map((d) => d.leadId));
-    const pct = (a, b) => (b ? Math.round(a / b * 100) : 0);
-    const rows = vaNames().map((va) => {
-      const ls = visibleLeads().filter((l) => l.va === va && String(l.inquiryDate || l.createdAt || '').slice(0, 10) >= from);
-      const v = ls.filter((l) => viewed.has(l.id)).length, s = ls.filter((l) => sold.has(l.id)).length, lost = ls.filter((l) => l.ai === 'Failed').length;
-      return { va, n: ls.length, vp: pct(v, ls.length), sp: pct(s, ls.length), lp: pct(lost, ls.length) };
-    }).filter((r) => r.n).sort((a, b) => (b.vp + b.sp - b.lp / 2) - (a.vp + a.sp - a.lp / 2));
+    const rows = vaNames().map((va) => SH.vaPerformance(visibleLeads(), st.rows, va, from, '', t))
+      .filter((r) => r.n).sort((a, b) => (b.vp + b.sp - b.lp / 2) - (a.vp + a.sp - a.lp / 2));
     return head + `<div class="scroll-x"><table class="t"><thead><tr><th>#</th><th>VA</th><th class="num">Clients</th><th class="num">To viewing</th><th class="num">To sale</th><th class="num">Lost</th></tr></thead><tbody>
       ${rows.map((r, i) => `<tr class="click" data-act="filterva" data-v="${esc(r.va)}"><td>${i + 1}</td><td><b>${esc(r.va)}</b></td><td class="num">${r.n}</td><td class="num">${r.vp}%</td><td class="num">${r.sp}%</td><td class="num">${r.lp}%</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No clients assigned in this period.</td></tr>'}
       </tbody></table></div><div class="sub pad">Ranked by conversion to viewing and to sale, less half the lost rate. Lead-time scores (time to answer, to source and send units) need the respond.io chats and Monday subitems and are not in the portal yet.</div></div>`;
   }
+
+  // ---------- KPI Review (server: src/kpiReview.js; Toby and Jonjo only) ----------
+  // Coaching and feedback are private to the two reviewers' accounts: they're held in memory only while this screen is
+  // used (never in localStorage) and dropped on sign-out. The KPI values are the VA Management ones, computed on the server.
+  const KR = SH.KPI_REVIEW;
+  const kr = () => (S.kr = S.kr || {});
+  const manilaTime = (iso) => (iso ? new Date(iso).toLocaleString('en-US', { timeZone: KR.timezone, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' (Manila)' : '—');
+  const periodLabel = (p) => { const [y, m] = String(p).split('-').map(Number); return y ? new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : p; };
+  function krPeriods() {
+    const cur = krMe().currentPeriod || SH.manilaMonth(), [y, m] = cur.split('-').map(Number), out = [];
+    for (let i = 0; i <= (krMe().monthsBack || KR.monthsBack); i++) { const d = new Date(Date.UTC(y, m - 1 - i, 1)); out.push(d.toISOString().slice(0, 7)); }
+    return out;
+  }
+  const krPeriod = () => kr().period || krMe().currentPeriod || SH.manilaMonth();
+  async function krLoadEmployees() {
+    const st = kr(); if (st.empsLoading) return;
+    st.empsLoading = true; st.empsErr = '';
+    try { const r = await API.get('/api/kpi-review/employees'); st.emps = r.employees; st.labelsErr = r.labelsError || ''; if (!st.sel || !st.emps.some((e) => e.key === st.sel)) st.sel = (st.emps[0] || {}).key || ''; }
+    catch (e) { if (signedOut(e)) return; st.empsErr = e.message; st.emps = st.emps || []; }
+    st.empsLoading = false; st.empsAt = Date.now();
+    if (S.view === 'kpireview') renderView();   // the view then loads the selected employee's review
+  }
+  async function krLoadReview() {
+    const st = kr(), key = st.sel, p = krPeriod(), tag = key + '|' + p; if (!key) return;
+    st.revTag = tag; st.revLoading = true; st.revErr = ''; if (S.view === 'kpireview') renderView();
+    try {
+      const r = await API.get(`/api/kpi-review/review/${key}/${p}`);
+      if (st.revTag !== tag) return;
+      st.rev = r; st.draft = {}; st.saveErr = '';
+    } catch (e) { if (signedOut(e) || st.revTag !== tag) return; st.rev = null; st.revErr = e.message; }
+    st.revLoading = false;
+    if (S.view === 'kpireview') renderView();
+  }
+  async function krLoadSnaps() {
+    const st = kr();
+    try { st.snaps = (await API.get('/api/kpi-review/snapshots')).snapshots; st.snapsErr = ''; } catch (e) { if (signedOut(e)) return; st.snapsErr = e.message; st.snaps = st.snaps || []; }
+    if (S.view === 'kpireview') renderView();
+  }
+  async function krLoadSnap() {
+    const st = kr(), p = krPeriod();
+    st.snapTag = p; st.snapLoading = true; st.snapErr = ''; st.snap = null; renderView();
+    try { const r = await API.get(`/api/kpi-review/snapshots/${p}`); if (st.snapTag === p) st.snap = r.snapshot; }
+    catch (e) { if (signedOut(e) || st.snapTag !== p) return; st.snapErr = e.status === 404 ? '' : e.message; st.snap = null; }
+    st.snapLoading = false; renderView();
+  }
+  const kpiCards = (list, note) => `<div class="kr-kpis">${list.map((k) => `<div class="card"><div class="n">${k.value == null ? '—' : esc(k.value) + esc(k.unit)}</div><div class="l">${esc(k.label)}</div></div>`).join('')}</div>${note ? `<div class="sub pad">${note}</div>` : ''}`;
+  function kpiBlock(kpis, p, hasDeals, live) {
+    if (!kpis) return '';
+    return `<h4 class="kr-h">${esc(periodLabel(p))} · clients assigned in the month <span class="muted">(VA Performance &amp; Ranking rules)</span></h4>
+      ${kpiCards(kpis.month, hasDeals === false ? 'To viewing and To sale need the Monday Calendar board, which isn\'t available, so they are left empty.' : '')}
+      <h4 class="kr-h">${live ? 'Current workload <span class="muted">(as of now, not tied to the month · Response monitor &amp; KPIs per VA)</span>' : 'Workload at capture time <span class="muted">(Response monitor &amp; KPIs per VA)</span>'}</h4>
+      ${kpiCards(kpis.current, live ? 'Needs reply and Hot count only chats the portal has already checked on respond.io.' : '')}`;
+  }
+  /** One reviewer's column: editable for that reviewer, read-only for the other. */
+  function krColumn(rv, x) {
+    const st = kr(), r = rv.reviews[x.key], mine = rv.can.write && rv.can.slot === x.key, d = st.draft || {};
+    const head = `<h3>${esc(x.label)} — coaching &amp; feedback</h3>`;
+    const meta = r ? `<div class="sub">Saved by ${esc(r.author.name)} · ${esc(manilaTime(r.updatedAt))}${r.createdAt !== r.updatedAt ? ' · first saved ' + esc(manilaTime(r.createdAt)) : ''}</div>
+      <div class="sub">${r.discussedAt ? `<b>Reviewer recorded discussion</b>: ${esc(r.discussedBy ? r.discussedBy.name : x.label)}, ${esc(manilaTime(r.discussedAt))} <span class="muted">(the reviewer's own record, not the employee's verification)</span>${r.version > r.discussedVersion ? ' · <b>the text was changed after this record</b>' : ''}` : 'Reviewer has not recorded a discussion.'}</div>` : '';
+    if (!(krMe().reviewers || []).find((y) => y.key === x.key && y.configured)) return `<section class="panel kr-col">${head}<div class="pad sub">${esc(x.label)}'s reviewer account isn't set up on the server yet (KPI_REVIEWER_${x.key.toUpperCase()}_EMAIL).</div></section>`;
+    if (!mine) {
+      return `<section class="panel kr-col">${head}<div class="pad">${r ? `<div class="kr-lbl">Coaching</div><div class="kr-text">${esc(r.coaching) || '<span class="muted">—</span>'}</div>
+        <div class="kr-lbl">Feedback</div><div class="kr-text">${esc(r.feedback) || '<span class="muted">—</span>'}</div>${meta}` : `<div class="empty">No coaching or feedback from ${esc(x.label)} for this month yet.</div>`}
+        ${rv.can.slot !== x.key ? `<div class="sub">Only ${esc(x.label)} can edit this column.</div>` : !rv.employee.linked ? '' : '<div class="sub">You can\'t review yourself.</div>'}</div></section>`;
+    }
+    const val = (k) => (k in d ? d[k] : r ? r[k] : '');
+    return `<section class="panel kr-col">${head}<div class="pad grid kr-form">
+        <label>Coaching<textarea data-in="krtext" data-k="coaching" rows="5" maxlength="${KR.textMax}" ${st.saving ? 'disabled' : ''}>${esc(val('coaching'))}</textarea></label>
+        <label>Feedback<textarea data-in="krtext" data-k="feedback" rows="5" maxlength="${KR.textMax}" ${st.saving ? 'disabled' : ''}>${esc(val('feedback'))}</textarea></label></div>
+      <div class="pad">${meta}
+        ${st.saveErr ? `<div class="src-err" role="alert">${esc(st.saveErr)}</div>` : ''}
+        <div class="kr-actions"><button class="btn primary" data-act="krsave" ${st.saving ? 'disabled' : ''}>${st.saving ? 'Saving…' : 'Save my review'}</button>
+        ${r && !r.discussedAt ? `<button class="btn" data-act="krdiscussed" ${st.saving ? 'disabled' : ''}>I discussed this with ${esc(rv.employee.name)}</button>` : ''}
+        ${Object.keys(d).length ? '<span class="sub">Unsaved changes</span>' : ''}</div></div></section>`;
+  }
+  function krAckBlock(rv) {
+    if (!rv.employee.linked) return '';
+    const a = rv.ack, revs = Object.entries(rv.reviews).filter(([, r]) => r);
+    const edited = a && revs.some(([k, r]) => r.version > ((a.reviewVersions || {})[k] || 0));
+    // a Google account linked to the member after the review was written: worth checking it's really theirs
+    const first = revs.map(([, r]) => r.createdAt).sort()[0], lateLink = a && a.googleLinkedAt && first && new Date(a.googleLinkedAt) > new Date(first);
+    return `<div class="panel"><h3>Employee acknowledged discussion</h3><div class="pad">
+      ${a ? `<div><b>${esc(a.by.name)}</b> confirmed “We discussed this review” while signed in as themselves${a.by.email ? ' (' + esc(a.by.email) + ')' : ''} · ${esc(manilaTime(a.at))}</div>
+        ${edited ? '<div class="sub"><b>The coaching or feedback was changed after this acknowledgment.</b></div>' : ''}
+        ${lateLink ? `<div class="src-note stale">This Google account was linked to ${esc(rv.employee.name)}'s Team &amp; Access record on ${esc(manilaTime(a.googleLinkedAt))}, after the review was first written. Check that it is their own account.</div>` : ''}`
+        : `<div>Not acknowledged by ${esc(rv.employee.name)} yet.</div>`}
+      <div class="sub">Only ${esc(rv.employee.name)} can acknowledge, from their own account (Review acknowledgment screen). They see that a review exists for the month, not its text: go through it with them.
+        Acknowledgment confirms that the review was discussed, not that they agree with it.</div></div></div>`;
+  }
+  function krSnapshotBar(rv) {
+    const s = rv.snapshot, cur = krPeriod() === krMe().currentPeriod;
+    return `<div class="panel"><h3>Monthly snapshot <span class="muted">${esc(periodLabel(rv.period))}</span></h3><div class="pad">
+      ${s ? `<div>Saved on ${esc(manilaTime(s.createdAt))} by ${esc(s.by)}. Snapshots are read-only and never replaced; later changes are not in it.</div><button class="btn sm" data-act="krmode" data-v="snap">View snapshot</button>`
+        : `<div class="sub">Captures every VA's KPIs, both reviewers' comments and acknowledgments for ${esc(periodLabel(rv.period))} as they are now. One per month; it can't be changed or replaced afterwards.${cur ? ' <b>This month isn\'t over yet.</b>' : ''}</div>
+          <button class="btn" data-act="krsnap" ${kr().snapping ? 'disabled' : ''}>${kr().snapping ? 'Creating…' : 'Create monthly snapshot'}</button>`}</div></div>`;
+  }
+  function krSnapshotView() {
+    const st = kr(), p = krPeriod();
+    if (st.snapTag !== p && !st.snapLoading) setTimeout(krLoadSnap, 0);
+    if (st.snapLoading || st.snapTag !== p) return '<div class="empty" role="status">Loading the snapshot…</div>';
+    if (st.snapErr) return `<div class="src-err" role="alert">${esc(st.snapErr)} <button class="btn sm" data-act="krsnapreload">Try again</button></div>`;
+    const s = st.snap;
+    if (!s) return `<div class="empty">No snapshot for ${esc(periodLabel(p))}. ${(st.snaps || []).length ? 'Saved months: ' + st.snaps.map((x) => esc(periodLabel(x.period))).join(', ') + '.' : 'None saved yet.'}</div>`;
+    return `<div class="kr-banner snap" role="note"><b>Saved snapshot · ${esc(periodLabel(s.period))}</b> — captured ${esc(manilaTime(s.createdAt))} by ${esc(s.createdBy.name)} from ${s.source === 'monday' ? 'Monday.com' : 'MongoDB'} data read ${esc(manilaTime(s.dataReadAt))}. Read-only: later changes to KPIs, names or comments don't change it.</div>
+      ${s.employees.map((e) => `<div class="panel"><h3>${esc(e.name)} <span class="muted">${e.employeeId ? 'Employee ID ' + esc(e.employeeId) : 'No Team & Access member at capture time'} · VA label ${esc(e.vaLabel)}</span></h3><div class="pad">
+        ${kpiBlock(e.kpis, s.period, null, false)}
+        <div class="kr-cols">${KR.reviewers.map((x) => { const r = e.reviews.find((y) => y.reviewerKey === x.key);
+          return `<section class="panel kr-col"><h3>${esc(x.label)} — coaching &amp; feedback</h3><div class="pad">${r ? `<div class="kr-lbl">Coaching</div><div class="kr-text">${esc(r.coaching) || '—'}</div><div class="kr-lbl">Feedback</div><div class="kr-text">${esc(r.feedback) || '—'}</div>
+            <div class="sub">By ${esc(r.reviewer.name)} (${esc(r.reviewer.email)}) · last saved ${esc(manilaTime(r.updatedAt))}</div><div class="sub">${r.discussedAt ? 'Reviewer recorded discussion ' + esc(manilaTime(r.discussedAt)) : 'No reviewer discussion record.'}</div>` : '<div class="muted">No coaching or feedback.</div>'}</div></section>`; }).join('')}</div>
+        <div class="sub">${e.ack.status === 'acknowledged' ? `<b>Employee acknowledged discussion</b>: ${esc(e.ack.by.name)}, ${esc(manilaTime(e.ack.at))}` : e.ack.status === 'not_available' ? 'Acknowledgment not possible (no Team & Access member).' : 'Employee had not acknowledged the discussion.'}</div></div></div>`).join('')}`;
+  }
+  function kpiReviewView() {
+    const st = kr(), me = krMe();
+    if (!st.emps && !st.empsLoading) setTimeout(krLoadEmployees, 0);
+    if (!st.snaps && !st.snapsLoading) { st.snapsLoading = true; setTimeout(krLoadSnaps, 0); }
+    const mode = st.mode === 'snap' ? 'snap' : 'live', p = krPeriod(), emps = st.emps || [];
+    const head = `<div class="panel"><h3>KPI Review <span class="muted">private to Toby and Jonjo · you are signed in as ${esc(me.reviewer ? me.reviewer.label : '')}'s reviewer account</span></h3>
+      <div class="pad toolbar kr-bar">
+        ${mode === 'live' ? `<label>Employee <select data-ch="kremp" ${!emps.length ? 'disabled' : ''}>${emps.map((e) => `<option value="${esc(e.key)}" ${e.key === st.sel ? 'selected' : ''}>${esc(e.name)}${e.linked ? '' : ' (not on Team & Access)'}${e.active === false ? ' (inactive)' : ''}</option>`).join('')}</select></label>` : ''}
+        <label>Reporting month <select data-ch="krperiod">${krPeriods().map((x) => `<option value="${x}" ${x === p ? 'selected' : ''}>${esc(periodLabel(x))}</option>`).join('')}</select></label>
+        <div class="seg" role="group" aria-label="Live or snapshot"><button data-act="krmode" data-v="live" aria-pressed="${mode === 'live'}">Live review</button><button data-act="krmode" data-v="snap" aria-pressed="${mode === 'snap'}">Saved snapshot</button></div></div></div>`;
+    if (mode === 'snap') return head + krSnapshotView();
+    if (st.empsErr) return head + `<div class="src-err" role="alert">${esc(st.empsErr)} <button class="btn sm" data-act="krreload">Try again</button></div>`;
+    if (!st.emps) return head + '<div class="empty" role="status">Loading employees…</div>';
+    if (!emps.length) return head + `<div class="empty">No VAs yet. Add each VA in Settings → Team &amp; Access (role VA, with their VA label).${st.labelsErr ? ' ' + esc(st.labelsErr) : ''}</div>`;
+    const rv = st.rev, tag = st.sel + '|' + p;
+    if (st.revTag !== tag && !st.revLoading) setTimeout(krLoadReview, 0);
+    if (st.revLoading || st.revTag !== tag) return head + '<div class="empty" role="status">Loading the review…</div>';
+    if (st.revErr || !rv) return head + `<div class="src-err" role="alert">${esc(st.revErr || 'The review could not be loaded.')} <button class="btn sm" data-act="krreload">Try again</button></div>`;
+    const e = rv.employee;
+    return head + `${st.labelsErr ? `<div class="src-err" role="alert">${esc(st.labelsErr)}</div>` : ''}
+      <div class="kr-banner live" role="note"><b>Live review data</b> — KPIs from ${rv.source === 'monday' ? 'Monday.com' : 'MongoDB'}, read ${esc(manilaTime(rv.dataReadAt))}; they change as that data changes. Comments are saved as you save them.</div>
+      <div class="panel kr-emp"><h3>${esc(e.name)} <span class="muted">${e.linked ? 'Employee ID ' + esc(e.employeeId) : 'No employee ID yet'} · VA label ${esc(e.vaLabel)}</span></h3><div class="pad">
+        ${e.linked ? '' : `<div class="src-note stale">${esc(e.name)} is a VA label on the board with no Team &amp; Access member, so there is no stable employee ID: reviews, acknowledgment and snapshot comments can't be saved for them. Ask a Manager to add them in Settings → Team &amp; Access (role VA, VA label “${esc(e.vaLabel)}”, their own Google email).</div>`}
+        ${rv.kpiError ? `<div class="src-err" role="alert">KPIs unavailable: ${esc(rv.kpiError)} No other data is shown in their place.</div>` : kpiBlock(rv.kpis, rv.period, rv.hasDeals, true)}</div></div>
+      ${e.linked ? `<div class="kr-cols">${KR.reviewers.map((x) => krColumn(rv, x)).join('')}</div>` : ''}
+      ${krAckBlock(rv)}${krSnapshotBar(rv)}`;
+  }
+  async function krSave() {
+    const st = kr(), rv = st.rev; if (!rv || st.saving) return;
+    const mine = rv.reviews[rv.can.slot], d = st.draft || {};
+    const body = { coaching: ('coaching' in d ? d.coaching : mine ? mine.coaching : ''), feedback: ('feedback' in d ? d.feedback : mine ? mine.feedback : ''), version: mine ? mine.version : 0 };
+    const { errors } = SH.validateKpiFeedback(body); if (errors.length) { st.saveErr = errors[0]; return renderView(); }
+    st.saving = true; st.saveErr = ''; renderView();
+    try {
+      const r = await API.put(`/api/kpi-review/review/${rv.employee.key}/${rv.period}/feedback`, body);
+      rv.reviews[rv.can.slot] = r.review; st.draft = {}; toast('Review saved. The other reviewer\'s column was not changed.');
+    } catch (e) { if (signedOut(e)) return; st.saveErr = 'Not saved: ' + e.message; toast('Not saved.', true); }
+    st.saving = false; renderView();
+  }
+  async function krDiscussed() {
+    const st = kr(), rv = st.rev; if (!rv || st.saving) return;
+    if (!confirm(`Record that you went through this review with ${rv.employee.name}? This is your record; it is not the employee's acknowledgment.`)) return;
+    st.saving = true; renderView();
+    try { rv.reviews[rv.can.slot] = (await API.post(`/api/kpi-review/review/${rv.employee.key}/${rv.period}/discussed`)).review; toast('Discussion recorded.'); }
+    catch (e) { if (signedOut(e)) return; st.saveErr = e.message; }
+    st.saving = false; renderView();
+  }
+  async function krSnapshot() {
+    const st = kr(), p = krPeriod(); if (st.snapping) return;
+    if (!confirm(`Create the ${periodLabel(p)} snapshot now? It copies every VA's KPIs, both reviewers' comments and acknowledgments as they are now, and can't be changed or replaced.`)) return;
+    st.snapping = true; renderView();
+    try { await API.post('/api/kpi-review/snapshots', { period: p }); toast('Snapshot saved for ' + periodLabel(p) + '.'); st.snapTag = ''; await krLoadSnaps(); }
+    catch (e) { if (signedOut(e)) { st.snapping = false; return; } toast(e.message, true); }
+    st.snapping = false; st.revTag = ''; krLoadReview();
+  }
+
+  // ---------- Review acknowledgment (a VA's own months; no review text, KPIs or reviewer records are sent here) ----------
+  async function krLoadAcks() {
+    const st = kr(); st.acksLoading = true; st.acksErr = '';
+    try { st.acks = (await API.get('/api/kpi-review/my-acknowledgments')).months; } catch (e) { if (signedOut(e)) return; st.acksErr = e.message; }
+    st.acksLoading = false; if (S.view === 'kpiack') renderView();
+  }
+  function kpiAckView() {
+    const st = kr();
+    if (!st.acks && !st.acksLoading && !st.acksErr) setTimeout(krLoadAcks, 0);
+    const body = st.acksErr ? `<div class="src-err" role="alert">${esc(st.acksErr)} <button class="btn sm" data-act="krackreload">Try again</button></div>`
+      : !st.acks ? '<div class="empty" role="status">Loading…</div>'
+      : !st.acks.length ? '<div class="empty">No KPI reviews for you yet.</div>'
+      : `<div class="scroll-x"><table class="t"><thead><tr><th>Month</th><th>Discussion</th></tr></thead><tbody>${st.acks.map((a) => `<tr><td><b>${esc(periodLabel(a.period))}</b></td><td>${a.acknowledged ? `You confirmed “We discussed this review” · ${esc(manilaTime(a.at))}`
+          : `<label class="tagck"><input type="checkbox" data-ch="krackck" data-p="${esc(a.period)}" ${(st.ackCk || {})[a.period] ? 'checked' : ''}> We discussed this review</label> <button class="btn sm primary" data-act="krack" data-p="${esc(a.period)}" ${st.acking === a.period ? 'disabled' : ''}>${st.acking === a.period ? 'Saving…' : 'Confirm'}</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+    return `<div class="panel"><h3>Review acknowledgment <span class="muted">your KPI reviews from Toby and Jonjo</span></h3>
+      <div class="pad sub">Confirm here after your reviewer has gone through your monthly KPI review with you. Acknowledging confirms the discussion took place, <b>not that you agree</b> with the feedback.
+        The review itself is kept private to the reviewers, so it isn't shown here.</div>${body}</div>`;
+  }
+  async function krAck(p) {
+    const st = kr(); if (st.acking) return;
+    if (!(st.ackCk || {})[p]) return toast('Tick “We discussed this review” first.', true);
+    st.acking = p; renderView();
+    try { await API.post(`/api/kpi-review/my-acknowledgments/${p}`, { confirm: true }); toast('Thank you. Your acknowledgment was saved.'); }
+    catch (e) { if (signedOut(e)) { st.acking = ''; return; } toast(e.message, true); }
+    st.acking = ''; await krLoadAcks();
+  }
+
+  // ---------- Project Pages (server: src/projects.js; files in MongoDB, Google Drive optional) ----------
+  const PPK = SH.PROJECT;
+  const ACT_PP = {}, CH_PP = {};   // this screen's click / change handlers, merged into ACT / CH below
+  const pp = () => (S.pp = S.pp || { q: '' });
+  const ppEdit = () => access('pages') === 'edit';
+  const ppMediaUrl = (pid, fid) => API.url(`/api/projects/${pid}/media/${fid}`);
+  async function ppLoadList() {
+    const st = pp(); st.listLoading = true; st.listErr = '';
+    try { const r = await API.get('/api/projects'); Object.assign(st, { list: r.projects, drive: r.drive, ai: r.ai, hook: r.inquiryHook, publicBase: r.publicBase, limits: r.limits }); }
+    catch (e) { if (signedOut(e)) return; st.listErr = e.message; st.list = st.list || []; }
+    st.listLoading = false; if (S.view === 'pages') renderView();
+  }
+  async function ppOpen(id) {
+    const st = pp();
+    if (st.dirty && !confirm('Discard your unsaved changes to this project?')) return;
+    Object.assign(st, { sel: id, proj: null, draft: null, dirty: false, saveErr: '', proposal: null, buildNote: '', loadErr: '' }); renderView();
+    try { ppSet((await API.get('/api/projects/' + id)).project); } catch (e) { if (signedOut(e)) return; st.loadErr = e.message; }
+    renderView();
+  }
+  /** The saved project and an editable copy of it (lists as one-per-line text). */
+  function ppSet(p) {
+    const st = pp(); st.proj = p;
+    st.draft = JSON.parse(JSON.stringify(p)); st.draft.highlights = (p.highlights || []).join('\n'); st.draft.amenities = (p.amenities || []).join('\n');
+    st.dirty = false;
+    const row = (st.list || []).find((x) => x.id === p.id); if (row) Object.assign(row, { name: p.name, developer: p.developer, location: p.location, status: p.status, published: p.published, units: p.units.length, images: p.media.filter((m) => m.type === 'image').length });
+  }
+  const ppInput = (k, label, opts = {}) => { const d = pp().draft, v = d[k] == null ? '' : d[k], dis = ppEdit() ? '' : 'disabled';
+    return `<label class="${opts.full ? 'full' : ''}">${esc(label)}${opts.area ? `<textarea data-pp="${k}" rows="${opts.rows || 3}" maxlength="${opts.max || 6000}" ${dis}>${esc(v)}</textarea>` : `<input data-pp="${k}" value="${esc(v)}" maxlength="${PPK.text[k] || 200}" ${opts.list ? `list="${opts.list}"` : ''} placeholder="${esc(opts.ph || '')}" ${dis}>`}</label>`; };
+  function ppListHtml() {
+    const st = pp(), term = st.q.trim().toLowerCase();
+    const rows = (st.list || []).filter((p) => !term || [p.name, p.developer, p.location].join(' ').toLowerCase().includes(term));
+    const groups = {}; rows.forEach((p) => { const d = p.developer || 'Other'; (groups[d] = groups[d] || []).push(p); });
+    const names = Object.keys(groups).sort((a, b) => (a === 'Other') - (b === 'Other') || a.localeCompare(b));
+    return `<div class="pp-list"><input type="search" data-in="ppq" value="${esc(st.q)}" placeholder="Search project, developer, city" aria-label="Search projects">
+      ${ppEdit() ? '<button class="btn sm primary" data-act="ppnew">+ Add developer project</button>' : ''}
+      ${st.listErr ? `<div class="src-err" role="alert">${esc(st.listErr)} <button class="btn sm" data-act="ppreload">Try again</button></div>` : !st.list ? '<div class="empty" role="status">Loading projects…</div>'
+        : !rows.length ? `<div class="empty">${st.list.length ? 'No project matches that search.' : 'No projects yet.' + (ppEdit() ? ' Add the first one.' : '')}</div>`
+        : names.map((d) => `<h4>${esc(d)}</h4>${groups[d].map((p) => `<button class="pp-item ${p.id === st.sel ? 'on' : ''}" data-act="ppopen" data-id="${esc(p.id)}"><b>${esc(p.name)}</b>
+          <span class="sub">${esc([p.location, p.units ? p.units + ' unit type' + (p.units > 1 ? 's' : '') : '', p.images ? p.images + ' image' + (p.images > 1 ? 's' : '') : 'no images yet'].filter(Boolean).join(' · '))}${p.published ? ' · <span class="pill" style="--c:var(--ok)">Published</span>' : ''}</span></button>`).join('')}`).join('')}</div>`;
+  }
+  function ppMediaHtml(p, d) {
+    const edit = ppEdit(), st = pp(), byId = new Map(d.media.map((m) => [m.id, m]));
+    return `<div class="panel"><h3>Photos, floor plans &amp; brochures <span class="muted">${p.media.length} file${p.media.length === 1 ? '' : 's'} · JPEG, PNG, WebP, GIF up to ${Math.round(((st.limits || {}).image || 10485760) / 1048576)} MB; PDF up to ${Math.round(((st.limits || {}).pdf || 26214400) / 1048576)} MB · kept in the portal's database</span></h3><div class="pad">
+      ${edit ? `<div class="pp-up"><label class="btn sm">Upload files<input type="file" data-ch="ppfiles" multiple accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" hidden></label>
+        ${st.uploading ? `<span class="muted" role="status">${esc(st.uploading)}</span>` : ''}
+        <span class="spacer"></span><input data-pp="driveLink" value="${esc(d.driveLink || '')}" placeholder="Google Drive folder or file link" aria-label="Google Drive link" maxlength="300">
+        <button class="btn sm" data-act="ppdrive" ${st.drive ? '' : 'disabled title="Google Drive isn\'t connected on this server"'}>Add from Drive</button>
+        <button class="btn sm" data-act="ppbuild" ${st.drive && !st.building ? '' : 'disabled'}>${st.building ? 'Reading the Drive folder…' : 'Build from Google Drive'}</button></div>
+        ${!st.drive ? '<div class="sub">Google Drive isn\'t connected on this server, so files are uploaded directly. The Drive link is kept for reference.</div>' : `<div class="sub">The portal reads only Drive folders shared with <b>${esc(st.drive.email)}</b> (Viewer). Nothing is changed in Drive.</div>`}` : ''}
+      ${!d.media.length ? '<div class="empty">No files yet.</div>' : `<div class="pp-media">${d.media.map((m) => { const saved = p.media.find((x) => x.id === m.id) || m;
+        return `<div class="pp-m ${m.use === false ? 'off' : ''}">${m.type === 'image' ? `<img src="${esc(ppMediaUrl(p.id, m.id))}" alt="${esc(m.caption || m.name)}" loading="lazy">` : `<a class="pp-pdf" href="${esc(ppMediaUrl(p.id, m.id))}" target="_blank" rel="noopener">PDF<br><span class="sub">${esc(saved.name)}</span></a>`}
+          <input data-ppm="${esc(m.id)}" data-k="caption" value="${esc(m.caption || '')}" placeholder="Caption" maxlength="200" aria-label="Caption" ${edit ? '' : 'disabled'}>
+          <div class="pp-mrow"><select data-ppm="${esc(m.id)}" data-k="kind" aria-label="Kind" ${edit ? '' : 'disabled'}>${PPK.kinds.filter((k) => m.type === 'image' ? k !== 'brochure' : k !== 'photo' && k !== 'floorplan').map((k) => `<option value="${k}" ${m.kind === k ? 'selected' : ''}>${esc(PPK.kindLabels[k])}</option>`).join('')}</select>
+          <label class="tagck"><input type="checkbox" data-ppm="${esc(m.id)}" data-k="use" ${m.use !== false ? 'checked' : ''} ${edit ? '' : 'disabled'}> On page</label></div>
+          ${edit ? `<div class="pp-mrow">${m.type === 'image' ? `<button class="btn sm" data-act="ppcover" data-id="${esc(m.id)}">${d.cover === m.id ? 'Cover ✓' : 'Set cover'}</button>` : ''}
+            <button class="btn sm danger" data-act="ppdelmedia" data-id="${esc(m.id)}">Remove</button></div>` : ''}
+          <span class="sub">${esc(saved.from === 'drive' ? 'From Drive' : 'Uploaded')}${saved.by ? ' by ' + esc(saved.by) : ''}</span></div>`; }).join('')}</div>`}
+      ${byId.size ? '' : ''}</div></div>`;
+  }
+  function ppUnitsHtml(p, d) {
+    const edit = ppEdit(), imgs = d.media.filter((m) => m.type === 'image'), dis = edit ? '' : 'disabled';
+    const cell = (i, k, ph, w) => `<td><input data-ppu="${i}" data-k="${k}" value="${esc(d.units[i][k] || '')}" placeholder="${esc(ph)}" maxlength="${PPK.unitText[k]}" style="width:${w}" aria-label="${esc(ph)}" ${dis}></td>`;
+    return `<div class="panel"><h3>Units &amp; rooms <span class="muted">${d.units.length} unit type${d.units.length === 1 ? '' : 's'}</span><span class="spacer"></span>${edit ? '<button class="btn sm" data-act="ppaddunit">+ Add unit type</button>' : ''}</h3>
+      ${d.units.length ? `<div class="scroll-x"><table class="t pp-units"><thead><tr><th>Unit type</th><th>BR</th><th>Size (sqm)</th><th>Price from</th><th>Availability</th><th>Photo / floor plan</th><th>Notes</th><th></th></tr></thead><tbody>
+        ${d.units.map((u, i) => `<tr>${cell(i, 'type', 'e.g. 2BR', '110px')}${cell(i, 'bedrooms', 'BR', '50px')}${cell(i, 'sizeSqm', 'sqm', '70px')}${cell(i, 'priceFrom', 'Price', '110px')}${cell(i, 'availability', 'Available', '100px')}
+          <td><select data-ppu="${i}" data-k="media" aria-label="Photo or floor plan" ${dis}><option value="">(none)</option>${imgs.map((m) => `<option value="${esc(m.id)}" ${u.media === m.id ? 'selected' : ''}>${esc((m.caption || m.name).slice(0, 40))}</option>`).join('')}</select></td>
+          ${cell(i, 'notes', 'Notes', '160px')}<td>${edit ? `<button class="btn sm ghost" data-act="ppdelunit" data-i="${i}" aria-label="Remove unit">✕</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="pad empty">No unit types yet.</div>'}</div>`;
+  }
+  function ppProposalHtml() {
+    const st = pp(); if (!st.proposal && !st.buildNote && !st.buildResult) return '';
+    const r = st.buildResult || {}, show = (v) => Array.isArray(v) ? (v.length && typeof v[0] === 'object' ? v.map((u) => [u.type, u.bedrooms && u.bedrooms + ' BR', u.sizeSqm && u.sizeSqm + ' sqm', u.priceFrom].filter(Boolean).join(' · ')).join('; ') : v.join('; ')) : v;
+    return `<div class="panel pp-review"><h3>From Google Drive — review before using <span class="muted">nothing is saved until you click Save</span><span class="spacer"></span><button class="btn sm ghost" data-act="ppclearprop">Close</button></h3><div class="pad">
+      <div class="sub">${esc([r.added ? r.added.length + ' file' + (r.added.length === 1 ? '' : 's') + ' added' : '', r.docsRead != null ? r.docsRead + ' document' + (r.docsRead === 1 ? '' : 's') + ' read' : '', st.buildNote].filter(Boolean).join(' · '))}</div>
+      ${r.skipped && r.skipped.length ? `<details class="sub"><summary>${r.skipped.length} not used</summary>${r.skipped.map((s) => `<div>${esc(s.name)}: ${esc(s.why)}</div>`).join('')}</details>` : ''}
+      ${(st.proposal || []).length ? `<table class="t"><thead><tr><th>Use</th><th>Field</th><th>Found in the documents</th><th>Now</th></tr></thead><tbody>${st.proposal.map((x, i) => `<tr><td><input type="checkbox" data-ch="pppropck" data-i="${i}" ${x.apply ? 'checked' : ''} aria-label="Use ${esc(x.field)}"></td>
+        <td>${esc(x.field)}${x.current && (!Array.isArray(x.current) || x.current.length) ? ' <span class="pill" style="--c:var(--warn)">replace</span>' : ''}</td><td>${esc(String(x.label || show(x.value)).slice(0, 600))}</td><td class="muted">${esc(String(show(x.current) || '—').slice(0, 300))}</td></tr>`).join('')}</tbody></table>
+        <div class="actions"><button class="btn primary" data-act="ppapplyprop">Use ticked values</button><span class="sub">Empty fields are ticked; fields you already filled are only offered.</span></div>` : ''}</div></div>`;
+  }
+  function pagesView() {
+    const st = pp();
+    if (!st.list && !st.listLoading && !st.listErr) setTimeout(ppLoadList, 0);
+    const edit = ppEdit(), d = st.draft, p = st.proj;
+    let main;
+    if (!st.sel) main = `<div class="empty">${st.list && st.list.length ? 'Choose a project.' : 'Projects you add appear here.'}</div>`;
+    else if (st.loadErr) main = `<div class="src-err" role="alert">${esc(st.loadErr)}</div>`;
+    else if (!p) main = '<div class="empty" role="status">Loading the project…</div>';
+    else {
+      const link = `${API.base || location.origin}/p/${p.slug}`;   // the published page is served by the API's own address
+      main = `<div class="panel"><h3>${esc(p.name)} <span class="muted">${esc(p.developer)}</span><span class="spacer"></span>
+          <a class="btn sm" href="${esc(API.url('/api/projects/' + p.id + '/preview'))}" target="_blank" rel="noopener">Preview</a>
+          ${edit ? `<button class="btn sm" data-act="ppembed">Copy HTML for WordPress</button><button class="btn sm ${p.published ? '' : 'primary'}" data-act="pppublish">${p.published ? 'Unpublish' : 'Publish'}</button>
+          <button class="btn sm primary" data-act="ppsave" ${st.saving || !st.dirty ? 'disabled' : ''}>${st.saving ? 'Saving…' : 'Save'}</button>` : ''}</h3>
+        <div class="pad">
+          ${st.saveErr ? `<div class="src-err" role="alert">${esc(st.saveErr)}</div>` : ''}${st.dirty ? '<div class="sub" role="status"><b>Unsaved changes.</b></div>' : `<div class="sub">Saved ${esc(ago(p.updatedAt))}${p.updatedBy && p.updatedBy.name ? ' by ' + esc(p.updatedBy.name) : ''}.</div>`}
+          <div class="sub">${p.published ? `Published page: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(link)}</a> <button class="btn sm ghost" data-act="ppcopylink" data-v="${esc(link)}">Copy link</button>` : 'Not published: only signed-in staff can preview it.'}</div>
+          <datalist id="ppStatuses">${PPK.statuses.map((s) => `<option>${esc(s)}</option>`).join('')}</datalist>
+          <div class="grid">${ppInput('name', 'Project name')}${ppInput('developer', 'Developer')}${ppInput('location', 'Location')}${ppInput('status', 'Status', { list: 'ppStatuses', ph: 'Pre-selling / RFO' })}
+            ${ppInput('turnover', 'Turnover')}${ppInput('priceFrom', 'Price from')}${ppInput('tagline', 'Tagline', { full: true })}
+            ${ppInput('description', 'Description', { area: true, full: true, rows: 5, max: PPK.descriptionMax })}
+            ${ppInput('highlights', 'Highlights (one per line)', { area: true, rows: 4 })}${ppInput('amenities', 'Amenities (one per line)', { area: true, rows: 4 })}
+            ${ppInput('map', 'Map location', { ph: 'Address or place name' })}${ppInput('video', 'YouTube video link', { ph: 'youtu.be/… or youtube.com/watch?v=…' })}
+            ${ppInput('pageUrl', 'Live page link (after publishing)', { full: true, ph: 'Its address on your website' })}</div>
+          ${edit ? `<div class="actions"><span class="spacer"></span><button class="btn danger sm" data-act="ppdelete">Remove project</button></div>` : ''}</div></div>
+        ${ppProposalHtml()}${ppUnitsHtml(p, d)}${ppMediaHtml(p, d)}`;
+    }
+    return `<div class="pp-layout"><aside class="panel pp-side"><h3>Project Pages <span class="muted">${(st.list || []).length}</span></h3><div class="pad">${ppListHtml()}</div>
+        ${edit ? `<div class="pad pp-hook"><label>Form endpoint <span class="muted">(Apps Script public /exec link; sends inquiries to Website Inquiries)</span><input data-ch="pphook" value="${esc(st.hook || '')}" placeholder="script.google.com/macros/s/…/exec"></label>
+          ${st.hook ? '' : '<div class="sub">Not set: published pages show no inquiry form.</div>'}</div>` : ''}</aside>
+      <section class="pp-main">${main}</section></div>`;
+  }
+  async function ppCreate() {
+    const v = (id) => ($('#' + id) || {}).value || '';
+    const body = { name: v('ppnName').trim(), developer: v('ppnDev').trim(), location: v('ppnLoc').trim(), status: v('ppnStatus').trim(), turnover: v('ppnTurn').trim(), priceFrom: v('ppnPrice').trim(), driveLink: v('ppnDrive').trim() };
+    if (!body.name || !body.developer) return toast('Project name and developer are required.', true);
+    if (body.driveLink && !SH.parseDriveLink(body.driveLink)) return toast('That doesn\'t look like a Google Drive link.', true);
+    let r; try { r = await API.post('/api/projects', body); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; }
+    S.modalReturn = null; closeModal();
+    const st = pp(); st.list = (st.list || []).concat([{ id: r.project.id, name: r.project.name, developer: r.project.developer, location: r.project.location, units: 0, images: 0 }]);
+    await ppOpen(r.project.id); toast('Project added.' + (body.driveLink && st.drive ? ' Use "Build from Google Drive" to fill it from the folder.' : ''));
+  }
+  async function ppSave() {
+    const st = pp(), d = st.draft, p = st.proj; if (!d || st.saving) return;
+    const body = { version: p.version, cover: d.cover || '', description: d.description || '', highlights: d.highlights || '', amenities: d.amenities || '',
+      units: d.units.map((u) => ({ type: u.type || '', bedrooms: u.bedrooms || '', sizeSqm: u.sizeSqm || '', priceFrom: u.priceFrom || '', availability: u.availability || '', notes: u.notes || '', media: u.media || '' })),
+      media: d.media.map((m) => ({ id: m.id, caption: m.caption || '', kind: m.kind, use: m.use !== false })) };
+    Object.keys(PPK.text).forEach((k) => { body[k] = d[k] || ''; });
+    const { errors } = SH.validateProject(body, { mediaIds: p.media.map((m) => m.id), imageIds: p.media.filter((m) => m.type === 'image').map((m) => m.id) });
+    if (errors.length) { st.saveErr = errors[0]; return renderView(); }
+    st.saving = true; st.saveErr = ''; renderView();
+    try { ppSet((await API.put('/api/projects/' + p.id, body)).project); toast('Project saved.'); }
+    catch (e) { if (signedOut(e)) return; st.saveErr = 'Not saved: ' + e.message; toast('Not saved.', true); }
+    st.saving = false; renderView();
+  }
+  /** After a media change on the server: take its media list, keep the person's unsaved edits to the other fields. */
+  function ppMergeMedia(proj) {
+    const st = pp(), keep = st.dirty ? st.draft : null;
+    const edits = keep ? new Map(keep.media.map((m) => [m.id, m])) : new Map();
+    ppSet(proj);
+    if (keep) { st.draft = { ...keep, media: proj.media.map((m) => ({ ...m, ...(edits.get(m.id) ? { caption: edits.get(m.id).caption, kind: edits.get(m.id).kind, use: edits.get(m.id).use } : {}) })), version: proj.version }; st.dirty = true; }
+    if (st.draft.cover && !proj.media.some((m) => m.id === st.draft.cover)) st.draft.cover = '';
+  }
+  async function ppUpload(files) {
+    const st = pp(), p = st.proj; if (!p) return;
+    const list = Array.from(files || []).slice(0, 10), lim = st.limits || { image: 10485760, pdf: 26214400 };
+    let ok = 0; const bad = [];
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      if (f.size > (/pdf/i.test(f.type) ? lim.pdf : lim.image)) { bad.push(f.name + ': too large'); continue; }
+      st.uploading = `Uploading ${i + 1} of ${list.length}…`; renderView();
+      try { const r = await API.upload(`/api/projects/${p.id}/media`, f); ppMergeMedia(r.project); ok++; } catch (e) { if (signedOut(e)) return; bad.push(f.name + ': ' + e.message); }
+    }
+    st.uploading = ''; renderView();
+    toast(`${ok} file${ok === 1 ? '' : 's'} uploaded${bad.length ? ' · not uploaded: ' + bad.join('; ') : ''}.`, !!bad.length);
+  }
+  async function ppDriveFiles() {
+    const st = pp(), link = (st.draft.driveLink || '').trim();
+    if (!SH.parseDriveLink(link)) return toast('Paste a Google Drive folder or file link first.', true);
+    let r; try { r = await API.post('/api/projects/drive/files', { link }); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; }
+    const files = r.files.filter((f) => f.importable);
+    S.modal = { kind: 'ppdrive' };
+    openModal(`<h3 id="modalTitle">Add from Drive <span class="muted" style="font-weight:400;font-size:12px">${files.length} image${files.length === 1 ? '' : 's'} or PDF${files.length === 1 ? '' : 's'}</span></h3>
+      ${files.length ? `<div class="pp-dlist">${files.slice(0, 120).map((f) => `<label class="tagck"><input type="checkbox" class="ppdf" value="${esc(f.id)}"> ${esc(f.name)} <span class="muted">${f.size ? Math.round(f.size / 1024) + ' KB' : ''}</span></label>`).join('')}</div>`
+        : '<div class="empty">No images or PDFs in that link.</div>'}
+      <div class="sub">At most 20 at a time. They're copied into the portal; nothing changes in Drive.</div>
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="button" class="btn primary" data-act="ppimport" ${files.length ? '' : 'disabled'}>Add selected</button></div>`);
+  }
+  // events: wired from the shared ACT / CH tables
+  Object.assign(ACT_PP, {
+    ppnew: () => { S.modal = { kind: 'ppnew' }; openModal(`<h3 id="modalTitle">Add developer project</h3><div class="grid">
+        <label>Project name*<input id="ppnName" maxlength="120" required></label><label>Developer*<input id="ppnDev" maxlength="120" required></label>
+        <label>Location<input id="ppnLoc" maxlength="160"></label><label>Status<input id="ppnStatus" list="ppStatuses2" value="Pre-selling" maxlength="40"></label>
+        <label>Turnover<input id="ppnTurn" maxlength="60"></label><label>Price from<input id="ppnPrice" maxlength="60"></label>
+        <label class="full">Google Drive folder (optional)<input id="ppnDrive" maxlength="300" placeholder="drive.google.com/drive/folders/…"></label></div>
+        <datalist id="ppStatuses2">${PPK.statuses.map((s) => `<option>${esc(s)}</option>`).join('')}</datalist>
+        <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="submit" class="btn primary">Add project</button></div>`, { form: 'ppnew' }); },
+    ppopen: (el) => ppOpen(el.dataset.id),
+    ppreload: () => { pp().list = null; pp().listErr = ''; renderView(); },
+    ppsave: () => ppSave(),
+    ppaddunit: () => { const st = pp(); if (st.draft.units.length >= PPK.unitsMax) return toast(`At most ${PPK.unitsMax} unit types.`, true); st.draft.units.push({ type: '', bedrooms: '', sizeSqm: '', priceFrom: '', availability: 'Available', notes: '', media: '' }); st.dirty = true; renderView(); },
+    ppdelunit: (el) => { const st = pp(); st.draft.units.splice(+el.dataset.i, 1); st.dirty = true; renderView(); },
+    ppcover: (el) => { const st = pp(); st.draft.cover = st.draft.cover === el.dataset.id ? '' : el.dataset.id; st.dirty = true; renderView(); },
+    ppdelmedia: async (el) => {
+      const st = pp(), m = st.proj.media.find((x) => x.id === el.dataset.id); if (!m || !confirm(`Remove ${m.name}? It is deleted from the portal (not from Drive).`)) return;
+      try { ppMergeMedia((await API.del(`/api/projects/${st.proj.id}/media/${m.id}`)).project); toast('File removed.'); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      renderView();
+    },
+    ppdrive: () => ppDriveFiles(),
+    ppimport: async () => {
+      const ids = $$('#modal .ppdf:checked').map((x) => x.value); if (!ids.length) return toast('Tick the files to add.', true); if (ids.length > 20) return toast('At most 20 at a time.', true);
+      const st = pp(); closeModal(); st.uploading = 'Copying from Drive…'; renderView();
+      try { const r = await API.post(`/api/projects/${st.proj.id}/drive/import`, { ids }); ppMergeMedia(r.project); toast(`${r.added.length} added${r.skipped.length ? ' · ' + r.skipped.length + ' not added (' + r.skipped.map((s) => s.name + ': ' + s.why).join('; ') + ')' : ''}.`, !!r.skipped.length && !r.added.length); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      st.uploading = ''; renderView();
+    },
+    ppbuild: async () => {
+      const st = pp(), link = (st.draft.driveLink || '').trim();
+      if (!SH.parseDriveLink(link)) return toast('Paste the project\'s Google Drive folder link first.', true);
+      st.building = true; renderView();
+      try { const r = await API.post(`/api/projects/${st.proj.id}/drive/build`, { link }); ppMergeMedia(r.project); Object.assign(st, { proposal: r.proposal, buildNote: r.note, buildResult: r }); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      st.building = false; renderView();
+    },
+    ppclearprop: () => { Object.assign(pp(), { proposal: null, buildNote: '', buildResult: null }); renderView(); },
+    ppapplyprop: () => {
+      const st = pp(); let n = 0;
+      (st.proposal || []).filter((x) => x.apply).forEach((x) => { st.draft[x.field] = ['highlights', 'amenities'].includes(x.field) ? x.value.join('\n') : x.field === 'units' ? x.value.map((u) => ({ ...u })) : x.value; n++; });
+      if (n) st.dirty = true; Object.assign(st, { proposal: null, buildNote: '', buildResult: null }); renderView();
+      toast(n ? `${n} field${n === 1 ? '' : 's'} filled in. Review them, then Save.` : 'Nothing was ticked.');
+    },
+    pppublish: async () => {
+      const st = pp(), p = st.proj, on = !p.published;
+      if (st.dirty) return toast('Save your changes first.', true);
+      if (!confirm(on ? `Publish ${p.name}? Anyone with the link can then see the page, its photos and brochures.` : `Unpublish ${p.name}? Its link and its images on other sites stop working.`)) return;
+      try { ppSet((await API.put(`/api/projects/${p.id}/publish`, { published: on })).project); toast(on ? 'Published.' : 'Unpublished.'); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      renderView();
+    },
+    ppembed: async () => {
+      const p = pp().proj; let r; try { r = await API.get(`/api/projects/${p.id}/embed`); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; }
+      try { await copyText(r.html); toast('HTML copied. Paste it into a WordPress Custom HTML block.' + (r.warnings.length ? ' Note: ' + r.warnings.join(' ') : ''), !!r.warnings.length); } catch (e) { toast('Copy was blocked by the browser.', true); }
+    },
+    ppcopylink: async (el) => { try { await copyText(el.dataset.v); toast('Link copied.'); } catch (e) { toast('Copy was blocked by the browser.', true); } },
+    ppdelete: async () => {
+      const st = pp(), p = st.proj; if (!confirm(`Remove ${p.name}? Its page, units and uploaded files are deleted from the portal. This can't be undone.`)) return;
+      try { await API.del('/api/projects/' + p.id); Object.assign(st, { sel: '', proj: null, draft: null, dirty: false, list: (st.list || []).filter((x) => x.id !== p.id) }); toast('Project removed.'); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      renderView();
+    },
+  });
+  Object.assign(CH_PP, {
+    ppfiles: (el) => { const f = el.files; ppUpload(f).then(() => { el.value = ''; }); },
+    pppropck: (el) => { const x = (pp().proposal || [])[+el.dataset.i]; if (x) x.apply = el.checked; },
+    pphook: async (el) => {
+      const v = el.value.trim();
+      if (!SH.validHook(v)) return toast('The form endpoint must be the Apps Script /exec link (script.google.com/macros/s/…/exec).', true);
+      try { pp().hook = (await API.put('/api/project-settings', { inquiryHook: v })).inquiryHook; toast(v ? 'Form endpoint saved.' : 'Form endpoint cleared: pages show no inquiry form.'); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      renderView();
+    },
+  });
+  /** Typing in the project form: updates the draft only (no redraw, so focus and caret stay). */
+  function ppField(el) {
+    const st = pp(); if (!st.draft || !ppEdit()) return;
+    if (el.dataset.pp) st.draft[el.dataset.pp] = el.value;
+    else if (el.dataset.ppu != null) st.draft.units[+el.dataset.ppu][el.dataset.k] = el.value;
+    else if (el.dataset.ppm) { const m = st.draft.media.find((x) => x.id === el.dataset.ppm); if (m) m[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value; }
+    st.dirty = true;
+    const s = $('[data-act="ppsave"]'); if (s) s.disabled = false;
+  }
+
+  // ---------- Upselling (server: src/upsell.js; sends through respond.io only after the operator confirms) ----------
+  const UPS = SH.UPSELL;
+  const up = () => (S.up = S.up || { picked: new Set() });
+  const upEdit = () => access('upsell') === 'edit';
+  async function upLoad() {
+    const st = up(); st.loading = true; st.err = '';
+    try { const [m, l] = await Promise.all([API.get('/api/upsell/meta'), API.get('/api/upsell/campaigns')]); st.meta = m; st.list = l.campaigns; if (!st.sel && st.list[0]) upOpen(st.list[0].id); }
+    catch (e) { if (signedOut(e)) return; st.err = e.message; }
+    st.loading = false; if (S.view === 'upsell') renderView();
+  }
+  async function upOpen(id) {
+    const st = up(); if (st.dirty && !confirm('Discard your unsaved changes to this offer?')) return;
+    Object.assign(st, { sel: id, camp: null, draft: null, aud: null, results: null, dirty: false, picked: new Set(), audErr: '', saveErr: '' }); renderView();
+    try { st.camp = (await API.get('/api/upsell/campaigns/' + id)).campaign; st.draft = JSON.parse(JSON.stringify(st.camp)); } catch (e) { if (signedOut(e)) return; st.err = e.message; }
+    renderView(); upAudience(); upResults();
+  }
+  async function upAudience() {
+    const st = up(); if (!st.sel) return; st.audLoading = true; st.audErr = ''; renderView();
+    try { st.aud = await API.get(`/api/upsell/campaigns/${st.sel}/audience`); } catch (e) { if (signedOut(e)) return; st.audErr = e.message; st.aud = null; }
+    st.audLoading = false; renderView();
+  }
+  async function upResults() { const st = up(); try { st.results = (await API.get(`/api/upsell/campaigns/${st.sel}/results`)).results; } catch (e) { if (signedOut(e)) return; } if (S.view === 'upsell') renderView(); }
+  /** Saves the draft; the audience is worked out again on the server afterwards (nothing is sent). */
+  async function upSave() {
+    const st = up(), d = st.draft;
+    const body = { version: st.camp.version, name: d.name, template: d.template, projectId: d.projectId || '', text: d.text, tag: d.tag, audience: d.audience };
+    const { errors } = SH.validateCampaign(body, { projectIds: (st.meta.projects || []).map((p) => p.id) });
+    if (errors.length) { st.saveErr = errors[0]; return renderView(); }
+    st.saving = true; st.saveErr = ''; renderView();
+    try { st.camp = (await API.put('/api/upsell/campaigns/' + st.sel, body)).campaign; st.draft = JSON.parse(JSON.stringify(st.camp)); st.dirty = false; toast('Offer saved. Nothing was sent.'); }
+    catch (e) { if (signedOut(e)) return; st.saveErr = 'Not saved: ' + e.message; }
+    st.saving = false; renderView(); upAudience();
+  }
+  function upsellView() {
+    const st = up();
+    if (!st.meta && !st.loading && !st.err) setTimeout(upLoad, 0);
+    if (st.err) return `<div class="src-err" role="alert">${esc(st.err)} <button class="btn sm" data-act="upreload">Try again</button></div>`;
+    if (!st.meta) return '<div class="empty" role="status">Loading Upselling…</div>';
+    const m = st.meta, edit = upEdit();
+    const head = `<div class="panel"><h3>Upselling <span class="muted">offers to clients · 1:1 through respond.io or a respond.io broadcast tag</span><span class="spacer"></span>
+        <select data-ch="upsel" aria-label="Offer">${(st.list || []).map((c) => `<option value="${esc(c.id)}" ${c.id === st.sel ? 'selected' : ''}>${esc(c.name)}${c.counts['message:sent'] ? ' · ' + c.counts['message:sent'] + ' sent' : ''}</option>`).join('') || '<option value="">No offers yet</option>'}</select>
+        ${edit ? '<button class="btn sm primary" data-act="upnew">+ New offer</button>' : ''}</h3>
+        ${m.sendsNote ? `<div class="pad"><div class="src-note stale" role="status">${esc(m.sendsNote)}</div></div>` : `<div class="pad sub">Sending is on: messages go to real clients, only after you review the recipients and confirm.</div>`}</div>`;
+    if (!st.sel) return head + `<div class="empty">${edit ? 'Create an offer to start. Nothing is sent until you review and confirm.' : 'No offers yet.'}</div>`;
+    const d = st.draft; if (!d) return head + '<div class="empty" role="status">Loading the offer…</div>';
+    const a = d.audience, dis = edit ? '' : 'disabled', aud = st.aud;
+    const statuses = (aud && aud.statuses) || [];
+    const audPanel = `<div class="panel"><h3>1 · Audience <span class="muted">${aud ? `${aud.counts.audience} client${aud.counts.audience === 1 ? '' : 's'} · ${aud.counts.respond} on respond.io · ${aud.counts.email} with email · ${aud.counts.phone} with phone · ${aud.optedOut} opted out (never contacted)` : ''}</span>
+        <span class="spacer"></span><button class="btn sm" data-act="upaud">Refresh</button></h3><div class="pad up-filters">
+        <label>Who<select data-up="preset" ${dis}>${UPS.presets.map((p) => `<option value="${p}" ${a.preset === p ? 'selected' : ''}>${esc(UPS.presetLabels[p])}</option>`).join('')}</select></label>
+        <label>Rent / Sale<select data-up="type" ${dis}><option value="">Any</option><option ${a.type === 'Rent' ? 'selected' : ''}>Rent</option><option value="Buy" ${a.type === 'Buy' ? 'selected' : ''}>Sale</option></select></label>
+        <label>City<input data-up="city" value="${esc(a.city)}" maxlength="60" ${dis}></label>
+        <label>Contact<select data-up="contact" ${dis}>${UPS.contacts.map((c) => `<option value="${c}" ${a.contact === c ? 'selected' : ''}>${esc(UPS.contactLabels[c])}</option>`).join('')}</select></label>
+        <label>Skip if offered in the last<span class="up-days"><input type="number" data-up="skipDays" min="0" max="365" value="${esc(a.skipDays)}" ${dis}> days</span></label>
+        ${statuses.length ? `<div class="full up-st"><span class="sub">Client Status:</span> ${statuses.map((s) => `<label class="tagck"><input type="checkbox" data-upst="${esc(s)}" ${a.statuses.includes(s) ? 'checked' : ''} ${dis}> ${esc(s)}</label>`).join('')}</div>` : ''}</div></div>`;
+    const tpl = m.templates.concat([{ k: 'project', label: 'Developer project (from Project Pages)' }]);
+    const offer = `<div class="panel"><h3>2 · Offer <span class="spacer"></span>${edit ? `<button class="btn sm primary" data-act="upsave" ${st.saving || !st.dirty ? 'disabled' : ''}>${st.saving ? 'Saving…' : 'Save draft'}</button>` : ''}</h3><div class="pad">
+        ${st.saveErr ? `<div class="src-err" role="alert">${esc(st.saveErr)}</div>` : ''}${st.dirty ? '<div class="sub" role="status"><b>Unsaved changes</b> (the audience and send use the saved offer).</div>' : ''}
+        <div class="grid"><label>Offer name<input data-up="name" value="${esc(d.name)}" maxlength="80" ${dis}></label>
+          <label>Start from<select data-up="template" ${dis}>${tpl.map((t) => `<option value="${t.k}" ${d.template === t.k ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label>
+          ${d.template === 'project' ? `<label>Project<select data-up="projectId" ${dis}><option value="">Pick a project</option>${(m.projects || []).map((p) => `<option value="${esc(p.id)}" ${d.projectId === p.id ? 'selected' : ''}>${esc(p.name + (p.developer ? ' · ' + p.developer : '') + (p.published ? '' : ' (not published)'))}</option>`).join('')}</select></label>
+            <div>${edit ? '<button class="btn sm" data-act="upprojtext">Use the project\'s details</button>' : ''}</div>` : ''}
+          <label class="full">Message <span class="muted">{firstName} = client's first name · {va} = your first name · add "Reply STOP to opt out"</span><textarea data-up="text" rows="9" maxlength="${UPS.textMax}" ${dis}>${esc(d.text)}</textarea></label>
+          <label>respond.io tag (for a broadcast)<input data-up="tag" value="${esc(d.tag)}" maxlength="40" ${dis}></label></div>
+        <div class="up-img">${st.camp.image ? `<img src="${esc(API.url('/api/upsell/campaigns/' + st.sel + '/image'))}" alt="Offer image"><span class="sub">${esc(st.camp.image.name)} · sent before the text</span>${edit ? '<button class="btn sm danger" data-act="upimgdel">Remove image</button>' : ''}`
+          : edit ? `<label class="btn sm">Add an image<input type="file" data-ch="upimg" accept="image/jpeg,image/png,image/webp,image/gif" hidden></label><span class="sub">JPEG, PNG, WebP or GIF, 5 MB at most. Sent first, then the text.</span>` : ''}</div></div></div>`;
+    // the next batches as the server works them out (one respond.io contact once; opted-out clients never)
+    const bn = (k) => (aud && aud.batches ? aud.batches[k].ids.length : 0);
+    const send = `<div class="panel"><h3>3 · Send</h3><div class="pad up-send">
+        ${edit ? `<button class="btn primary" data-act="upreview" data-v="message" ${m.sends && !st.dirty && bn('message') ? '' : 'disabled'}>Review &amp; send 1:1 (next ${bn('message')})</button>
+          <button class="btn" data-act="upreview" data-v="tag" ${m.sends && !st.dirty && bn('tag') && d.tag ? '' : 'disabled'}>Review &amp; tag ${bn('tag')} in respond.io</button>
+          ${bn('retry') ? `<button class="btn" data-act="upreview" data-v="retry" ${m.sends && !st.dirty ? '' : 'disabled'}>Review &amp; retry ${bn('retry')} failed</button>` : ''}` : ''}
+        <a class="btn" href="${esc(API.url('/api/upsell/campaigns/' + st.sel + '/csv'))}">Export for email (CSV)</a>
+        ${edit && st.picked.size ? `<button class="btn" data-act="upoptout" data-v="1">Mark ${st.picked.size} opted out</button>` : ''}
+        <div class="sub full">1:1 sends go only to clients on respond.io who haven't had this offer, at most ${UPS.batchMax} per batch, ${UPS.gapMs} ms apart. WhatsApp only allows free text within 24 hours of the client's last message; for the rest, tag them and send an approved template broadcast from respond.io.</div></div></div>`;
+    const res = (st.results || []), resById = new Map(res.filter((x) => x.action === 'message').map((x) => [x.id, x]));
+    const pill2 = (s) => (s === 'sent' ? pill('Sent', 'var(--ok)') : s === 'failed' ? pill('Failed', 'var(--danger)') : s === 'sending' ? pill('Unknown — check the chat', 'var(--warn)') : '<span class="muted">—</span>');
+    const table = `<div class="panel"><h3>Recipients <span class="muted">${aud ? aud.recipients.length : 0}</span></h3>
+      ${st.audErr ? `<div class="pad"><div class="src-err" role="alert">${esc(st.audErr)}</div></div>` : st.audLoading && !aud ? '<div class="empty" role="status">Working out the audience…</div>' : !aud || !aud.recipients.length ? '<div class="empty">No clients match this audience.</div>'
+        : `<div class="scroll-x"><table class="t up-t"><thead><tr>${edit ? '<th><span class="sr">Pick</span></th>' : ''}<th>Client</th><th>Status</th><th>Rent/Sale</th><th>City</th><th>Email</th><th>Phone</th><th>respond.io</th><th>Tenant</th><th>Last offer</th><th>This offer</th></tr></thead><tbody>
+        ${aud.recipients.slice(0, 300).map((x) => { const r = resById.get(x.id); return `<tr>${edit ? `<td><input type="checkbox" data-ch="uppick" value="${esc(x.id)}" ${st.picked.has(x.id) ? 'checked' : ''} aria-label="Pick ${esc(x.name)}"></td>` : ''}<td><b>${esc(x.name)}</b></td><td>${esc(x.status)}</td><td>${esc(x.type === 'Buy' ? 'Sale' : x.type)}</td><td>${esc(x.city)}</td>
+          <td>${esc(x.email)}</td><td>${esc(x.phone)}</td><td>${x.onRespond ? '✓' : '<span class="muted">—</span>'}</td><td>${x.tenant ? '✓' : ''}</td><td>${x.lastOffer ? esc(fmtDate(x.lastOffer)) : '—'}</td>
+          <td>${pill2(x.message)}${x.tag === 'sent' ? ' ' + pill('Tagged', 'var(--accent)') : ''}${r && r.error ? `<div class="sub">${esc(r.error)}</div>` : ''}</td></tr>`; }).join('')}</tbody></table></div>${aud.recipients.length > 300 ? '<div class="sub pad">Showing the first 300.</div>' : ''}`}</div>`;
+    // every send attempt of this offer, newest first (also clients no longer in the audience)
+    const resPanel = res.length ? `<div class="panel"><h3>Results <span class="muted">${res.filter((x) => x.status === 'sent').length} sent · ${res.filter((x) => x.status === 'failed').length} failed${res.some((x) => x.status === 'sending') ? ' · ' + res.filter((x) => x.status === 'sending').length + ' unknown' : ''}</span></h3>
+      <div class="scroll-x"><table class="t up-res"><thead><tr><th>Client</th><th>What</th><th>Result</th><th>When</th><th>By</th><th>Tries</th></tr></thead><tbody>${res.slice(0, 300).map((x) => `<tr><td>${esc(x.name || x.id)}</td><td>${x.action === 'tag' ? 'Tag' : 'Message'}</td>
+        <td>${pill2(x.status)}${x.error ? `<div class="sub">${esc(x.error)}</div>` : ''}${x.status === 'sending' && edit ? `<div class="pp-mrow"><button class="btn sm" data-act="upresolve" data-id="${esc(x.id)}" data-a="${esc(x.action)}" data-v="sent">It was ${x.action === 'tag' ? 'tagged' : 'sent'}</button><button class="btn sm" data-act="upresolve" data-id="${esc(x.id)}" data-a="${esc(x.action)}" data-v="failed">Not ${x.action === 'tag' ? 'tagged' : 'sent'} (allow retry)</button></div>` : ''}</td>
+        <td>${esc(fmtDate(x.at))}</td><td>${esc(x.by || '')}</td><td class="num">${esc(x.attempts || 1)}</td></tr>`).join('')}</tbody></table></div>
+      ${res.some((x) => x.status === 'sending') ? '<div class="sub pad">"Unknown": respond.io may or may not have delivered it (a timeout, network or server error, or the server stopped). Check the client\'s chat in respond.io and mark it; these are never retried automatically.</div>' : ''}</div>` : '';
+    const optPanel = aud && aud.opted && aud.opted.length ? `<div class="panel"><h3>Opted out <span class="muted">${aud.opted.length} · never contacted</span></h3><div class="pad up-list">${aud.opted.map((x) => `<span>${esc(x.name)}${x.self && edit ? ` <button class="btn sm ghost" data-act="upundoopt" data-id="${esc(x.id)}" aria-label="Undo opt-out for ${esc(x.name)}">Undo</button>` : x.self ? '' : ' <span class="muted">(same respond.io contact)</span>'}</span>`).join('')}</div></div>` : '';
+    return head + audPanel + offer + send + table + resPanel + optPanel;
+  }
+  /** The review before a real send: the batch, a rendered example, the image; sends only after the tick and the button. */
+  async function upReview(kind) {
+    const st = up();
+    let aud; try { aud = st.aud = await API.get(`/api/upsell/campaigns/${st.sel}/audience`); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; }
+    const action = kind === 'tag' ? 'tag' : 'message', retry = kind === 'retry', bt = aud.batches[kind];
+    const batch = bt.ids.map((id, i) => ({ id, name: bt.names[i] }));   // exactly the batch the server would send
+    if (!batch.length) { renderView(); return toast('Nobody left to ' + (action === 'tag' ? 'tag.' : 'send to.')); }
+    let pv = null; if (action === 'message') { try { pv = await API.get(`/api/upsell/campaigns/${st.sel}/preview?lead=${encodeURIComponent(batch[0].id)}`); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; } }
+    st.pending = { action, retry, hash: bt.hash };
+    S.modal = { kind: 'upsend' };
+    openModal(`<h3 id="modalTitle">${action === 'tag' ? `Tag ${batch.length} client${batch.length === 1 ? '' : 's'} “${esc(st.camp.tag)}” in respond.io` : `${retry ? 'Retry' : 'Send'} to ${batch.length} client${batch.length === 1 ? '' : 's'}`}</h3>
+      <div class="src-note stale">${action === 'tag' ? 'This adds a tag to these contacts in respond.io. Nothing is sent to them.' : 'This sends real messages to these clients through respond.io (their last-used channel). It can\'t be undone.'}</div>
+      ${pv ? `<div class="up-pv">${pv.image ? `<img src="${esc(API.url(pv.image))}" alt="Offer image">` : ''}<div class="sub">Example for ${esc(pv.to)}:</div><pre class="report">${esc(pv.text)}</pre></div>` : ''}
+      <div class="sub">Recipients (${batch.length}${aud.recipients.length > batch.length ? ` of ${aud.recipients.filter((x) => x.onRespond).length} on respond.io` : ''}):</div>
+      <div class="up-list">${batch.map((x) => `<span>${esc(x.name)}</span>`).join('')}</div>
+      <label class="tagck"><input type="checkbox" id="upConfirm"> I've reviewed the ${action === 'tag' ? 'list' : 'message and the recipients'}</label>
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="button" class="btn primary" data-act="upgo" id="upGo" disabled>${action === 'tag' ? 'Tag' : retry ? 'Retry' : 'Send'} to ${batch.length}</button></div>`);
+    const c = $('#upConfirm'); if (c) c.addEventListener('change', () => { $('#upGo').disabled = !c.checked; });
+  }
+  async function upGo() {
+    const st = up(), p = st.pending; if (!p || !$('#upConfirm') || !$('#upConfirm').checked || st.sending) return;
+    st.sending = true; $('#upGo').disabled = true; $('#upGo').textContent = p.action === 'tag' ? 'Tagging…' : 'Sending…';
+    let r;
+    try { r = await API.post(`/api/upsell/campaigns/${st.sel}/send`, { confirm: true, hash: p.hash, action: p.action, ...(p.retry ? { retry: true } : {}) }); }
+    catch (e) { st.sending = false; if (signedOut(e)) return; closeModal(); toast(e.message, true); upAudience(); return; }
+    st.sending = false; st.pending = null; closeModal();
+    const n = (s) => r.results.filter((x) => x.status === s).length;
+    toast(`${p.action === 'tag' ? 'Tagged' : 'Sent'} ${n('sent')} · failed ${n('failed')} · skipped ${n('skipped')}${r.stopped ? ' · stopped: ' + r.stopped : ''}`, !!(n('failed') || r.stopped));
+    upAudience(); upResults(); upLoadList();
+  }
+  async function upLoadList() { try { up().list = (await API.get('/api/upsell/campaigns')).campaigns; } catch (e) { signedOut(e); } if (S.view === 'upsell') renderView(); }
+  function upField(el) {
+    const st = up(); if (!st.draft || !upEdit()) return;
+    const k = el.dataset.up, d = st.draft;
+    if (['preset', 'type', 'city', 'contact', 'skipDays'].includes(k)) d.audience[k] = k === 'skipDays' ? Number(el.value) || 0 : el.value; else d[k] = el.value;
+    st.dirty = true;
+    if (el.tagName === 'SELECT') {
+      if (k === 'template' && el.value !== 'project') { const t = st.meta.templates.find((x) => x.k === el.value); if (t && (!d.text.trim() || confirm('Replace the message with the "' + t.label + '" text?'))) d.text = t.text; }
+      renderView();
+    } else { const s = $('[data-act="upsave"]'); if (s) s.disabled = false; }
+  }
+  Object.assign(ACT_PP, {
+    upreload: () => { Object.assign(up(), { meta: null, err: '' }); renderView(); },
+    upnew: async () => {
+      const name = prompt('Name of the new offer:', 'Concierge ' + new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' })); if (!name) return;
+      try { const r = await API.post('/api/upsell/campaigns', { name: name.slice(0, 80) }); up().list = [{ id: r.campaign.id, name: r.campaign.name, counts: {} }].concat(up().list || []); upOpen(r.campaign.id); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    upsave: () => upSave(),
+    upaud: () => upAudience(),
+    upreview: (el) => upReview(el.dataset.v),
+    upgo: () => upGo(),
+    upprojtext: async () => {
+      const st = up(); if (!st.draft.projectId) return toast('Pick a project first.', true);
+      try { const r = await API.get('/api/upsell/project-text/' + st.draft.projectId); if (!st.draft.text.trim() || confirm('Replace the message with this project\'s details?')) { st.draft.text = r.text; st.dirty = true; renderView(); } if (!r.published) toast('That project isn\'t published, so the message has no page link.', true); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    upimgdel: async () => { if (!confirm('Remove the image?')) return; try { const r = await API.del(`/api/upsell/campaigns/${up().sel}/image`); up().camp = r.campaign; up().draft.version = r.campaign.version; renderView(); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); } },
+    upresolve: async (el) => {
+      if (!confirm(el.dataset.v === 'sent' ? 'Mark as sent? You checked the client\'s chat in respond.io and the message is there.' : 'Mark as not sent? It can then be retried.')) return;
+      try { await API.post(`/api/upsell/campaigns/${up().sel}/resolve`, { leadId: el.dataset.id, outcome: el.dataset.v, action: el.dataset.a === 'tag' ? 'tag' : 'message' }); toast('Updated.'); upResults(); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    upundoopt: async (el) => { try { await API.post('/api/upsell/optout', { ids: [el.dataset.id], on: false }); toast('Opt-out removed.'); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); } },
+    upoptout: async (el) => {
+      const st = up(), on = el.dataset.v === '1', ids = [...st.picked];
+      if (on && !confirm(`Mark ${ids.length} client${ids.length === 1 ? '' : 's'} as opted out? They are left out of every offer.`)) return;
+      try { await API.post('/api/upsell/optout', { ids, on }); st.picked = new Set(); toast(on ? 'Opted out.' : 'Opt-out removed.'); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+  });
+  Object.assign(CH_PP, {
+    upsel: (el) => upOpen(el.value),
+    uppick: (el) => { const s = up().picked; if (el.checked) s.add(el.value); else s.delete(el.value); renderView(); },
+    upimg: async (el) => {
+      const f = el.files && el.files[0]; if (!f) return; if (f.size > UPS.imageMax) { el.value = ''; return toast('Images can be 5 MB at most.', true); }
+      const st = up(); if (st.dirty) { el.value = ''; return toast('Save your changes first.', true); }
+      try { const r = await API.upload(`/api/upsell/campaigns/${st.sel}/image`, f); st.camp = r.campaign; st.draft = JSON.parse(JSON.stringify(r.campaign)); toast('Image added.'); renderView(); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      el.value = '';
+    },
+  });
 
   // ---------- Calendar ----------
   function calendarView() {
@@ -1287,7 +1903,7 @@
         <div class="card"><div class="n">${money(counted.reduce((a, l) => a + (l.budget || 0), 0)) || '₱0'}</div><div class="l">Counted lead value</div></div></div>
       <div class="sub" style="margin-bottom:12px">Minimum budget rule: rent below ₱200k/month or sale below ₱20M is not counted; unknown budgets are counted.</div>
       <div class="cols2">${table('By AI Status', AI_STAGES, (l) => l.ai)}${table('By source', LISTS.sources, (l) => l.source)}</div>
-      ${isManager() ? table('By VA', vaNames().concat(['']), (l) => l.va) : ''}
+      ${isManager() ? (() => { const names = vaNames(); return table('By VA', names.concat(['']), (l) => names.find((n) => SH.sameVa(n, l.va)) || (SH.vaKey(l.va) ? l.va : '')); })() : ''}
       ${closedDealsHtml()}`;
   }
   // client names, codes, phones, emails and free-text notes never go in broker-group messages: numeric lead IDs only (daily-report.js)
@@ -1393,7 +2009,8 @@
       <div class="pad sub">${mondayWritesOn() ? 'Monday updates are limited to listing Availability (Inventory edit access), four lead fields (Budget, Target Move-in Date, Inquiry Type, Nationality; Managers only), one confirmed field at a time, and a viewing\'s result in the Calendar (Calendar edit access: the Calendar item\'s Status, plus LOI Creation Date for an LOI). Still switched off: other Monday writes (AI STATUS, Client Status, subitems, new items, deleting), sending' : 'Switched off in this phase: Monday writes (AI STATUS, subitems, statuses, availability, new listings), sending'} respond.io messages or templates, creating contacts, webhooks and background jobs.
         Monday data is held in server memory for up to 5 minutes and is not saved to MongoDB.</div></div>`;
   }
-  const MOD_KEYS = VIEWS.map((v) => v[0]).filter((k) => !MOD_ALIAS[k]);
+  // Team & Access modules only: screens without a module setting (KPI Review, Review acknowledgment) are left out
+  const MOD_KEYS = VIEWS.map((v) => v[0]).filter((k) => !MOD_ALIAS[k] && SH.MODULES.includes(k));
   /** VA Assigned / Salesperson labels: from the Monday board when connected (mongo mode), else the preview's lists. */
   function loadTeamLabels() {
     if (DEMO || S.teamLabels || S.teamLabelsBusy) return;
@@ -1812,9 +2429,12 @@
     try { await fn(); return true; } catch (e) { if (!signedOut(e)) toast(e.message || 'Something went wrong.', true); return false; }
   }
   /** mongo mode: a 401 means the session ended, so go back to the sign-in screen. */
+  /** The Leads filters (and Project Pages state) belong to one sign-in: the next person in this tab starts with none. */
+  function resetLeadFilters() { Object.assign(S, { q: '', va: '', ai: [], temp: [], wait: '', type: '', from: '', list: null, pp: null, up: null }); }
   function signedOut(e) {
     if (DEMO || !e || e.status !== 401) return false;
-    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null;
+    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null;
+    resetLeadFilters();
     $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
     renderLogin('Your session ended. Please sign in again.');
     return true;
@@ -1829,6 +2449,12 @@
   async function loadAll() {
     const b = await API.get('/api/bootstrap');
     S.user = b.user;
+    // KPI Review rights for this member (decided by the server); the screen is hidden if they can't be read
+    // kept only for the same member (a Refresh keeps an unsaved review); anything loaded for another sign-in is dropped
+    const keep = S.kr && S.kr.uid === b.user.id ? S.kr : {};
+    S.kr = null;
+    try { S.kr = { ...keep, uid: b.user.id, me: await API.get('/api/kpi-review/me') }; } catch (e) { if (e.status === 401) throw e; S.kr = { uid: b.user.id, me: null }; }
+    if (S.kr.me && S.kr.me.signInAgain) setTimeout(() => toast('To open KPI Review, sign out and sign in again with your Google account.', true), 600);
     S.mongoRecords = { leads: b.leads, listings: b.listings, calendar: b.viewings };
     D = { leads: D.leads || [], listings: D.listings || [], calendar: D.calendar || [], users: b.users, templates: b.templates };
     if (S.source === 'mongo') useMongoRecords();
@@ -1844,6 +2470,9 @@
   async function openMondaySource(force) {
     Object.assign(D, { leads: [], listings: [], calendar: [] });
     S.srcErrors = {}; S.srcNotConfigured = []; S.srcFetchedAt = ''; S.chat = {}; S.list = null;
+    // the server reads Monday.com only for members with Leads access: without it there is nothing to load (no 403 error)
+    if (!mondayAllowed()) { S.srcBusy = false; S.srcNoAccess = true; render(); return false; }
+    S.srcNoAccess = false;
     S.srcBusy = true; S.srcProgress = null; render();
     watchFirstLoad();
     const ok = await loadMonday(force);
@@ -1884,6 +2513,7 @@
   }
   /** Live read-only Monday.com records for the existing screens. Errors are shown, never replaced with other data. */
   async function loadMonday(force) {
+    if (!mondayAllowed()) return false;
     S.srcBusy = true; renderModeBar();
     const token = S.srcToken;
     // a reply that arrives after the user switched to MongoDB (or signed out) is ignored, never mixed in
@@ -2058,6 +2688,15 @@
     invmore: () => { S.inv.limit = (S.inv.limit || 120) + 120; renderInventory(); },
     invcity: (el) => { S.inv.city = el.dataset.v; S.inv.limit = 120; renderView(); const g = $('#invGrid'); if (g) g.scrollIntoView({ behavior: 'smooth' }); },
     filterva: (el) => { if (!isManager()) return; S.view = 'leads'; S.va = el.dataset.v; S.wait = ''; savePrefs(); render(); },
+    // KPI Review (Toby and Jonjo) and the VA's own Review acknowledgment
+    krmode: (el) => { kr().mode = el.dataset.v; renderView(); },
+    krsave: () => krSave(),
+    krdiscussed: () => krDiscussed(),
+    krsnap: () => krSnapshot(),
+    krreload: () => { const st = kr(); if (st.empsErr || !st.emps) { st.emps = null; st.empsErr = ''; } else st.revTag = ''; renderView(); },
+    krsnapreload: () => { kr().snapTag = ''; renderView(); },
+    krack: (el) => krAck(el.dataset.p),
+    krackreload: () => { const st = kr(); st.acks = null; st.acksErr = ''; renderView(); },
     // Renewals (Monday Calendar leases): segment tiles, Message (compose / copy / "I sent it" log; nothing is sent)
     rnseg: (el) => { S.rnSeg = el.dataset.v; renderView(); },
     rnmsg: (el) => rnMsgModal(el.dataset.id),
@@ -2078,7 +2717,7 @@
       const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
       prefs.source = v; S.source = v; S.pend = null; S.deals = null; S.rnLog = null; savePrefs();
-      if (v === 'monday') { await openMondaySource(false); toast(mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
+      if (v === 'monday') { await openMondaySource(false); toast(S.srcNoAccess ? 'No Monday.com data for your account: it needs Leads access.' : mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
       S.srcBusy = false;
       if (!(await attempt(loadAll))) return;
       useMongoRecords(); S.list = null; render(); toast('Showing MongoDB records (chosen by hand; Monday.com stays the default until you switch back).');
@@ -2126,7 +2765,8 @@
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
       S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
-      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null;
+      resetLeadFilters();
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
     },
@@ -2206,6 +2846,9 @@
     rng: (el) => { S.rng = { ...(S.rng || {}), [el.dataset.k]: el.value }; renderView(); },
     rnseg: (el) => { S.rnSeg = el.value; renderView(); },
     rnva: (el) => { S.rnVa = el.value; renderView(); },
+    kremp: (el) => { const st = kr(); if (Object.keys(st.draft || {}).length && !confirm('Discard your unsaved review?')) { el.value = st.sel; return; } st.sel = el.value; st.draft = {}; renderView(); },
+    krperiod: (el) => { const st = kr(); if (Object.keys(st.draft || {}).length && !confirm('Discard your unsaved review?')) { el.value = krPeriod(); return; } st.period = el.value; st.draft = {}; renderView(); },
+    krackck: (el) => { const st = kr(); st.ackCk = { ...(st.ackCk || {}), [el.dataset.p]: el.checked }; },
     plcell: async (el) => {
       const { value, errors } = SH.validatePlCell({ line: el.dataset.line, month: el.dataset.m, value: el.value.trim() });
       if (errors.length) return toast(errors[0], true);
@@ -2239,6 +2882,7 @@
       renderInventory(); const again = $(`[data-ch="avail"][data-id="${CSS.escape(x.id)}"]`); if (again) again.focus();
     },
   };
+  Object.assign(ACT, ACT_PP); Object.assign(CH, CH_PP);
   // ---------- tablet/phone navigation drawer (the sidebar slides in below 900px) ----------
   const navIsDrawer = () => window.matchMedia('(max-width: 900px)').matches;
   function openNav() {
@@ -2264,6 +2908,9 @@
   document.addEventListener('change', (e) => {
     const el = e.target;
     if (el.dataset && el.dataset.ch && CH[el.dataset.ch]) return CH[el.dataset.ch](el);
+    if (el.dataset && (el.dataset.pp || el.dataset.ppu != null || el.dataset.ppm)) return ppField(el);
+    if (el.dataset && el.dataset.up) return upField(el);
+    if (el.dataset && el.dataset.upst != null && up().draft && upEdit()) { const s = up().draft.audience.statuses, v = el.dataset.upst; if (el.checked) { if (!s.includes(v)) s.push(v); } else s.splice(s.indexOf(v), 1); up().dirty = true; return renderView(); }
     if (el.dataset && el.dataset.field) onField(el);
   });
   document.addEventListener('toggle', (e) => { if (e.target.classList && e.target.classList.contains('pfbox')) S.pfOpen = e.target.open; }, true);
@@ -2281,6 +2928,10 @@
     else if (el.dataset.in === 'rnq') {   // Renewals search: redraw, then give the search box its focus and caret back
       clearTimeout(searchT); searchT = setTimeout(() => { S.rnQ = el.value; renderView(); const i = $('[data-in="rnq"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 250);
     }
+    else if (el.dataset.in === 'ppq') { clearTimeout(searchT); searchT = setTimeout(() => { pp().q = el.value; renderView(); const i = $('[data-in="ppq"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 200); }
+    else if (el.dataset.pp || el.dataset.ppu != null || el.dataset.ppm) ppField(el);
+    else if (el.dataset.up && el.tagName !== 'SELECT') upField(el);
+    else if (el.dataset.in === 'krtext') { const st = kr(); st.draft = { ...(st.draft || {}), [el.dataset.k]: el.value }; }
     else if (PF_IN[el.dataset.in]) { const k = PF_IN[el.dataset.in], v = el.value; clearTimeout(searchT); searchT = setTimeout(() => pfSet(k, v, true), 200); }
     else if (el.dataset.field) onField(el);
   });
@@ -2305,6 +2956,7 @@
       else if (f.dataset.submit === 'tpl') saveTpl();
       else if (f.dataset.submit === 'fail') saveFail();
       else if (f.dataset.submit === 'mw') mwSubmit();
+      else if (f.dataset.submit === 'ppnew') ppCreate();
     }
   });
 

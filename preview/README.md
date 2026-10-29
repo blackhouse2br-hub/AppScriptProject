@@ -13,8 +13,10 @@ It runs in one of two **explicit** modes:
 | If MongoDB is unreachable | n/a | The server refuses to start (or the API answers 503). It never falls back to demo data |
 | Monday.com / respond.io | Off (tokens are ignored) | **Read-only** (plus the allowlisted Monday updates when `MONDAY_WRITES=on`, see "Monday updates"), only when you set tokens in `.env`; otherwise "Not connected" |
 
-Nothing connects to Google Apps Script, Google Drive/Sign-in, Railway or GitHub. Monday.com and respond.io are
-read only in MongoDB mode, only after you add your own tokens, and nothing is ever written to them.
+The local preview connects to no outside service by default. Monday.com and respond.io are read only in MongoDB mode,
+only after you add your own tokens; the only writes are the opt-in allowlisted Monday updates (`MONDAY_WRITES=on`)
+and Upselling sends (`RESPOND_SENDS=on`), each confirmed. Google sign-in, read-only Google Drive and the AI reader
+for Project Pages are used only when their settings are present (DEPLOYMENT.md).
 
 ## Setup
 
@@ -139,6 +141,62 @@ are rate-limited per user (`MONDAY_WRITE_LIMIT`, default 10 per minute; the serv
 read from or sent to Monday; over the limit the reply is HTTP 429 with `Retry-After`. Everything else
 stays as before: notes, bookings, viewing status, Asking for Availability and Failed overrides are portal-only.
 
+## KPI Review (MongoDB mode; Toby and Jonjo only)
+
+Monthly coaching and feedback per VA, next to their VA Management KPIs (`src/kpiReview.js`; the KPI calculation is
+`vaWorkload` / `vaPerformance` in `public/shared.js`, the same one VA Management uses).
+
+| | |
+|---|---|
+| Who opens it | Only the accounts in `KPI_REVIEWER_TOBY_EMAIL` / `KPI_REVIEWER_JONJO_EMAIL` (active Team & Access members; on a Google server, signed in with that Google account). No Manager or admin exception; `blackhouse2br@gmail.com` can never be a reviewer. Every route is checked on the server |
+| Employees | Team & Access members with the VA role (employee ID = member ID). A Monday VA label without a member is listed on its own with its KPIs, but nothing can be saved for it until a Manager adds the member |
+| Comments | One record per VA, month and reviewer (`KpiFeedback`, unique index). Each reviewer edits only their own column; a `version` check stops one tab overwriting another. "Reviewer recorded discussion" is the reviewer's own note |
+| Acknowledgment | The VA, signed in as themselves, confirms "We discussed this review" on **Review acknowledgment** (`KpiAck`, once per month, read-only). They see which months have a review, never its text, KPIs or the reviewers' notes: go through the review with them in person. It confirms the discussion, not agreement |
+| Snapshots | **Create monthly snapshot** (reviewers only, by hand; no schedule). Copies every VA's name, KPI values and labels, both reviewers' comments and identities, and acknowledgment (`KpiSnapshot`, unique per month; write-once at model level). Never replaced |
+| Months | Reporting months in Asia/Manila; this month and up to 24 back. Timestamps stored in UTC, shown in Manila time |
+| Data | Live KPIs from Monday.com (read-only, server memory) when connected, else MongoDB. Nothing is written to Monday.com or respond.io |
+
+Tests: `node --test test/kpi-review.test.js` (API, access, concurrency, snapshots) and `node test/kpi-review-ui-check.js [outDir]`
+(headless Chrome/Edge at 1440 px and 390 px). `node test/kpi-review-ui-check.js [outDir] --serve=4180` then keeps a fresh
+test-data portal (fake Monday board, in-memory database, fictional accounts) running for review by hand.
+
+## Project Pages (MongoDB mode; module "pages")
+
+`src/projects.js`, `src/projectMedia.js`, `src/projectPage.js`. Works without Google Drive.
+
+- Projects grouped by developer and searchable; name and developer required. Details, highlights and amenities (one per
+  line), map location, YouTube link, live page link; units (type, BR, sqm, price, availability, one photo / floor plan, notes).
+- Uploads: JPEG / PNG / WebP / GIF up to 10 MB and PDF up to 25 MB, checked by their first bytes (no SVG / HTML), kept in
+  MongoDB GridFS (bucket `projectMedia`), so they survive restarts and redeploys. Each file is a photo, floor plan,
+  brochure or other; it can be left off the page; one image is the cover. Served with `nosniff` and a sandbox CSP.
+- Preview (signed in), **Copy HTML for WordPress** (as the original), and **Publish**: the page at `/p/<slug>` and its media
+  become public; unpublished or unknown → 404. Pages have their own CSP (own script only; YouTube and Maps embeds).
+- Inquiry form: only when a **form endpoint** is set (the Apps Script public `/exec` link, validated). It posts there in
+  the original's format; that existing path files Website Inquiries. The portal itself writes nothing to Monday.
+- Optional Drive (`GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`, read-only service account; DEPLOYMENT.md): **Add from Drive**
+  (pick files from a shared folder) and **Build from Google Drive** (adds the folder's photos / floor plans / brochures,
+  reads Docs / Sheets / Slides / PDFs with Claude when `ANTHROPIC_API_KEY` is set, and shows a review: empty fields
+  ticked, filled ones only offered; nothing is saved until Save). Word files are not read. "Find info online" is not built.
+- View access reads and previews; edit access changes, uploads, publishes and uses Drive.
+
+## Upselling (MongoDB mode; module "upsell")
+
+`src/upsell.js`; respond.io sends in `src/integrations/respondio.js` (`createRespondSender`).
+
+- **Audience** worked out on the server from the clients the member may see: Tenants / Active / Past / Everyone, client
+  status, Rent / Sale, city, contact (respond.io / email / phone), skip if offered (by another offer) in the last N days;
+  opted-out clients are always left out.
+- **Offer**: starts from the Concierge text or a Services template of Renewals → Message, or a Project Pages project;
+  `{firstName}`, `{va}`, `{building}`; an optional image (≤5 MB, kept in MongoDB; respond.io fetches it from an
+  unguessable `/upsell-media/<token>` link); a respond.io tag for broadcasts.
+- **Send** (needs `RESPOND_SENDS=on`): **Review** shows the batch (≤40), a rendered example and the image, and sends only
+  after "I've reviewed" is ticked and confirmed. The server checks that the recipients and message are still the ones
+  reviewed, writes one record per client before sending (a unique index: no client gets an offer twice), sends the image
+  then the text 700 ms apart, records sent / failed with the reason, and stops on a rejected token or rate limit. Retry
+  re-sends failures only; an interrupted send is shown as "unknown" and never retried automatically.
+- Tagging, opt-outs (staff-marked, never contacted) and **Export for email (CSV)** as in the original. Bulk email and
+  the email mailer are not sent from the portal.
+
 ## Scripts
 
 | Script | What it does |
@@ -165,7 +223,9 @@ stays as before: notes, bookings, viewing status, Asking for Availability and Fa
 | Properties tab: the VA's own search (city, bedrooms, rent/sale, price, furnishing, pets, keyword, "ignore the client's requirements") | Working | Working |
 | Asking for Availability: units being checked with owners (one per lead + listing, up to 60 per lead), owner Call / WhatsApp / Viber links that open only when tapped (taps logged, newest 20), owner confirmed / not available. Nothing is sent and nothing goes to Monday or respond.io | This browser | MongoDB (`AvailabilityRequest`), for Monday and MongoDB leads |
 | Mark as Failed: a **portal override** with a reason, **Managers only** (set and remove; enforced by the server), labelled "Portal override" wherever AI Status shows; Monday's Client Status / AI STATUS are not changed | This browser | MongoDB (`LeadOverride`) |
-| For Client Approval, LOI / Contract / Collection / Active / For Renewal, Upselling, Service Requests, Project Pages, P&L, Files, Monday Sync | Placeholder | Placeholder |
+| For Client Approval, LOI / Contract / Collection / Active / For Renewal, Service Requests, Files, Monday Sync | Placeholder | Placeholder |
+| Project Pages: projects by developer, details, units, uploads (MongoDB), preview, WordPress HTML, published page `/p/<slug>`, optional read-only Drive + Build from Drive | n/a | Working (see "Project Pages") |
+| Upselling: audience, offers from Renewals → Message / Concierge / Project Pages, image, reviewed 1:1 sends and tags through respond.io, opt-outs, CSV | n/a | Working; sending only with `RESPOND_SENDS=on` (see "Upselling") |
 | Google sign-in | n/a | Built for the hosted server (DEPLOYMENT.md); the local preview keeps email and password |
 | Monday writes, respond.io messaging, Drive files, e-signatures, webhooks, scheduled jobs | Not connected | Not connected |
 
@@ -203,6 +263,7 @@ src/models.js        Lead, Listing, Viewing, Note, User, Template, Session
 src/auth.js          scrypt password hashing, MongoDB sessions (HttpOnly, SameSite=Strict cookie), sign-in throttle
 src/api.js           explicit API routes with module-access and lead-visibility checks
 src/access.js        module access + lead visibility (MongoDB records and Monday records)
+src/kpiReview.js     KPI Review routes: reviewer-only access, comments, acknowledgment, monthly snapshots
 src/integrations/    Monday.com (monday.js; reads + the guarded write in mondayWrite.js) and read-only respond.io (respondio.js) clients, status, routes
 src/app.js           Express app: security headers, /config.js, /healthz, static files
 public/shared.js     picklists, access rules, validation shared by browser and server

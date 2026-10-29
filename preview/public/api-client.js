@@ -19,13 +19,14 @@
     if (!/^\/api\/[A-Za-z0-9/_-]+(\?[A-Za-z0-9=&_-]*)?$/.test(path)) throw new Error('Only /api/ calls are allowed.');
     return BASE + path;
   };
-  async function request(method, path, body) {
+  async function request(method, path, body, file) {
     let res;
     try {
       res = await fetch(url(path), {
         method, credentials: BASE ? 'include' : 'same-origin', cache: 'no-store', mode: BASE ? 'cors' : 'same-origin',
-        headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        // a file is sent as is (the server checks what it really is); everything else is JSON
+        headers: file ? { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name || 'file') } : body !== undefined ? { 'Content-Type': 'application/json' } : {},
+        body: file || (body !== undefined ? JSON.stringify(body) : undefined),
       });
     } catch (e) { throw new Error(BASE ? 'Could not reach the portal API. Check your connection, or try again in a minute.' : 'Could not reach the local server. Is it still running?'); }
     let data = null;
@@ -42,5 +43,7 @@
     patch: (u, b) => request('PATCH', u, b),
     put: (u, b) => request('PUT', u, b),
     del: (u) => request('DELETE', u),
+    /** Uploads one File (Project Pages media). */
+    upload: (u, file) => request('POST', u, undefined, file),
   };
 })();

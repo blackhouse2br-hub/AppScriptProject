@@ -2,7 +2,7 @@
 // MongoDB models for the records the preview screens use. Monday.com remains the source for live leads;
 // these collections hold app-owned data now and an imported snapshot later (see the migration notes in README).
 const mongoose = require('mongoose');
-const { LISTS, AI_STAGES, TEMPS, ROLES, RESULT } = require('../public/shared');
+const { LISTS, AI_STAGES, TEMPS, ROLES, RESULT, KPI_REVIEW: SH_KPI } = require('../public/shared');
 
 const { Schema } = mongoose;
 const ObjectId = Schema.Types.ObjectId;
@@ -105,6 +105,7 @@ const User = mongoose.model('User', new Schema({
   passwordHash: { type: String, select: false },
   // Google account ID, linked on the first Google sign-in; later sign-ins must come from that same account
   googleSub: { type: String, select: false, index: { unique: true, sparse: true } },
+  googleLinkedAt: { type: Date, default: null },   // when that Google account was linked (shown with KPI acknowledgments)
   active: { type: Boolean, default: true },
 }, { ...opts, minimize: false }));
 
@@ -118,6 +119,7 @@ const Session = mongoose.model('Session', new Schema({
   tokenHash: { type: String, required: true, unique: true },
   userId: { type: ObjectId, ref: 'User', required: true, index: true },
   expiresAt: { type: Date, required: true, expires: 0 },   // TTL index: MongoDB deletes expired sessions
+  subHash: { type: String, default: '' },   // hash of the Google account that started this session ('' = password sign-in)
 }, { timestamps: true }));
 
 // one Google sign-in attempt (10 minutes): state, PKCE verifier and nonce, bound to the browser that started it
@@ -207,4 +209,115 @@ const PlCell = mongoose.model('PlCell', new Schema({
   by,
 }, opts).index({ line: 1, month: 1 }, { unique: true }));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell };
+// ---- KPI Review (src/kpiReview.js): coaching + feedback per VA (a Team & Access member) and reporting month ----
+const KPI_KEYS = SH_KPI.reviewers.map((r) => r.key);
+const person = { userId: { type: ObjectId, ref: 'User', required: true }, name: { type: String, default: '', maxlength: 80 }, email: { type: String, default: '', maxlength: 120 } };
+const personOpt = new Schema({ userId: { type: ObjectId, ref: 'User' }, name: { type: String, default: '', maxlength: 80 } }, { _id: false });
+/** Refuses every change to an existing document of this schema: such records are written once and then only read. */
+function writeOnce(schema, what) {
+  const refuse = () => { const e = new Error(what + ' is read-only once saved.'); e.readOnly = true; throw e; };
+  ['updateOne', 'updateMany', 'findOneAndUpdate', 'findOneAndReplace', 'replaceOne', 'findOneAndDelete', 'deleteOne', 'deleteMany', 'bulkWrite'].forEach((op) => schema.pre(op, refuse));
+  schema.pre('save', function () { if (!this.isNew) refuse(); });
+  return schema;
+}
+// one record per VA, month and reviewer slot (Toby / Jonjo): saving one reviewer's comments never touches the other's.
+// `version` guards against two saves from the same reviewer in different tabs or devices overwriting each other.
+const KpiFeedback = mongoose.model('KpiFeedback', new Schema({
+  employeeId: { type: ObjectId, ref: 'User', required: true },
+  period: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
+  reviewerKey: { type: String, enum: KPI_KEYS, required: true },
+  coaching: { type: String, default: '', maxlength: SH_KPI.textMax },
+  feedback: { type: String, default: '', maxlength: SH_KPI.textMax },
+  author: { type: new Schema(person, { _id: false }), required: true },   // who saved the current text
+  createdBy: { type: new Schema(person, { _id: false }), required: true },
+  // "Reviewer recorded discussion": the reviewer's own note that they went through it with the employee (not employee verification)
+  discussedAt: { type: Date, default: null }, discussedBy: { type: personOpt, default: null },
+  discussedVersion: { type: Number, default: 0 },   // the version of the text the discussion record covers
+  version: { type: Number, default: 1, min: 1 },
+}, opts).index({ employeeId: 1, period: 1, reviewerKey: 1 }, { unique: true }));
+// the employee's own "We discussed this review", made while signed in as that employee; one per VA and month, never changed
+const KpiAck = mongoose.model('KpiAck', writeOnce(new Schema({
+  employeeId: { type: ObjectId, ref: 'User', required: true },
+  period: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
+  by: { type: new Schema(person, { _id: false }), required: true },
+  googleLinkedAt: { type: Date, default: null },   // when the acknowledging account's Google sign-in was linked to the member
+  reviewVersions: { type: Schema.Types.Mixed, default: {} },   // { toby: n, jonjo: n }: the review text versions acknowledged
+}, { timestamps: { createdAt: true, updatedAt: false }, toJSON, minimize: false }).index({ employeeId: 1, period: 1 }, { unique: true }), 'An acknowledgment'));
+// a manual monthly snapshot: copies (not references) of names, KPI values and labels, comments, reviewers and acknowledgment
+// at capture time. One per reporting month and scope (unique index, so concurrent requests can't both create one); read-only.
+const snapPerson = { userId: { type: ObjectId, ref: 'User' }, name: { type: String, default: '' }, email: { type: String, default: '' } };
+const kpiValue = new Schema({ key: String, label: String, value: { type: Number, default: null }, unit: { type: String, default: '' } }, { _id: false });
+const KpiSnapshot = mongoose.model('KpiSnapshot', writeOnce(new Schema({
+  period: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
+  scope: { type: String, required: true, enum: [SH_KPI.scope] },
+  timezone: { type: String, required: true },
+  source: { type: String, enum: ['monday', 'mongo'], required: true },
+  dataReadAt: { type: Date, default: null },   // when the KPI data was read (Monday copy time, or capture time for MongoDB)
+  createdBy: { type: new Schema({ ...snapPerson, as: { type: String, default: '' } }, { _id: false }), required: true },
+  employees: [new Schema({
+    employeeId: { type: ObjectId, ref: 'User', default: null },   // null: a VA label with no Team & Access member yet
+    name: { type: String, default: '' }, vaLabel: { type: String, default: '' },
+    kpis: { month: [kpiValue], current: [kpiValue] },
+    reviews: [new Schema({ reviewerKey: String, reviewerLabel: String, reviewer: snapPerson, coaching: String, feedback: String,
+      updatedAt: Date, version: Number, discussedAt: { type: Date, default: null }, discussedVersion: { type: Number, default: 0 } }, { _id: false })],
+    ack: { type: new Schema({ status: { type: String, enum: ['acknowledged', 'not_acknowledged', 'not_available'], required: true },
+      by: { type: new Schema(snapPerson, { _id: false }), default: null }, at: { type: Date, default: null } }, { _id: false }), required: true },
+  }, { _id: false })],
+}, { timestamps: { createdAt: true, updatedAt: false }, toJSON }).index({ period: 1, scope: 1 }, { unique: true }), 'A snapshot'));
+
+// ---- Project Pages (src/projects.js): one developer project per record, with its units and media (src/projectMedia.js) ----
+const PP = require('../public/shared').PROJECT;
+const str = (max, def = '') => ({ type: String, default: def, maxlength: max, trim: true });
+const ppUnit = new Schema({ type: str(80), bedrooms: str(20), sizeSqm: str(20), priceFrom: str(60), availability: str(40, 'Available'), notes: str(300),
+  media: str(24) }, { _id: false });   // media: the id of one of the project's images (a photo or floor plan), '' = none
+const ppMedia = new Schema({
+  id: { type: String, required: true, match: /^[a-f0-9]{24}$/ },   // the stored file (GridFS)
+  name: str(120), type: { type: String, enum: ['image', 'pdf'], required: true }, kind: { type: String, enum: PP.kinds, default: 'photo' },
+  caption: str(200), use: { type: Boolean, default: true },   // use=false: kept, but left off the page
+  from: { type: String, enum: ['upload', 'drive'], default: 'upload' }, driveId: str(100), size: { type: Number, default: 0 },
+  addedAt: { type: Date, default: Date.now }, by: str(80),
+}, { _id: false });
+const Project = mongoose.model('Project', new Schema({
+  slug: { type: String, required: true, unique: true, match: /^[a-z0-9-]{1,60}$/ },   // the page address (fixed once created)
+  name: { type: String, required: true, trim: true, maxlength: 120 }, developer: str(120), location: str(160), status: str(40, 'Pre-selling'),
+  turnover: str(60), priceFrom: str(60), tagline: str(200), description: str(PP.descriptionMax), map: str(200),
+  video: str(300), pageUrl: str(300), driveLink: str(300),
+  highlights: { type: [String], default: [] }, amenities: { type: [String], default: [] },
+  units: { type: [ppUnit], default: [] }, media: { type: [ppMedia], default: [] }, cover: str(24),
+  published: { type: Boolean, default: false }, publishedAt: { type: Date, default: null },
+  version: { type: Number, default: 1 }, createdBy: by, updatedBy: by,
+}, opts).index({ developer: 1, name: 1 }));
+// Project Pages settings, e.g. the inquiry form's endpoint (the Apps Script public hook that files Website Inquiries)
+const ProjectSetting = mongoose.model('ProjectSetting', new Schema({ key: { type: String, required: true, unique: true, maxlength: 40 }, value: str(300), by }, opts));
+
+// ---- Upselling (src/upsell.js): a draft offer, its audience filters, and one record per client it was sent to ----
+const UP = require('../public/shared').UPSELL;
+const UpsellCampaign = mongoose.model('UpsellCampaign', new Schema({
+  name: { type: String, required: true, trim: true, maxlength: 80 },
+  template: { type: String, default: 'concierge', maxlength: 30 },   // where the text started: 'concierge', a Services template key, or 'project'
+  projectId: { type: String, default: '', maxlength: 24 },
+  text: { type: String, default: '', maxlength: UP.textMax },
+  image: { type: new Schema({ id: String, token: String, name: String, size: Number }, { _id: false }), default: null },   // token: the image's public link
+  tag: { type: String, default: '', maxlength: 40 },
+  audience: { type: new Schema({ preset: { type: String, enum: UP.presets, default: 'tenants' }, statuses: { type: [String], default: [] },
+    type: { type: String, enum: ['', 'Rent', 'Buy'], default: '' }, city: str(60), contact: { type: String, enum: UP.contacts, default: 'respond' },
+    skipDays: { type: Number, min: 0, max: 365, default: 14 } }, { _id: false }), default: () => ({}) },
+  sendingUntil: { type: Date, default: null }, sendLock: { type: String, default: '' },   // a batch is running (one at a time per campaign)
+  version: { type: Number, default: 1 }, createdBy: by, updatedBy: by,
+}, opts));
+// written before anything is sent (status 'sending'), then 'sent' / 'failed'; the unique index means a client can't get
+// the same campaign twice, whatever the browser does. No message text, phone or email is stored here.
+const UpsellSend = mongoose.model('UpsellSend', new Schema({
+  campaignId: { type: ObjectId, ref: 'UpsellCampaign', required: true },
+  source: { type: String, enum: ['monday', 'mongo'], required: true }, leadId: { type: String, required: true, maxlength: 40 },
+  contactId: { type: String, default: '', maxlength: 20 },   // the respond.io contact: one send per contact, even if two leads share it
+  action: { type: String, enum: ['message', 'tag'], required: true },
+  status: { type: String, enum: ['sending', 'sent', 'failed'], required: true },
+  steps: { type: new Schema({ image: Boolean, text: Boolean }, { _id: false }), default: () => ({}) },
+  error: { type: String, default: '', maxlength: 300 }, attempts: { type: Number, default: 1 }, by,
+}, opts).index({ campaignId: 1, leadId: 1, action: 1, source: 1 }, { unique: true }).index({ source: 1, leadId: 1, status: 1, updatedAt: -1 })
+  .index({ campaignId: 1, contactId: 1, action: 1 }, { unique: true, partialFilterExpression: { contactId: { $gt: '' } } }));
+// "never contact": set by staff (e.g. the client replied STOP); excluded from every audience and checked again on send
+const UpsellOptOut = mongoose.model('UpsellOptOut', new Schema({ ...leadRef, by }, opts).index({ source: 1, leadId: 1 }, { unique: true }));
+
+module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };

@@ -398,7 +398,270 @@
     return { value: { line: b.line, month: b.month, value: Math.round(n * 100) / 100 }, errors: [] };
   }
 
+  // ---------- VA labels ----------
+  /**
+   * The key a VA label is matched on everywhere (server scoping, the Leads VA filter, VA Management, KPI Review):
+   * case, spacing and punctuation don't count, so "Ana", "ana" and "Ana " are one VA. '' = unassigned.
+   */
+  const vaKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const sameVa = (a, b) => vaKey(a) === vaKey(b);
+  /** One label per VA from a list of label values: the most used spelling of each (ties: a tidy one, then sort order). */
+  function vaLabels(values) {
+    const by = new Map(), untidy = (v) => (String(v) === String(v).trim().replace(/\s+/g, ' ') ? 0 : 1);
+    values.filter((v) => vaKey(v)).forEach((v) => { const k = vaKey(v), m = by.get(k) || new Map(); m.set(v, (m.get(v) || 0) + 1); by.set(k, m); });
+    return [...by.values()].map((m) => [...m.entries()].sort((a, b) => b[1] - a[1] || untidy(a[0]) - untidy(b[0]) || String(a[0]).localeCompare(String(b[0])))[0][0])
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }
+
+  // ---------- VA Management KPIs (one calculation for the VA Management screen, KPI Review and its snapshots) ----------
+  const LEAD_PLUS = ['LOI', 'Contract', 'Collection', 'Active', 'For Renewal'];
+  const dealFailed = (d) => /fail/i.test(d.status) || /failed|archive/i.test(d.group);
+  /** "Response monitor & KPIs per VA" for one VA label: the leads assigned to it now (not tied to a month). */
+  function vaWorkload(leads, viewings, va) {
+    const ls = leads.filter((l) => sameVa(l.va, va)), ids = new Set(ls.map((l) => l.id));
+    return { leads: ls.length, needsReply: ls.filter((l) => l.waiting === 'va' && l.onRespond).length, hot: ls.filter((l) => l.temp === 'Hot').length,
+      viewings: viewings.filter((v) => ids.has(v.leadId) && v.status !== 'Cancelled').length, loiPlus: ls.filter((l) => LEAD_PLUS.includes(l.ai)).length,
+      failed: ls.filter((l) => l.ai === 'Failed').length };
+  }
+  /**
+   * "VA Performance & Ranking" for one VA label: clients assigned from `from` (and up to `to`, when given; 'YYYY-MM-DD'),
+   * and how many of them reached a viewing / a sale (Monday Calendar deals) or were lost. Percentages, rounded.
+   */
+  function vaPerformance(leads, deals, va, from, to, today) {
+    const viewed = new Set(deals.filter((d) => d.fin && d.fin <= today && !/renewal/i.test(d.type)).map((d) => d.leadId));
+    const sold = new Set(deals.filter((d) => !dealFailed(d) && !/renewal/i.test(d.type) && (d.contract || /^closed$/i.test(String(d.status).trim()))).map((d) => d.leadId));
+    const pct = (a, b) => (b ? Math.round(a / b * 100) : 0);
+    const ls = leads.filter((l) => { const d = String(l.inquiryDate || l.createdAt || '').slice(0, 10); return sameVa(l.va, va) && d >= from && (!to || d <= to); });
+    const v = ls.filter((l) => viewed.has(l.id)).length, s = ls.filter((l) => sold.has(l.id)).length, lost = ls.filter((l) => l.ai === 'Failed').length;
+    return { va, n: ls.length, vp: pct(v, ls.length), sp: pct(s, ls.length), lp: pct(lost, ls.length) };
+  }
+
+  // ---------- KPI Review (coaching and feedback per VA and reporting month; reporting periods in Manila time) ----------
+  const KPI_REVIEW = {
+    reviewers: [{ key: 'toby', label: 'Toby' }, { key: 'jonjo', label: 'Jonjo' }],
+    textMax: 4000, timezone: 'Asia/Manila', monthsBack: 24, scope: 'all-vas',
+    // shared accounts that may never be a reviewer (the coaching is private to Toby's and Jonjo's own accounts)
+    neverReviewers: ['blackhouse2br@gmail.com'],
+  };
+  /** The current reporting month in Manila ('YYYY-MM'). Manila is UTC+8 all year (no daylight saving). */
+  const manilaMonth = (now) => new Date((now == null ? Date.now() : now) + 8 * 3600e3).toISOString().slice(0, 7);
+  const manilaDay = (now) => new Date((now == null ? Date.now() : now) + 8 * 3600e3).toISOString().slice(0, 10);
+  /** A reporting month the review may use: 'YYYY-MM', not after the current Manila month, at most monthsBack earlier. */
+  function validPeriod(p, now) {
+    if (typeof p !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) return false;
+    const cur = manilaMonth(now), [cy, cm] = cur.split('-').map(Number), [y, m] = p.split('-').map(Number);
+    const back = (cy - y) * 12 + (cm - m);
+    return back >= 0 && back <= KPI_REVIEW.monthsBack;
+  }
+  /** First and last day of a reporting month ('YYYY-MM-DD'). */
+  const periodDays = (p) => { const [y, m] = p.split('-').map(Number); return { from: p + '-01', to: p + '-' + String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0') }; };
+  /**
+   * The KPI values for one VA label and month, labelled as on VA Management. `deals` is null when the Monday Calendar
+   * board isn't available: the conversion figures are then left empty (null), never guessed.
+   */
+  function kpiReviewValues({ leads, viewings, deals, va, period, today }) {
+    const w = vaWorkload(leads, viewings, va), { from, to } = periodDays(period), perf = vaPerformance(leads, deals || [], va, from, to, today);
+    return {
+      month: [
+        { key: 'clients', label: 'Clients assigned in the month', value: perf.n, unit: '' },
+        { key: 'toViewing', label: 'To viewing', value: deals ? perf.vp : null, unit: '%' },
+        { key: 'toSale', label: 'To sale', value: deals ? perf.sp : null, unit: '%' },
+        { key: 'lost', label: 'Lost', value: perf.lp, unit: '%' },
+      ],
+      current: [
+        { key: 'leads', label: 'Leads', value: w.leads, unit: '' }, { key: 'needsReply', label: 'Needs reply', value: w.needsReply, unit: '' },
+        { key: 'hot', label: 'Hot', value: w.hot, unit: '' }, { key: 'viewings', label: 'Viewings', value: w.viewings, unit: '' },
+        { key: 'loiPlus', label: 'LOI or later', value: w.loiPlus, unit: '' }, { key: 'failed', label: 'Failed', value: w.failed, unit: '' },
+      ],
+    };
+  }
+  /** A reviewer's coaching + feedback from the page: { coaching, feedback, version } (version 0 = first save). */
+  function validateKpiFeedback(b) {
+    if (!isPlainObject(b) || Object.keys(b).some((k) => !['coaching', 'feedback', 'version'].includes(k))) return { errors: ['Invalid request.'] };
+    if (typeof b.coaching !== 'string' || typeof b.feedback !== 'string') return { errors: ['Coaching and feedback must be text.'] };
+    const coaching = b.coaching.trim(), feedback = b.feedback.trim();
+    if (coaching.length > KPI_REVIEW.textMax || feedback.length > KPI_REVIEW.textMax) return { errors: [`Coaching and feedback: ${KPI_REVIEW.textMax} characters at most each.`] };
+    if (!coaching && !feedback) return { errors: ['Write some coaching or feedback first.'] };
+    if (!Number.isInteger(b.version) || b.version < 0) return { errors: ['Reload the review and try again.'] };
+    return { value: { coaching, feedback, version: b.version }, errors: [] };
+  }
+
+  // ---------- Project Pages (the original Apps Script fields; server: src/projects.js) ----------
+  const PROJECT = {
+    kinds: ['photo', 'floorplan', 'brochure', 'other'], kindLabels: { photo: 'Photo', floorplan: 'Floor plan', brochure: 'Brochure', other: 'Other' },
+    statuses: ['Pre-selling', 'RFO', 'Under construction', 'Sold out'],   // suggestions (the original's Add list); free text allowed
+    text: { name: 120, developer: 120, location: 160, status: 40, turnover: 60, priceFrom: 60, tagline: 200, map: 200, video: 300, pageUrl: 300, driveLink: 300 },
+    descriptionMax: 6000, listMax: 30, itemMax: 200, unitsMax: 40, mediaMax: 200, unitText: { type: 80, bedrooms: 20, sizeSqm: 20, priceFrom: 60, availability: 40, notes: 300 },
+    fillable: ['developer', 'tagline', 'description', 'status', 'turnover', 'priceFrom', 'location', 'map'],   // Build from Drive (empty fields only)
+  };
+  const isId24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/.test(s);
+  /** A Google Drive / Docs link (or a bare id) → { id, resourceKey } or null. Only drive.google.com and docs.google.com. */
+  function parseDriveLink(link) {
+    const s = String(link || '').trim();
+    if (/^[A-Za-z0-9_-]{10,100}$/.test(s)) return { id: s, resourceKey: '' };
+    let u; try { u = new URL(s); } catch (e) { return null; }
+    if (u.protocol !== 'https:' || !/^(drive|docs)\.google\.com$/.test(u.hostname)) return null;
+    const m = u.pathname.match(/\/(?:drive\/(?:u\/\d+\/)?folders|file\/d|(?:document|spreadsheets|presentation|drawings|forms)\/d)\/([A-Za-z0-9_-]{10,100})/)
+      || (/^\/(open|uc)$/.test(u.pathname) && /^[A-Za-z0-9_-]{10,100}$/.test(u.searchParams.get('id') || '') ? [0, u.searchParams.get('id')] : null);
+    return m ? { id: m[1], resourceKey: (u.searchParams.get('resourcekey') || '').slice(0, 100) } : null;
+  }
+  /** A YouTube link → its video id, or '' (only youtube.com / youtu.be, https). */
+  function youtubeId(link) {
+    let u; try { u = new URL(String(link || '').trim()); } catch (e) { return ''; }
+    if (u.protocol !== 'https:') return '';
+    const h = u.hostname.replace(/^(www|m)\./, ''), id = h === 'youtu.be' ? u.pathname.slice(1) : h === 'youtube.com' ? (u.searchParams.get('v') || (u.pathname.match(/^\/(?:embed|shorts|live)\/([^/]+)/) || [])[1] || '') : '';
+    return /^[A-Za-z0-9_-]{6,20}$/.test(id) ? id : '';
+  }
+  const isHttpsUrl = (s) => { try { const u = new URL(s); return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password; } catch (e) { return false; } };
+  /** The inquiry form's endpoint: the Apps Script public hook (a /exec link), as in the original; '' clears it. */
+  const validHook = (s) => s === '' || /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{10,200}\/exec$/.test(s);
+  /** A list typed one per line (or given as an array) → trimmed, non-empty, de-duplicated, capped. */
+  const toList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split('\n')).map((x) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim()).filter(Boolean))];
+  /**
+   * A project save from the page → { value, errors }. value holds only the editable fields; media changes are limited
+   * to caption / kind / use of files the project already has (mediaIds), and units / cover may only point at its images.
+   */
+  function validateProject(b, { mediaIds = [], imageIds = [] } = {}) {
+    if (!isPlainObject(b)) return { errors: ['Invalid request.'] };
+    const allowed = Object.keys(PROJECT.text).concat(['description', 'highlights', 'amenities', 'units', 'media', 'cover', 'version']);
+    const extra = Object.keys(b).find((k) => !allowed.includes(k)); if (extra) return { errors: ['Unknown field: ' + extra] };
+    const value = {};
+    for (const [k, max] of Object.entries(PROJECT.text)) {
+      if (b[k] === undefined) continue;
+      if (typeof b[k] !== 'string') return { errors: [k + ' must be text.'] };
+      const s = b[k].replace(/\s+/g, ' ').trim(); if (s.length > max) return { errors: [`${k}: ${max} characters at most.`] };
+      value[k] = s;
+    }
+    if ('name' in value && !value.name) return { errors: ['Project name is required.'] };
+    if (value.video && !youtubeId(value.video)) return { errors: ['YouTube video link: use a youtube.com or youtu.be link.'] };
+    if (value.pageUrl && !isHttpsUrl(value.pageUrl)) return { errors: ['Live page link must be a secure (https) address.'] };
+    if (value.driveLink && !parseDriveLink(value.driveLink)) return { errors: ['That doesn\'t look like a Google Drive folder or file link.'] };
+    if (b.description !== undefined) { if (typeof b.description !== 'string') return { errors: ['Description must be text.'] }; value.description = b.description.trim(); if (value.description.length > PROJECT.descriptionMax) return { errors: [`Description: ${PROJECT.descriptionMax} characters at most.`] }; }
+    for (const k of ['highlights', 'amenities']) {
+      if (b[k] === undefined) continue;
+      if (!Array.isArray(b[k]) && typeof b[k] !== 'string') return { errors: [k + ' must be a list.'] };
+      const l = toList(b[k]); if (l.length > PROJECT.listMax || l.some((x) => x.length > PROJECT.itemMax)) return { errors: [`${k}: at most ${PROJECT.listMax} lines of ${PROJECT.itemMax} characters.`] };
+      value[k] = l;
+    }
+    if (b.units !== undefined) {
+      if (!Array.isArray(b.units) || b.units.length > PROJECT.unitsMax) return { errors: [`Units: at most ${PROJECT.unitsMax}.`] };
+      value.units = [];
+      for (const u of b.units) {
+        if (!isPlainObject(u) || Object.keys(u).some((k) => !(k in PROJECT.unitText) && k !== 'media')) return { errors: ['Invalid unit.'] };
+        const out = {};
+        for (const [k, max] of Object.entries(PROJECT.unitText)) { const s = u[k] == null ? '' : u[k]; if (typeof s !== 'string' && typeof s !== 'number') return { errors: ['Invalid unit.'] }; out[k] = String(s).replace(/\s+/g, ' ').trim(); if (out[k].length > max) return { errors: [`Unit ${k}: ${max} characters at most.`] }; }
+        out.media = u.media ? String(u.media) : '';
+        if (out.media && !imageIds.includes(out.media)) return { errors: ['A unit\'s photo / floor plan must be one of this project\'s images.'] };
+        if (!out.availability) out.availability = 'Available';
+        if (Object.values(out).some(Boolean)) value.units.push(out);
+      }
+    }
+    if (b.media !== undefined) {
+      if (!Array.isArray(b.media) || b.media.length > PROJECT.mediaMax) return { errors: ['Invalid media.'] };
+      value.media = [];
+      for (const m of b.media) {
+        if (!isPlainObject(m) || !mediaIds.includes(m.id) || Object.keys(m).some((k) => !['id', 'caption', 'kind', 'use'].includes(k))) return { errors: ['Invalid media (only files already in this project).'] };
+        if (m.kind !== undefined && !PROJECT.kinds.includes(m.kind)) return { errors: ['Unknown media kind.'] };
+        if (m.caption !== undefined && (typeof m.caption !== 'string' || m.caption.length > 200)) return { errors: ['Caption: 200 characters at most.'] };
+        if (m.use !== undefined && typeof m.use !== 'boolean') return { errors: ['Invalid media.'] };
+        value.media.push({ id: m.id, ...(m.caption !== undefined ? { caption: m.caption.trim() } : {}), ...(m.kind ? { kind: m.kind } : {}), ...(m.use !== undefined ? { use: m.use } : {}) });
+      }
+    }
+    if (b.cover !== undefined) { if (b.cover !== '' && !imageIds.includes(b.cover)) return { errors: ['The cover must be one of this project\'s images.'] }; value.cover = b.cover; }
+    if (!Number.isInteger(b.version) || b.version < 1) return { errors: ['Reload the project and try again.'] };
+    value.version = b.version;
+    return { value, errors: [] };
+  }
+  /** Media kind from a file's name and type (the original's caption rules): floor plans and brochures by name. */
+  function mediaKind(name, type) {
+    const n = String(name || '');
+    if (type === 'image') return /floor|plan|layout/i.test(n) ? 'floorplan' : 'photo';
+    return /brochure|price|pricelist|fact ?sheet|primer|presentation|deck|e-?brochure/i.test(n) ? 'brochure' : 'other';
+  }
+  /**
+   * Build from Drive: what the found values would change. Only empty fields are proposed for filling (checked by
+   * default); a found value that differs from one already entered is offered as "replace" (unchecked). Lists and
+   * units: only when the project has none. Blank or uncertain found values are never proposed.
+   */
+  function driveProposal(p, found) {
+    const out = [];
+    const clean = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+    // values are cut to what Save accepts, so using a proposal can't make the save fail
+    PROJECT.fillable.forEach((k) => {
+      const v = (k === 'description' ? String(found[k] || '').trim() : clean(found[k])).slice(0, k === 'description' ? PROJECT.descriptionMax : PROJECT.text[k]);
+      if (!v || /^(n\/?a|unknown|not (stated|specified|found)|tbd|-+)$/i.test(v)) return;
+      const cur = String(p[k] || '').trim();
+      if (!cur) out.push({ field: k, value: v, current: '', apply: true });
+      else if (cur !== v) out.push({ field: k, value: v, current: cur, apply: false });
+    });
+    ['highlights', 'amenities'].forEach((k) => { const l = toList(Array.isArray(found[k]) ? found[k] : []).map((x) => x.slice(0, PROJECT.itemMax)).slice(0, PROJECT.listMax); if (l.length) out.push({ field: k, value: l, current: p[k] || [], apply: !(p[k] || []).length }); });
+    const ut = PROJECT.unitText, cut = (v, k) => clean(v).slice(0, ut[k]);
+    const units = (Array.isArray(found.units) ? found.units : []).filter((u) => u && clean(u.type)).slice(0, PROJECT.unitsMax)
+      .map((u) => ({ type: cut(u.type, 'type'), bedrooms: cut(u.bedrooms, 'bedrooms'), sizeSqm: cut(u.sizeSqm, 'sizeSqm'), priceFrom: cut(u.priceFrom, 'priceFrom'), availability: 'Available', notes: cut(u.notes, 'notes'), media: '' }));
+    if (units.length) out.push({ field: 'units', value: units, current: p.units || [], apply: !(p.units || []).length });
+    return out;
+  }
+
+  // ---------- Upselling (Code.gs / Index.html Upselling; server: src/upsell.js) ----------
+  const UPSELL = {
+    presets: ['tenants', 'active', 'past', 'all'],
+    presetLabels: { tenants: 'Tenants (closed / renewing)', active: 'Active leads', past: 'Past leads (failed / unresponsive)', all: 'Everyone' },
+    contacts: ['any', 'respond', 'email', 'phone'], contactLabels: { any: 'Any', respond: 'On respond.io', email: 'Has email', phone: 'Has phone' },
+    textMax: 1500, batchMax: 40, imageMax: 5 * 1024 * 1024, gapMs: 700,
+    // the original's default offer text (Index.html UP_CONCIERGE), unchanged
+    concierge: 'Hi {firstName},\n\nJust wanted to check up on you. How are things with the unit?\n\nAlso, we want to remind you of our Blackhouse Concierge service — we can help with the following services:\n\nMovers, Cleaners, AC Cleaning, Furniture, Repairs, Legal Assistance\n\nWe also have partnerships with Ayala Land, SM Prime, Shangri-La, Arthaland, Federal Land and Rockwell if you are interested in pre-selling investments for property.\n\nJust message us if you need any help!\n\nBlackhouse Concierge Team',
+  };
+  /** The offers to start from: the Concierge text and the Services templates of Renewals → Message. */
+  const upsellTemplates = () => [{ k: 'concierge', label: 'Blackhouse Concierge (all services)', text: UPSELL.concierge }]
+    .concat(RENEWAL_TEMPLATES.filter((t) => t.group === 'Services').map((t) => ({ k: t.k, label: t.label, text: t.text })));
+  /** A respond.io tag as the original allowed it: letters, digits, _ - and spaces, at most 40. */
+  const upsellTag = (s) => String(s || '').replace(/[^\w\- ]/g, '').trim().slice(0, 40);
+  /** The text one client receives: {firstName} (first word of their name, else "there"), {va} (the sender), {building}. */
+  function upsellText(text, lead, senderName) {
+    const first = String((lead && lead.name) || '').trim().split(/\s+/)[0] || 'there';
+    return String(text || '').replace(/\{firstName\}/g, first).replace(/\{va\}/g, String(senderName || '').trim().split(/\s+/)[0] || 'Blackhouse')
+      .replace(/\{building\}/g, (lead && lead.building) || 'your unit');
+  }
+  /** A campaign draft from the page → { value, errors } (only these fields; the audience is validated as a whole). */
+  function validateCampaign(b, { projectIds = [] } = {}) {
+    if (!isPlainObject(b)) return { errors: ['Invalid request.'] };
+    if (Object.keys(b).some((k) => !['name', 'template', 'projectId', 'text', 'tag', 'audience', 'version'].includes(k))) return { errors: ['Invalid request.'] };
+    const value = {};
+    if (b.name !== undefined) { if (typeof b.name !== 'string' || !b.name.trim() || b.name.length > 80) return { errors: ['Give the offer a name (80 characters max).'] }; value.name = b.name.trim(); }
+    if (b.template !== undefined) { if (!['project'].concat(upsellTemplates().map((t) => t.k)).includes(b.template)) return { errors: ['Unknown message template.'] }; value.template = b.template; }
+    if (b.projectId !== undefined) { if (b.projectId !== '' && !projectIds.includes(b.projectId)) return { errors: ['Pick a project from Project Pages.'] }; value.projectId = b.projectId; }
+    if (b.text !== undefined) { if (typeof b.text !== 'string' || b.text.length > UPSELL.textMax) return { errors: [`The message can be ${UPSELL.textMax} characters at most.`] }; value.text = b.text.replace(/\r\n/g, '\n').trim(); }
+    if (b.tag !== undefined) { if (typeof b.tag !== 'string' || b.tag.length > 60) return { errors: ['Invalid tag.'] }; value.tag = upsellTag(b.tag); }
+    if (b.audience !== undefined) {
+      const a = b.audience;
+      if (!isPlainObject(a) || Object.keys(a).some((k) => !['preset', 'statuses', 'type', 'city', 'contact', 'skipDays'].includes(k))) return { errors: ['Invalid audience.'] };
+      if (!UPSELL.presets.includes(a.preset) || !UPSELL.contacts.includes(a.contact) || !['', 'Rent', 'Buy'].includes(a.type)) return { errors: ['Invalid audience.'] };
+      if (!Array.isArray(a.statuses) || a.statuses.length > 30 || a.statuses.some((s) => typeof s !== 'string' || s.length > 60)) return { errors: ['Invalid client status filter.'] };
+      if (typeof a.city !== 'string' || a.city.length > 60) return { errors: ['Invalid city.'] };
+      const d = Number(a.skipDays); if (!Number.isInteger(d) || d < 0 || d > 365) return { errors: ['"Skip if offered in the last N days" must be 0 to 365.'] };
+      value.audience = { preset: a.preset, statuses: [...new Set(a.statuses.map((s) => s.trim()).filter(Boolean))], type: a.type, city: a.city.trim(), contact: a.contact, skipDays: d };
+    }
+    if (!Number.isInteger(b.version) || b.version < 1) return { errors: ['Reload the offer and try again.'] };
+    value.version = b.version;
+    return { value, errors: [] };
+  }
+  /**
+   * Who the offer goes to (Index.html upRows): rows { status, type, city, onRespond, email, phone, tenant, lastOffer (ms),
+   * optedOut }. Opted-out clients are always left out.
+   */
+  function upsellAudience(rows, a, now) {
+    const preset = { tenants: (r) => r.tenant, active: (r) => /active|qualif|late/i.test(r.status), past: (r) => /fail|unresp|disqual/i.test(r.status), all: () => true }[a.preset] || (() => true);
+    const city = String(a.city || '').toLowerCase(), gap = (Number(a.skipDays) || 0) * 864e5;
+    return rows.filter((r) => !r.optedOut && preset(r) && (!a.statuses.length || a.statuses.includes(r.status)) && (!a.type || r.type === a.type)
+      && (!city || String(r.city || '').toLowerCase().includes(city))
+      && (a.contact === 'any' || (a.contact === 'respond' ? r.onRespond : a.contact === 'email' ? !!r.email : !!r.phone))
+      && (!gap || !r.lastOffer || now - r.lastOffer >= gap));
+  }
+
   return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
+    UPSELL, upsellTemplates, upsellTag, upsellText, validateCampaign, upsellAudience,
+    PROJECT, parseDriveLink, youtubeId, isHttpsUrl, validHook, toList, validateProject, mediaKind, driveProposal, isId24,
+    vaKey, sameVa, vaLabels, LEAD_PLUS, dealFailed, vaWorkload, vaPerformance, KPI_REVIEW, manilaMonth, manilaDay, validPeriod, periodDays, kpiReviewValues, validateKpiFeedback,
     validateLeadPatch, leadUpdateNote, validateNote, validateBooking, bookingLeadChanges, bookingNote,
     validateViewingPatch, validateAvailability, validateUser, validateTemplate,
     normPets, petWords, canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride,

@@ -45,6 +45,10 @@ function loadConfig(env = process.env, argv = process.argv) {
     auth,
     // read-only Monday.com / respond.io access exists only in mongo mode (signed in); demo mode never uses them
     integrations: mode === 'mongo' ? loadIntegrations(env) : null,
+    // KPI Review reviewers (Toby, Jonjo): who may write coaching and feedback, set only on the server
+    kpiReview: mode === 'mongo' ? loadKpiReviewers(env) : null,
+    // Project Pages: optional read-only Google Drive (service account) and the AI reader for "Build from Google Drive"
+    projects: mode === 'mongo' ? loadProjectPages(env, isLoopback(host)) : null,
     ignoredIntegrationVars: mode === 'demo' ? ['MONDAY_TOKEN', 'RESPOND_TOKEN'].filter((k) => String(env[k] || '').trim()) : [],
   };
 }
@@ -94,12 +98,57 @@ function loadIntegrations(env) {
       // list-wide reply-state checks (last 15 messages of every visible lead) are off unless switched on;
       // with them off, respond.io is read only when someone opens a lead's Chat tab
       listChecks: String(env.RESPOND_LIST_CHECKS || '').trim().toLowerCase() === 'on',
+      // Upselling sends (messages and tags to clients, each one confirmed): off unless switched on explicitly
+      sends: String(env.RESPOND_SENDS || '').trim().toLowerCase() === 'on',
     },
   };
 }
 
+/**
+ * KPI_REVIEWER_TOBY_EMAIL / KPI_REVIEWER_JONJO_EMAIL: the Team & Access email of each reviewer. Unset = that reviewer
+ * slot has nobody yet (their column is read-only for everyone). A sign-in alone never makes someone a reviewer.
+ */
+function loadKpiReviewers(env) {
+  const { KPI_REVIEW, EMAIL_RE } = require('../public/shared');
+  const reviewers = KPI_REVIEW.reviewers.map(({ key, label }) => {
+    const name = `KPI_REVIEWER_${key.toUpperCase()}_EMAIL`, email = String(env[name] || '').trim().toLowerCase();
+    if (email && (!EMAIL_RE.test(email) || email.length > 120)) throw new Error(`${name} must be one email address (the reviewer's Team & Access email), or left empty.`);
+    if (KPI_REVIEW.neverReviewers.includes(email)) throw new Error(`${name} must be ${label}'s own Google account. The shared Blackhouse account can't be a KPI reviewer.`);
+    return { key, label, email };
+  });
+  const set = reviewers.filter((r) => r.email);
+  if (new Set(set.map((r) => r.email)).size !== set.length) throw new Error('KPI_REVIEWER_TOBY_EMAIL and KPI_REVIEWER_JONJO_EMAIL must be different people.');
+  return { reviewers };
+}
+
+/**
+ * GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: the service account's JSON key (as downloaded, or base64 of it). Unset: Drive
+ * features are off and Project Pages works without them. ANTHROPIC_API_KEY: reads Drive documents for "Build from
+ * Google Drive"; unset: that only imports the folder's media. Values are never printed.
+ */
+function loadProjectPages(env, local) {
+  // the test-only overrides for these services are refused outright on a server others can reach
+  if (!local) ['GOOGLE_DRIVE_API_URL', 'GOOGLE_DRIVE_TOKEN_URL', 'ANTHROPIC_BASE_URL'].forEach((k) => { if (String(env[k] || '').trim()) throw new Error(`${k} is for local tests only; remove it from this server's variables.`); });
+  let drive = null;
+  const raw = String(env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON || '').trim();
+  if (raw) {
+    let j = null;
+    try { j = JSON.parse(raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8')); } catch (e) { /* below */ }
+    if (!j || typeof j.client_email !== 'string' || typeof j.private_key !== 'string' || !/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/.test(j.client_email) || !/-----BEGIN PRIVATE KEY-----/.test(j.private_key)) {
+      throw new Error('GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON must be a Google Cloud service account JSON key (with client_email and private_key), or base64 of it.');
+    }
+    try { require('crypto').createPrivateKey(j.private_key); } catch (e) { throw new Error('GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON has a private_key that can\'t be read.'); }
+    drive = { email: j.client_email, key: j.private_key,
+      apiUrl: apiBase(env, 'GOOGLE_DRIVE_API_URL', 'https://www.googleapis.com/drive/v3'), tokenUrl: apiBase(env, 'GOOGLE_DRIVE_TOKEN_URL', 'https://oauth2.googleapis.com/token') };
+  }
+  const apiKey = String(env.ANTHROPIC_API_KEY || '').trim();
+  const ai = apiKey ? { apiKey, baseURL: apiBase(env, 'ANTHROPIC_BASE_URL', 'https://api.anthropic.com') } : null;
+  return { drive, ai };
+}
+
 /** Hides credentials if a connection string ever ends up in a message. */
 const redact = (s) => String(s).replace(/(mongodb(?:\+srv)?:\/\/)[^@/\s]+@/gi, '$1***@').replace(/(Bearer\s+)[^\s"']+/gi, '$1***')
-  .replace(/\b(GOCSPX-)[\w-]+/g, '$1***').replace(/\b(client_secret|code_verifier|code)=[^&\s"']+/gi, '$1=***');
+  .replace(/\b(GOCSPX-)[\w-]+/g, '$1***').replace(/\b(client_secret|code_verifier|code|assertion)=[^&\s"']+/gi, '$1=***')
+  .replace(/-----BEGIN PRIVATE KEY-----[\s\S]*?(-----END PRIVATE KEY-----|$)/g, '[private key]').replace(/\bsk-ant-[\w-]+/g, 'sk-ant-***');
 
 module.exports = { loadConfig, redact, MODES };

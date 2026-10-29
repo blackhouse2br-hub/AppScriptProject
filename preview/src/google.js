@@ -9,7 +9,7 @@
 //
 // Failures return to the portal as #signin-error=<code>; the reason is never a token, code or email address.
 const crypto = require('crypto');
-const { User, OAuthState } = require('./models');
+const { User, OAuthState, Session } = require('./models');
 const { parseCookies, sha256 } = require('./auth');
 
 const STATE_COOKIE = 'bh_oauth';
@@ -125,8 +125,13 @@ function googleRoutes(router, config, { startSession }) {
     const user = await User.findOne({ email: String(c.email).trim().toLowerCase() }).select('+googleSub');
     if (!user || !user.active) { console.warn('[auth] Google sign-in refused: not_member'); return back(res, 'not_member'); }
     if (user.googleSub && user.googleSub !== String(c.sub)) { console.warn('[auth] Google sign-in refused: mismatch'); return back(res, 'mismatch'); }
-    if (!user.googleSub) { user.googleSub = String(c.sub); await user.save(); }
-    await startSession(res, user, config);
+    if (!user.googleSub) {
+      // a newly linked Google account takes over this member: sessions started before the link (for example one an
+      // admin kept while changing their own email to this address) end now
+      await Session.deleteMany({ userId: user._id });
+      user.googleSub = String(c.sub); user.googleLinkedAt = new Date(); await user.save();
+    }
+    await startSession(res, user, config, { googleSub: c.sub });
     back(res, '');
   });
 }

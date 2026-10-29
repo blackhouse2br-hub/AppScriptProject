@@ -50,11 +50,14 @@ function recordFail(keys) {
   keys.forEach(([k]) => { const f = fails.get(k); if (!f || f.reset < now) fails.set(k, { count: 1, reset: now + WINDOW_MS }); else f.count++; });
 }
 
-/** Signs a member in: a new random session token (only its hash is stored) in an HttpOnly cookie. */
-async function startSession(res, user, config) {
+/**
+ * Signs a member in: a new random session token (only its hash is stored) in an HttpOnly cookie. googleSub: the Google
+ * account that proved this sign-in (its hash is kept on the session, so a session can be tied to that account).
+ */
+async function startSession(res, user, config, { googleSub } = {}) {
   const maxAge = config.sessionHours * 3600, secure = config.web.secureCookies;
   const token = crypto.randomBytes(32).toString('base64url');
-  await Session.create({ tokenHash: sha256(token), userId: user._id, expiresAt: new Date(Date.now() + maxAge * 1000) });
+  await Session.create({ tokenHash: sha256(token), userId: user._id, expiresAt: new Date(Date.now() + maxAge * 1000), ...(googleSub ? { subHash: sha256(String(googleSub)) } : {}) });
   res.append('Set-Cookie', cookieHeader(token, maxAge, secure));
 }
 

@@ -1,6 +1,7 @@
 'use strict';
-// Read-only respond.io client (API v2). Only GET requests to an allowlist of paths are possible:
-// a contact by ID and that contact's message history. Sending, contact creation and webhooks don't exist here.
+// respond.io client (API v2). The reader below makes only GET requests to an allowlist of paths: a contact by ID and
+// that contact's message history. Sending exists only in createRespondSender (Upselling, off unless RESPOND_SENDS=on);
+// contact creation and webhooks don't exist here.
 const { IntegrationError, tracked } = require('./status');
 
 const SAFE_PATH = /^\/contact\/id:\d{1,20}(\/message\/list\?limit=\d{1,3}(&cursorId=\d{1,30})?)?$/;
@@ -31,6 +32,42 @@ function shapeMessage(it) {
   const who = it.traffic === 'incoming' ? 'Client' : src === 'ai_agent' ? 'AI agent' : src === 'workflow' ? 'Workflow' : src === 'broadcast' ? 'Broadcast' : src === 'api' ? 'Portal' : 'Agent';
   return { id: String(it.messageId || ''), from: it.traffic === 'incoming' ? 'client' : 'va', src: it.traffic === 'incoming' ? 'client' : (src || 'user'), who, text: String(text).slice(0, 4000),
     url: /^https:\/\//.test(url) ? url : '', fileType, ts, at: ts ? new Date(ts).toISOString() : '', failed: (it.status || []).some((x) => x.value === 'failed') };
+}
+
+// ---------- Upselling sends (src/upsell.js): the only respond.io writes, off unless RESPOND_SENDS=on ----------
+// Exactly two POST paths, for one contact at a time: a message (text or image attachment) and a tag. The contact ID
+// always comes from a lead the server has checked, never from the request. Same request shapes as the Apps Script
+// (Code.gs apiUpsellSend / apiUpsellTag).
+const SEND_PATH = /^\/contact\/id:\d{1,20}\/(message|tag)$/;
+// unknown: respond.io may have delivered it (timeout, network error, server error) — never retried automatically
+class SendError extends Error {
+  constructor(message, { stop = false, retryAfter = 0, code = 0, unknown = false } = {}) { super(message); this.stop = stop; this.retryAfter = retryAfter; this.code = code; this.unknown = unknown; }
+}
+function createRespondSender(cfg) {
+  async function post(path, body) {
+    if (!SEND_PATH.test(path)) throw new SendError('Blocked: this respond.io request is not an allowed send.', { stop: true });
+    let res;
+    try {
+      res = await fetch(cfg.apiUrl + path, { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.token, 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
+    } catch (e) { throw new SendError('Could not reach respond.io (' + (e.name === 'TimeoutError' ? 'timed out' : 'network error') + '). It may or may not have been sent: check the chat.', { stop: true, unknown: true }); }
+    if (res.ok) return true;
+    let raw = '';
+    try { const b = await res.json(); raw = String((b && (b.message || b.error)) || ''); } catch (e) { /* no body */ }
+    raw = raw.replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 160);
+    // as Code.gs sendError_, plus: a rejected token or rate limit stops the whole batch
+    if (res.status === 401 || res.status === 403) throw new SendError(`respond.io rejected RESPOND_TOKEN for sending (HTTP ${res.status}). The token needs permission to send messages and tag contacts.`, { stop: true, code: res.status });
+    if (res.status === 429) throw new SendError('respond.io is rate-limiting requests. Wait a moment and try again.', { stop: true, retryAfter: Number(res.headers.get('retry-after')) || 60, code: 429 });
+    if (/24|window|session|template|re-?engage/i.test(raw)) throw new SendError('Can\'t send: the client hasn\'t messaged in the last 24 hours, so WhatsApp only allows an approved template. Tag them and send a template broadcast from respond.io.', { code: res.status });
+    if (res.status === 404) throw new SendError('respond.io has no contact with this client\'s Respond ID.', { code: 404 });
+    if (res.status >= 500) throw new SendError(`respond.io had a server error (HTTP ${res.status}). It may or may not have been sent: check the chat.`, { stop: true, unknown: true, code: res.status });
+    throw new SendError(`respond.io couldn't send it (HTTP ${res.status}${raw ? ': ' + raw : ''}).`, { code: res.status });
+  }
+  const id = (cid) => String(cid).replace(/\D/g, '');
+  return {
+    text: (cid, text) => post(`/contact/id:${id(cid)}/message`, { message: { type: 'text', text } }),
+    image: (cid, url) => post(`/contact/id:${id(cid)}/message`, { message: { type: 'attachment', attachment: { type: 'image', url } } }),
+    tag: (cid, tag) => post(`/contact/id:${id(cid)}/tag`, [tag]),
+  };
 }
 
 function createRespond(cfg, status) {
@@ -133,4 +170,4 @@ function createRespond(cfg, status) {
   return { chat, replyStates, cachedState, remember };
 }
 
-module.exports = { createRespond, shapeMessage, SAFE_PATH };
+module.exports = { createRespond, createRespondSender, SendError, shapeMessage, SAFE_PATH, SEND_PATH };
