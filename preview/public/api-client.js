@@ -28,7 +28,11 @@
         headers: file ? { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name || 'file') } : body !== undefined ? { 'Content-Type': 'application/json' } : {},
         body: file || (body !== undefined ? JSON.stringify(body) : undefined),
       });
-    } catch (e) { throw new Error(BASE ? 'Could not reach the portal API. Check your connection, or try again in a minute.' : 'Could not reach the local server. Is it still running?'); }
+    } catch (e) {
+      // the local preview runs on this computer; the hosted portal is reached over the internet
+      const local = !BASE && /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+      throw new Error(local ? 'Could not reach the local server. Is it still running?' : 'Could not reach the portal. Check your connection, or try again in a minute.');
+    }
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; err.stale = !!(data && data.stale); err.partial = !!(data && data.partial); throw err; }

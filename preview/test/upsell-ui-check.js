@@ -79,6 +79,13 @@ async function cdp(wsUrl) {
     check('Upselling opens (no longer a placeholder)', !/isn't in this portal yet/.test(await c.ev('document.body.textContent')));
     await click('[data-act="upnew"]'); await until(`!!document.querySelector('[data-up="text"]') && /Concierge/.test(document.querySelector('[data-up="text"]').value)`);
     check('a new offer starts from the Concierge text', true);
+    // works with browser prompts blocked (no prompt is used); an unsent draft can be deleted
+    await c.ev(`window.prompt = () => { throw new Error('prompt blocked'); }`);
+    await click('[data-act="upnew"]'); await until(`document.querySelectorAll('[data-ch="upsel"] option').length === 2`);
+    check('+ New offer works without a browser prompt', /New offer created/.test(await c.ev(`document.querySelector('#toast').textContent`)));
+    check('an unsent draft shows Delete draft', await c.ev(`!!document.querySelector('[data-act="updelete"]')`));
+    await click('[data-act="updelete"]'); await until(`document.querySelectorAll('[data-ch="upsel"] option').length === 1 && !!document.querySelector('[data-up="text"]')`);
+    check('the draft is deleted; the other offer opens', /Draft deleted/.test(await c.ev(`document.querySelector('#toast').textContent`)));
     await setVal('[data-up="preset"]', 'all'); await setVal('[data-up="text"]', 'Hi {firstName}! Concierge offer from {va}.');
     await click('[data-act="upsave"]'); await until(`/Offer saved/.test(document.querySelector('#toast').textContent)`);
     await until(`document.querySelectorAll('.up-t tbody tr').length >= 4`);
@@ -112,6 +119,7 @@ async function cdp(wsUrl) {
     const n = posts.length;
     check('nobody left to send to (no repeats); retry offered for the failure', await c.ev(`document.querySelector('[data-act="upreview"][data-v="message"]').disabled`) && await c.ev(`!!document.querySelector('[data-act="upreview"][data-v="retry"]')`));
     check('no extra sends after the batch', posts.length === n);
+    check('a sent offer can\'t be deleted (no Delete draft)', await c.ev(`!document.querySelector('[data-act="updelete"]')`));
     await shot('2-sent-desktop');
     // a viewer: no send / edit controls
     await signIn('viewer@example.com'); await go('upsell'); await until(`!!document.querySelector('[data-up="text"]')`);

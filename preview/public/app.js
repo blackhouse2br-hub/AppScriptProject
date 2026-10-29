@@ -1170,7 +1170,12 @@
       const r = await API.get(`/api/kpi-review/review/${key}/${p}`);
       if (st.revTag !== tag) return;
       st.rev = r; st.draft = {}; st.saveErr = '';
-    } catch (e) { if (signedOut(e) || st.revTag !== tag) return; st.rev = null; st.revErr = e.message; }
+    } catch (e) {
+      if (signedOut(e) || st.revTag !== tag) return;
+      // a VA label that has just been given a member record: reload the list (the VA appears under their member record)
+      if (e.status === 404) { st.emps = null; st.sel = ''; st.revLoading = false; st.revTag = ''; toast('The employee list changed. It has been reloaded.'); return renderView(); }
+      st.rev = null; st.revErr = e.message;
+    }
     st.revLoading = false;
     if (S.view === 'kpireview') renderView();
   }
@@ -1197,14 +1202,15 @@
   /** One reviewer's column: editable for that reviewer, read-only for the other. */
   function krColumn(rv, x) {
     const st = kr(), r = rv.reviews[x.key], mine = rv.can.write && rv.can.slot === x.key, d = st.draft || {};
-    const head = `<h3>${esc(x.label)} — coaching &amp; feedback</h3>`;
-    const meta = r ? `<div class="sub">Saved by ${esc(r.author.name)} · ${esc(manilaTime(r.updatedAt))}${r.createdAt !== r.updatedAt ? ' · first saved ' + esc(manilaTime(r.createdAt)) : ''}</div>
-      <div class="sub">${r.discussedAt ? `<b>Reviewer recorded discussion</b>: ${esc(r.discussedBy ? r.discussedBy.name : x.label)}, ${esc(manilaTime(r.discussedAt))} <span class="muted">(the reviewer's own record, not the employee's verification)</span>${r.version > r.discussedVersion ? ' · <b>the text was changed after this record</b>' : ''}` : 'Reviewer has not recorded a discussion.'}</div>` : '';
+    // who last saved this reviewer's section, and when (at the top of the section)
+    const head = `<h3>${esc(x.label)} — coaching &amp; feedback${mine ? ' <span class="pill" style="--c:var(--accent)">yours</span>' : ''}</h3>
+      <div class="pad kr-saved" role="status">${r ? `Last saved by <b>${esc(r.author.name)}</b> · ${esc(manilaTime(r.updatedAt))}${r.createdAt !== r.updatedAt ? ' <span class="muted">(first saved ' + esc(manilaTime(r.createdAt)) + ')</span>' : ''}` : '<span class="muted">Not saved yet for this month.</span>'}</div>`;
+    const meta = r ? `<div class="sub">${r.discussedAt ? `<b>Reviewer recorded discussion</b>: ${esc(r.discussedBy ? r.discussedBy.name : x.label)}, ${esc(manilaTime(r.discussedAt))} <span class="muted">(the reviewer's own record, not the employee's verification)</span>${r.version > r.discussedVersion ? ' · <b>the text was changed after this record</b>' : ''}` : 'Reviewer has not recorded a discussion.'}</div>` : '';
     if (!(krMe().reviewers || []).find((y) => y.key === x.key && y.configured)) return `<section class="panel kr-col">${head}<div class="pad sub">${esc(x.label)}'s reviewer account isn't set up on the server yet (KPI_REVIEWER_${x.key.toUpperCase()}_EMAIL).</div></section>`;
     if (!mine) {
       return `<section class="panel kr-col">${head}<div class="pad">${r ? `<div class="kr-lbl">Coaching</div><div class="kr-text">${esc(r.coaching) || '<span class="muted">—</span>'}</div>
         <div class="kr-lbl">Feedback</div><div class="kr-text">${esc(r.feedback) || '<span class="muted">—</span>'}</div>${meta}` : `<div class="empty">No coaching or feedback from ${esc(x.label)} for this month yet.</div>`}
-        ${rv.can.slot !== x.key ? `<div class="sub">Only ${esc(x.label)} can edit this column.</div>` : !rv.employee.linked ? '' : '<div class="sub">You can\'t review yourself.</div>'}</div></section>`;
+        ${rv.can.slot !== x.key ? `<div class="sub">Only ${esc(x.label)} can edit this section.</div>` : '<div class="sub">You can\'t review yourself.</div>'}</div></section>`;
     }
     const val = (k) => (k in d ? d[k] : r ? r[k] : '');
     return `<section class="panel kr-col">${head}<div class="pad grid kr-form">
@@ -1217,7 +1223,7 @@
         ${Object.keys(d).length ? '<span class="sub">Unsaved changes</span>' : ''}</div></div></section>`;
   }
   function krAckBlock(rv) {
-    if (!rv.employee.linked) return '';
+    if (!rv.employee.linked) return `<div class="panel"><h3>Employee acknowledged discussion</h3><div class="pad sub">${esc(rv.employee.name)} can acknowledge once a Manager adds them in Settings → Team &amp; Access (role VA, VA label “${esc(rv.employee.vaLabel)}”, their own sign-in email). The reviews saved here move to them then.</div></div>`;
     const a = rv.ack, revs = Object.entries(rv.reviews).filter(([, r]) => r);
     const edited = a && revs.some(([k, r]) => r.version > ((a.reviewVersions || {})[k] || 0));
     // a Google account linked to the member after the review was written: worth checking it's really theirs
@@ -1273,10 +1279,12 @@
     const e = rv.employee;
     return head + `${st.labelsErr ? `<div class="src-err" role="alert">${esc(st.labelsErr)}</div>` : ''}
       <div class="kr-banner live" role="note"><b>Live review data</b> — KPIs from ${rv.source === 'monday' ? 'Monday.com' : 'MongoDB'}, read ${esc(manilaTime(rv.dataReadAt))}; they change as that data changes. Comments are saved as you save them.</div>
-      <div class="panel kr-emp"><h3>${esc(e.name)} <span class="muted">${e.linked ? 'Employee ID ' + esc(e.employeeId) : 'No employee ID yet'} · VA label ${esc(e.vaLabel)}</span></h3><div class="pad">
-        ${e.linked ? '' : `<div class="src-note stale">${esc(e.name)} is a VA label on the board with no Team &amp; Access member, so there is no stable employee ID: reviews, acknowledgment and snapshot comments can't be saved for them. Ask a Manager to add them in Settings → Team &amp; Access (role VA, VA label “${esc(e.vaLabel)}”, their own Google email).</div>`}
+      <div class="panel kr-emp"><h3>${esc(e.name)} <span class="muted">${e.linked ? 'Employee ID ' + esc(e.employeeId) : 'Not on Team &amp; Access yet'} · VA label ${esc(e.vaLabel)}</span></h3><div class="pad">
+        ${e.linked ? '' : `<div class="src-note">Reviews for ${esc(e.name)} are kept under their VA label. When a Manager adds them in Settings → Team &amp; Access (role VA, this VA label), the reviews move to their record and they can acknowledge the discussion.</div>`}
         ${rv.kpiError ? `<div class="src-err" role="alert">KPIs unavailable: ${esc(rv.kpiError)} No other data is shown in their place.</div>` : kpiBlock(rv.kpis, rv.period, rv.hasDeals, true)}</div></div>
-      ${e.linked ? `<div class="kr-cols">${KR.reviewers.map((x) => krColumn(rv, x)).join('')}</div>` : ''}
+      <div class="kr-cols">${KR.reviewers.map((x) => krColumn(rv, x)).join('')}</div>
+      ${(rv.unmoved || []).length ? `<div class="panel"><h3>Earlier reviews kept under the VA label <span class="muted">written before ${esc(e.name)} was on Team &amp; Access; not moved because a review already existed</span></h3><div class="pad">
+        ${rv.unmoved.map((r) => `<div class="kr-lbl">${esc((KR.reviewers.find((x) => x.key === r.reviewerKey) || {}).label || r.reviewerKey)} · ${esc(r.author.name)} · ${esc(manilaTime(r.updatedAt))}</div><div class="kr-text">${esc(r.coaching)}${r.coaching && r.feedback ? '\n\n' : ''}${esc(r.feedback)}</div>`).join('')}</div></div>` : ''}
       ${krAckBlock(rv)}${krSnapshotBar(rv)}`;
   }
   async function krSave() {
@@ -1623,6 +1631,7 @@
     const m = st.meta, edit = upEdit();
     const head = `<div class="panel"><h3>Upselling <span class="muted">offers to clients · 1:1 through respond.io or a respond.io broadcast tag</span><span class="spacer"></span>
         <select data-ch="upsel" aria-label="Offer">${(st.list || []).map((c) => `<option value="${esc(c.id)}" ${c.id === st.sel ? 'selected' : ''}>${esc(c.name)}${c.counts['message:sent'] ? ' · ' + c.counts['message:sent'] + ' sent' : ''}</option>`).join('') || '<option value="">No offers yet</option>'}</select>
+        ${edit && st.sel && (st.list || []).some((c) => c.id === st.sel && !Object.keys(c.counts || {}).length) ? '<button class="btn sm danger" data-act="updelete">Delete draft</button>' : ''}
         ${edit ? '<button class="btn sm primary" data-act="upnew">+ New offer</button>' : ''}</h3>
         ${m.sendsNote ? `<div class="pad"><div class="src-note stale" role="status">${esc(m.sendsNote)}</div></div>` : `<div class="pad sub">Sending is on: messages go to real clients, only after you review the recipients and confirm.</div>`}</div>`;
     if (!st.sel) return head + `<div class="empty">${edit ? 'Create an offer to start. Nothing is sent until you review and confirm.' : 'No offers yet.'}</div>`;
@@ -1716,10 +1725,21 @@
     } else { const s = $('[data-act="upsave"]'); if (s) s.disabled = false; }
   }
   Object.assign(ACT_PP, {
-    upreload: () => { Object.assign(up(), { meta: null, err: '' }); renderView(); },
-    upnew: async () => {
-      const name = prompt('Name of the new offer:', 'Concierge ' + new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' })); if (!name) return;
-      try { const r = await API.post('/api/upsell/campaigns', { name: name.slice(0, 80) }); up().list = [{ id: r.campaign.id, name: r.campaign.name, counts: {} }].concat(up().list || []); upOpen(r.campaign.id); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    // Try again starts over (also an offer whose loading failed)
+    upreload: () => { Object.assign(up(), { meta: null, err: '', sel: '', camp: null, draft: null, aud: null, results: null, dirty: false }); renderView(); },
+    // no browser prompt (blocked on some phones and in-app browsers): a default name, editable under "Offer name"
+    upnew: async (el) => {
+      const st = up(); if (st.dirty && !confirm('Discard your unsaved changes to this offer?')) return;
+      if (el) el.disabled = true;
+      try { const r = await API.post('/api/upsell/campaigns', { name: 'Concierge ' + new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) }); st.dirty = false; st.list = [{ id: r.campaign.id, name: r.campaign.name, counts: {} }].concat(st.list || []); await upOpen(r.campaign.id); toast('New offer created. Rename it under "Offer name". Nothing is sent until you review and confirm.'); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      if (el) el.disabled = false;
+    },
+    // an offer nothing was sent or tagged for can be deleted (the server keeps sent offers as records)
+    updelete: async () => {
+      const st = up(), c = (st.list || []).find((x) => x.id === st.sel); if (!c || !confirm(`Delete the draft "${c.name}"? It was never sent, so nothing else changes.`)) return;
+      try { await API.del('/api/upsell/campaigns/' + st.sel); Object.assign(st, { list: st.list.filter((x) => x.id !== st.sel), sel: '', camp: null, draft: null, aud: null, results: null, dirty: false }); toast('Draft deleted.'); if (st.list[0]) upOpen(st.list[0].id); else renderView(); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
     },
     upsave: () => upSave(),
     upaud: () => upAudience(),

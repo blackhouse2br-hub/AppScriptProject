@@ -15,6 +15,8 @@
 const SH = require('../public/shared');
 const { User, Lead, Viewing, LeadOverride, KpiFeedback, KpiAck, KpiSnapshot } = require('./models');
 const { sha256 } = require('./auth');
+const crypto = require('crypto');
+const mongoose = require('mongoose');
 
 const ID_RE = /^[a-f0-9]{24}$/i, LABEL_KEY_RE = /^va-([A-Za-z0-9_-]{1,160})$/;
 const bad = (res, msg) => res.status(400).json({ error: msg, errors: [msg] });
@@ -69,6 +71,28 @@ function kpiReviewRoutes(r, config, integ) {
   // one label per VA (case and spacing variants of a board label are the same VA, as everywhere else)
   const labelsIn = (data) => SH.vaLabels(data.leads.map((l) => l.va));
 
+  /**
+   * Whom a VA's reviews are filed under: their Team & Access member ID, or, for a board VA label with no member yet, a
+   * fixed ID made from the label (the same for every spelling of it), so Toby and Jonjo can review every VA.
+   */
+  const labelSubject = (label) => new mongoose.Types.ObjectId(crypto.createHash('sha256').update('kpi-va-label:' + SH.vaKey(label)).digest('hex').slice(0, 24));
+  /**
+   * Once a VA has a member record, reviews written under their label move to it, one by one, and only where the member
+   * has none for that reviewer and month (never overwriting); a move blocked that way leaves the label record as it was.
+   */
+  async function adoptLabelReviews(u) {
+    if (!u || u.role !== 'VA' || !SH.vaKey(u.vaLabel)) return;
+    // a label held by two members identifies neither: leave its reviews where they are (an admin fixes the labels)
+    if ((await User.find({ role: 'VA' }, { vaLabel: 1 }).lean()).filter((x) => SH.sameVa(x.vaLabel, u.vaLabel)).length > 1) return;
+    const recs = await KpiFeedback.find({ employeeId: labelSubject(u.vaLabel) }, { _id: 1 }).lean();
+    for (const x of recs) {
+      try { await KpiFeedback.updateOne({ _id: x._id }, { $set: { employeeId: u._id } }); } catch (err) { if (err.code !== 11000) throw err; }
+    }
+  }
+
+  /** A reviewer never reviews themselves: their own member record, or a board VA label that is their own label or name. */
+  const isSelf = (emp, u) => (emp.linked ? sameId(emp.employeeId, u._id) : SH.sameVa(emp.vaLabel, u.vaLabel) || SH.sameVa(emp.vaLabel, u.name));
+
   /** Every VA: Team & Access members with the VA role, then board VA labels that no member has yet. */
   async function employees(data) {
     const users = await User.find({ role: 'VA' }).sort({ name: 1 }).lean();
@@ -91,17 +115,17 @@ function kpiReviewRoutes(r, config, integ) {
     if (!SH.validPeriod(req.params.period)) { bad(res, `Pick a reporting month (this month or up to ${SH.KPI_REVIEW.monthsBack} months back).`); return null; }
     return req.params.period;
   };
-  /** The employee a :key names: { employeeId|null, name, vaLabel, linked }. */
+  /** The employee a :key names: { employeeId|null, subject (whom reviews are filed under), name, vaLabel, linked }. */
   async function employeeFor(req, res, data) {
     const key = String(req.params.key || ''), m = LABEL_KEY_RE.exec(key);
     let emp = null;
     if (ID_RE.test(key)) {
       const u = await User.findOne({ _id: key, role: 'VA' }).lean();
-      if (u) emp = { employeeId: String(u._id), name: u.name, vaLabel: u.vaLabel || '', linked: true };
+      if (u) { await adoptLabelReviews(u); emp = { employeeId: String(u._id), subject: u._id, name: u.name, vaLabel: u.vaLabel || '', linked: true }; }
     } else if (m) {
       const label = Buffer.from(m[1], 'base64url').toString('utf8');
       const members = await User.find({ role: 'VA' }, { vaLabel: 1 }).lean();
-      if (data && labelsIn(data).includes(label) && !members.some((u) => SH.sameVa(u.vaLabel, label))) emp = { employeeId: null, name: label, vaLabel: label, linked: false };
+      if (data && labelsIn(data).includes(label) && !members.some((u) => SH.sameVa(u.vaLabel, label))) emp = { employeeId: null, subject: labelSubject(label), name: label, vaLabel: label, linked: false };
     }
     if (!emp) res.status(404).json({ error: 'Employee not found.' });
     return emp;
@@ -137,24 +161,29 @@ function kpiReviewRoutes(r, config, integ) {
     let data = null, kpiError = '';
     try { data = await kpiData(); } catch (err) { if (!err.integration) throw err; kpiError = err.message; }
     const emp = await employeeFor(req, res, data); if (!emp) return;
-    const [fb, ack, snap] = emp.linked ? await Promise.all([KpiFeedback.find({ employeeId: emp.employeeId, period: p }).lean(), KpiAck.findOne({ employeeId: emp.employeeId, period: p }).lean(),
-      KpiSnapshot.findOne({ period: p, scope: SH.KPI_REVIEW.scope }, { createdAt: 1, 'createdBy.name': 1 }).lean()]) : [[], null, await KpiSnapshot.findOne({ period: p, scope: SH.KPI_REVIEW.scope }, { createdAt: 1, 'createdBy.name': 1 }).lean()];
+    const [fb, ack, snap] = await Promise.all([KpiFeedback.find({ employeeId: emp.subject, period: p }).lean(), emp.linked ? KpiAck.findOne({ employeeId: emp.employeeId, period: p }).lean() : null,
+      KpiSnapshot.findOne({ period: p, scope: SH.KPI_REVIEW.scope }, { createdAt: 1, 'createdBy.name': 1 }).lean()]);
     const reviews = Object.fromEntries(reviewers.map((x) => [x.key, reviewOut(fb.find((f) => f.reviewerKey === x.key)) || null]));
-    const self = emp.linked && sameId(emp.employeeId, req.user._id), slot = req.kr.slot;
+    // reviews written under this member's VA label that couldn't move (the member already had one): shown, not lost
+    const unmoved = emp.linked && SH.vaKey(emp.vaLabel) ? (await KpiFeedback.find({ employeeId: labelSubject(emp.vaLabel), period: p }).lean()).map(reviewOut) : [];
+    const self = isSelf(emp, req.user), slot = req.kr.slot;
     res.json({
       period: p, employee: { key: req.params.key, employeeId: emp.employeeId, name: emp.name, vaLabel: emp.vaLabel, linked: emp.linked },
       kpis: data ? kpisFor(data, emp.vaLabel, p) : null, kpiError, source: data ? data.source : '', dataReadAt: data ? data.readAt : null, hasDeals: !!(data && data.deals),
-      reviews, ack: ackOut(ack), snapshot: snap ? { createdAt: snap.createdAt, by: snap.createdBy && snap.createdBy.name } : null,
-      can: { write: emp.linked && !self, slot: slot.key, snapshot: true },
+      reviews, unmoved, ack: ackOut(ack), snapshot: snap ? { createdAt: snap.createdAt, by: snap.createdBy && snap.createdBy.name } : null,
+      can: { write: !self, slot: slot.key, snapshot: true },
     });
   });
 
-  /** The linked employee a reviewer is writing about (never themselves). */
+  /** The VA a reviewer is writing about (a member or a board VA label; never the reviewer themselves). */
   async function reviewTarget(req, res) {
     const p = period(req, res); if (!p) return null;
-    if (!ID_RE.test(req.params.key)) { res.status(409).json({ error: 'This VA label has no Team & Access member yet. Ask a Manager to add them (role VA, this VA label), then write the review.' }); return null; }
-    const emp = await employeeFor(req, res, null); if (!emp) return null;
-    if (sameId(emp.employeeId, req.user._id)) { res.status(403).json({ error: 'You can\'t review yourself.' }); return null; }
+    let data = null;
+    if (!ID_RE.test(req.params.key)) {   // a VA label: checked against the board's labels
+      try { data = await kpiData(); } catch (err) { if (!err.integration) throw err; res.status(502).json({ error: err.message + ' The review wasn\'t saved.' }); return null; }
+    }
+    const emp = await employeeFor(req, res, data); if (!emp) return null;
+    if (isSelf(emp, req.user)) { res.status(403).json({ error: 'You can\'t review yourself.' }); return null; }
     return { emp, p };
   }
 
@@ -163,7 +192,7 @@ function kpiReviewRoutes(r, config, integ) {
     const t = await reviewTarget(req, res); if (!t) return;
     const { value, errors } = SH.validateKpiFeedback(req.body);
     if (errors.length) return bad(res, errors[0]);
-    const key = { employeeId: t.emp.employeeId, period: t.p, reviewerKey: req.kr.slot.key };
+    const key = { employeeId: t.emp.subject, period: t.p, reviewerKey: req.kr.slot.key };
     const conflict = async () => res.status(409).json({ conflict: true, review: reviewOut(await KpiFeedback.findOne(key).lean()),
       error: 'Your review for this month was changed in another tab or device since you opened it. Your text was not saved: copy it, reload, and save again.' });
     await KpiFeedback.init();   // the unique index must exist first, so two first saves can't both insert
@@ -181,7 +210,7 @@ function kpiReviewRoutes(r, config, integ) {
   r.post('/kpi-review/review/:key/:period/discussed', viewer, async (req, res) => {
     const t = await reviewTarget(req, res); if (!t) return;
     if (req.body && Object.keys(req.body).length) return bad(res, 'Invalid request.');
-    const key = { employeeId: t.emp.employeeId, period: t.p, reviewerKey: req.kr.slot.key };
+    const key = { employeeId: t.emp.subject, period: t.p, reviewerKey: req.kr.slot.key };
     // recorded against the text as it is now (its version): a later edit shows as "changed after the discussion record"
     const cur = await KpiFeedback.findOne(key).lean();
     if (!cur) return res.status(409).json({ error: 'Save your coaching or feedback first.' });
@@ -197,6 +226,7 @@ function kpiReviewRoutes(r, config, integ) {
   const ONLY_EMPLOYEE = 'Only the employee being reviewed can acknowledge the discussion, signed in with their own account.';
   r.get('/kpi-review/my-acknowledgments', async (req, res) => {
     if (req.user.role !== 'VA') return res.status(403).json({ error: ONLY_EMPLOYEE });
+    await adoptLabelReviews(req.user);   // reviews written before this VA had a member record
     const [months, acks] = await Promise.all([KpiFeedback.distinct('period', { employeeId: req.user._id }), KpiAck.find({ employeeId: req.user._id }).lean()]);
     res.json({ months: months.sort().reverse().map((p) => { const a = acks.find((x) => x.period === p); return { period: p, acknowledged: !!a, at: a ? a.createdAt : null }; }) });
   });
@@ -208,6 +238,7 @@ function kpiReviewRoutes(r, config, integ) {
     // on a Google server: made in a session of the Google account linked to this member (not one kept from before)
     const linked = google ? await googleBound(req.user, req.sessionDoc) : null;
     if (google && !linked) return res.status(403).json({ error: 'Sign out and sign in again with your Google account, then acknowledge.' });
+    await adoptLabelReviews(req.user);
     const fb = await KpiFeedback.find({ employeeId: req.user._id, period: p }, { reviewerKey: 1, version: 1 }).lean();
     if (!fb.length) return res.status(409).json({ error: 'There is no coaching or feedback for this month yet.' });
     await KpiAck.init();
@@ -245,12 +276,15 @@ function kpiReviewRoutes(r, config, integ) {
     let data;
     try { data = await kpiData(); } catch (err) { if (!err.integration) throw err; return res.status(502).json({ error: err.message + ' No snapshot was created.' }); }
     const emps = await employees(data), ids = emps.filter((e) => e.linked).map((e) => e.employeeId);
-    const [fb, acks] = await Promise.all([KpiFeedback.find({ period: p, employeeId: { $in: ids } }).lean(), KpiAck.find({ period: p, employeeId: { $in: ids } }).lean()]);
+    // members' reviews (after moving any written under their label) and reviews of VA labels with no member yet
+    for (const u of await User.find({ _id: { $in: ids } }).lean()) await adoptLabelReviews(u);
+    emps.forEach((e) => { e.subject = e.linked ? e.employeeId : String(labelSubject(e.vaLabel)); });
+    const [fb, acks] = await Promise.all([KpiFeedback.find({ period: p, employeeId: { $in: emps.map((e) => e.subject) } }).lean(), KpiAck.find({ period: p, employeeId: { $in: ids } }).lean()]);
     const label = Object.fromEntries(reviewers.map((x) => [x.key, x.label]));
     const employeesOut = emps.map((e) => {
       const ack = e.linked ? acks.find((a) => sameId(a.employeeId, e.employeeId)) : null;
       return { employeeId: e.employeeId, name: e.name, vaLabel: e.vaLabel, kpis: kpisFor(data, e.vaLabel, p),
-        reviews: fb.filter((f) => sameId(f.employeeId, e.employeeId)).map((f) => ({ reviewerKey: f.reviewerKey, reviewerLabel: label[f.reviewerKey] || f.reviewerKey,
+        reviews: fb.filter((f) => sameId(f.employeeId, e.subject)).map((f) => ({ reviewerKey: f.reviewerKey, reviewerLabel: label[f.reviewerKey] || f.reviewerKey,
           reviewer: { userId: f.author.userId, name: f.author.name, email: f.author.email }, coaching: f.coaching, feedback: f.feedback, updatedAt: f.updatedAt, version: f.version, discussedAt: f.discussedAt || null, discussedVersion: f.discussedVersion || 0 })),
         ack: !e.linked ? { status: 'not_available', by: null, at: null } : ack ? { status: 'acknowledged', by: { userId: ack.by.userId, name: ack.by.name, email: ack.by.email }, at: ack.createdAt } : { status: 'not_acknowledged', by: null, at: null } };
     });

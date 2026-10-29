@@ -123,10 +123,11 @@ test('Toby and Jonjo open KPI Review; Lara is her own employee, with the VA Mana
   const w = SH.vaWorkload(boot.leads, boot.viewings, 'Lara');
   assert.deepStrictEqual(Object.fromEntries(r.kpis.current.map((k) => [k.key, k.value])), w);
   assert.strictEqual(r.kpis.current.find((k) => k.key === 'leads').label, 'Leads');
-  // an unlinked label: KPIs only; nothing can be saved for it
+  // a VA label with no member yet: reviewable too (kept under the label); a label not on the board is not
   const b = (await call('GET', `/api/kpi-review/review/${labelKey('Bea')}/${PERIOD}`, { cookie })).data;
-  assert.strictEqual(b.employee.linked, false); assert.strictEqual(b.can.write, false);
-  assert.strictEqual((await call('PUT', `/api/kpi-review/review/${labelKey('Bea')}/${PERIOD}/feedback`, { cookie, body: { coaching: 'x', feedback: '', version: 0 } })).status, 409);
+  assert.strictEqual(b.employee.linked, false); assert.strictEqual(b.can.write, true);
+  assert.strictEqual((await call('GET', `/api/kpi-review/review/${labelKey('Nobody Such')}/${PERIOD}`, { cookie })).status, 404);
+  assert.strictEqual((await call('PUT', `/api/kpi-review/review/${labelKey('Nobody Such')}/${PERIOD}/feedback`, { cookie, body: { coaching: 'x', feedback: '', version: 0 } })).status, 404);
 });
 
 test('Toby and Jonjo save independently, each only their own column; edits are concurrency-safe and persist', async () => {
@@ -331,4 +332,73 @@ test('Google server: a Manager can\'t turn a kept session into a reviewer by swa
     srv.close(); g.close();
     await User.updateOne({ _id: ids.blackhouse }, { $set: { email: EMAILS.blackhouse, name: 'blackhouse' }, $unset: { googleSub: 1 } });
   }
+});
+
+test('Toby and Jonjo each save their own Coaching and Feedback for every VA and month; both read both; nobody overwrites the other', async () => {
+  const toby = await login('toby'), jonjo = await login('jonjo');
+  const [y, m] = PERIOD.split('-').map(Number), back = (n) => new Date(Date.UTC(y, m - 1 - n, 1)).toISOString().slice(0, 7);
+  const months = [back(2), back(3)], vas = [['Lara (member)', ids.lara], ['Ana (member)', ids.ana], ['Bea (VA label only)', labelKey('Bea')], ['Cora (VA label only)', labelKey('Cora Fake')]];
+  for (const [name, key] of vas) for (const p of months) {
+    const url = `/api/kpi-review/review/${key}/${p}/feedback`;
+    const t = await call('PUT', url, { cookie: toby, body: { coaching: `Toby coaching ${name} ${p}`, feedback: `Toby feedback ${name} ${p}`, version: 0 } });
+    const j = await call('PUT', url, { cookie: jonjo, body: { coaching: `Jonjo coaching ${name} ${p}`, feedback: `Jonjo feedback ${name} ${p}`, version: 0 } });
+    assert.deepStrictEqual([t.status, j.status], [200, 200], `${name} ${p}: ${JSON.stringify([t.data, j.data])}`);
+  }
+  // both reviewers read both sections, each with its author and time
+  for (const c of [toby, jonjo]) for (const [name, key] of vas) for (const p of months) {
+    const r = (await call('GET', `/api/kpi-review/review/${key}/${p}`, { cookie: c })).data;
+    assert.strictEqual(r.reviews.toby.coaching, `Toby coaching ${name} ${p}`); assert.strictEqual(r.reviews.toby.author.name, 'Toby'); assert.ok(r.reviews.toby.updatedAt);
+    assert.strictEqual(r.reviews.jonjo.feedback, `Jonjo feedback ${name} ${p}`); assert.strictEqual(r.reviews.jonjo.author.name, 'Jonjo');
+  }
+  // a reviewer's save only ever reaches their own section: Jonjo's update leaves Toby's text as it was
+  const bea = `/api/kpi-review/review/${labelKey('Bea')}/${months[0]}`;
+  const jv = (await call('GET', bea, { cookie: jonjo })).data.reviews.jonjo.version;
+  assert.strictEqual((await call('PUT', bea + '/feedback', { cookie: jonjo, body: { coaching: 'Jonjo v2', feedback: 'Jonjo v2', version: jv } })).status, 200);
+  const after = (await call('GET', bea, { cookie: toby })).data;
+  assert.deepStrictEqual([after.reviews.toby.coaching, after.reviews.jonjo.coaching], [`Toby coaching Bea (VA label only) ${months[0]}`, 'Jonjo v2']);
+  assert.strictEqual((await call('PUT', bea + '/feedback', { cookie: jonjo, body: { coaching: 'x', feedback: 'y', version: 1, reviewerKey: 'toby' } })).status, 400);
+  // the reviewers' discussion record works for a VA label too
+  assert.strictEqual((await call('POST', bea + '/discussed', { cookie: toby, body: {} })).status, 200);
+  // nobody else can read or change any of it (the Blackhouse account signs in afresh: the Google test above ended its sessions)
+  delete cookies.blackhouse;
+  for (const who of ['blackhouse', 'manager', 'ana', 'lara', 'broker']) {
+    const c = await login(who);
+    assert.strictEqual((await call('GET', bea, { cookie: c })).status, 403, who);
+    assert.strictEqual((await call('PUT', bea + '/feedback', { cookie: c, body: { coaching: 'x', feedback: 'y', version: 0 } })).status, 403, who);
+  }
+  assert.strictEqual((await call('GET', bea)).status, 401);
+  // when Bea is added in Team & Access, the reviews written under her label move to her record; she can then acknowledge
+  const beaUser = await User.create({ email: 'bea.va@example.com', name: 'Bea VA', role: 'VA', vaLabel: 'Bea', passwordHash: await hashPassword(PW) });
+  EMAILS.bea = 'bea.va@example.com';
+  const moved = (await call('GET', `/api/kpi-review/review/${beaUser.id}/${months[0]}`, { cookie: toby })).data;
+  assert.deepStrictEqual([moved.reviews.toby.coaching, moved.reviews.jonjo.coaching, !!moved.reviews.toby.discussedAt], [`Toby coaching Bea (VA label only) ${months[0]}`, 'Jonjo v2', true]);
+  assert.strictEqual((await call('GET', bea, { cookie: toby })).status, 404, 'the label now belongs to a member');
+  const beaCookie = await login('bea');
+  assert.deepStrictEqual((await call('GET', '/api/kpi-review/my-acknowledgments', { cookie: beaCookie })).data.months.map((x) => x.period).sort(), months.slice().sort());
+  assert.strictEqual((await call('POST', `/api/kpi-review/my-acknowledgments/${months[0]}`, { cookie: beaCookie, body: { confirm: true } })).status, 201);
+  // a snapshot keeps label-only VAs' reviews too
+  const s = await call('POST', '/api/kpi-review/snapshots', { cookie: jonjo, body: { period: months[1] } });
+  assert.strictEqual(s.status, 201, JSON.stringify(s.data));
+  const cora = s.data.snapshot.employees.find((e) => e.vaLabel === 'Cora Fake');
+  assert.deepStrictEqual(cora.reviews.map((r) => r.reviewerKey).sort(), ['jonjo', 'toby']);
+});
+
+test('label edge cases: a shared label moves nothing; a blocked move stays visible; label variants', async () => {
+  const toby = await login('toby'), jonjo = await login('jonjo');
+  const [y, m] = PERIOD.split('-').map(Number), p = new Date(Date.UTC(y, m - 5, 1)).toISOString().slice(0, 7);
+  // Cora Fake: written under the label, then a member is added who already has a review for that month (blocked move)
+  const coraKey = labelKey('Cora Fake');
+  assert.strictEqual((await call('PUT', `/api/kpi-review/review/${coraKey}/${p}/feedback`, { cookie: toby, body: { coaching: 'Under the label', feedback: '', version: 0 } })).status, 200);
+  const cora = await User.create({ email: 'cora.va@example.com', name: 'Cora VA', role: 'VA', vaLabel: 'Cora Fake', passwordHash: await hashPassword(PW) });
+  await KpiFeedback.create({ employeeId: cora._id, period: p, reviewerKey: 'toby', coaching: 'Already on the member', author: { userId: ids.toby, name: 'Toby' }, createdBy: { userId: ids.toby, name: 'Toby' } });
+  const r = (await call('GET', `/api/kpi-review/review/${cora.id}/${p}`, { cookie: jonjo })).data;
+  assert.strictEqual(r.reviews.toby.coaching, 'Already on the member', 'never overwritten');
+  assert.deepStrictEqual(r.unmoved.map((x) => x.coaching), ['Under the label'], 'the blocked one is shown, not lost');
+  // two members with one label: reviews under it stay put
+  const dev1 = await User.create({ email: 'dev1@example.com', name: 'Dev One', role: 'VA', vaLabel: 'Dev Fake', passwordHash: await hashPassword(PW) });
+  await User.create({ email: 'dev2@example.com', name: 'Dev Two', role: 'VA', vaLabel: 'dev fake', passwordHash: await hashPassword(PW) });
+  const subject = new mongoose.Types.ObjectId(require('crypto').createHash('sha256').update('kpi-va-label:' + SH.vaKey('Dev Fake')).digest('hex').slice(0, 24));
+  await KpiFeedback.create({ employeeId: subject, period: p, reviewerKey: 'jonjo', coaching: 'Shared label review', author: { userId: ids.jonjo, name: 'Jonjo' }, createdBy: { userId: ids.jonjo, name: 'Jonjo' } });
+  await call('GET', `/api/kpi-review/review/${dev1.id}/${p}`, { cookie: toby });
+  assert.strictEqual(await KpiFeedback.countDocuments({ employeeId: subject }), 1, 'not moved to either member');
 });

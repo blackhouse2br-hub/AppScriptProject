@@ -110,7 +110,7 @@ async function cdp(wsUrl) {
       check(`Lara's KPIs and labels shown${tag}`, /2\s*Clients assigned in the month/.test(kp) && /50%\s*To viewing/.test(kp) && /50%\s*Lost/.test(kp) && /2\s*Leads/.test(kp), kp);
       check(`live data labelled as live${tag}`, /Live review data/.test(await c.ev(`document.querySelector('.kr-banner').textContent`)));
       const cols = await c.ev(`[...document.querySelectorAll('.kr-col')].map((x) => x.querySelector('h3').textContent + (x.querySelector('textarea') ? ' [edit]' : ' [read]')).join(' | ')`);
-      check(`separate Toby / Jonjo columns, only Toby's editable${tag}`, /Toby — coaching & feedback \[edit\] \| Jonjo — coaching & feedback \[read\]/.test(cols), cols);
+      check(`separate Toby / Jonjo columns, only Toby's editable${tag}`, /Toby — coaching & feedback yours \[edit\] \| Jonjo — coaching & feedback \[read\]/.test(cols), cols);
       const pos = await c.ev(`[...document.querySelectorAll('.kr-col')].map((x) => [Math.round(x.getBoundingClientRect().top), Math.round(x.getBoundingClientRect().left)])`);
       check(mobile ? 'phone: columns stacked' : 'desktop: columns side by side', mobile ? pos[1][0] > pos[0][0] && pos[1][1] === pos[0][1] : pos[1][0] === pos[0][0] && pos[1][1] > pos[0][1], JSON.stringify(pos));
       check(`no sideways scrolling${tag}`, await c.ev('document.documentElement.scrollWidth <= window.innerWidth + 1'));
@@ -120,7 +120,7 @@ async function cdp(wsUrl) {
       if (label === 'desktop') {
         await type('coaching', SECRET); await type('feedback', 'Toby feedback for Lara');
         await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
-        await until(`/Saved by Toby/.test(document.querySelector('.kr-col').textContent)`);
+        await until(`/aved by Toby/.test(document.querySelector('.kr-col').textContent)`);
         check('Toby\'s save shows success', /Review saved/.test(await c.ev(`document.querySelector('#toast').textContent`)));
         // a save that the server refuses shows an error and keeps the text
         await type('coaching', ''); await type('feedback', '');
@@ -140,8 +140,19 @@ async function cdp(wsUrl) {
         await until(`document.querySelectorAll('.kr-col').length === 2 && !!document.querySelectorAll('.kr-col')[1].querySelector('textarea')`);
         check('Jonjo reads Toby\'s review, edits only his own', (await c.ev(`document.querySelectorAll('.kr-col')[0].textContent`)).includes(SECRET) && !(await c.ev(`!!document.querySelectorAll('.kr-col')[0].querySelector('textarea')`)));
         await type('feedback', 'Jonjo feedback for Lara'); await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
-        await until(`/Saved by Jonjo/.test(document.querySelectorAll('.kr-col')[1].textContent)`);
+        await until(`/aved by Jonjo/.test(document.querySelectorAll('.kr-col')[1].textContent)`);
         check('Jonjo\'s save leaves Toby\'s column unchanged', (await c.ev(`document.querySelectorAll('.kr-col')[0].textContent`)).includes(SECRET));
+        check('each section shows who last saved it and when', /Last saved by Toby \(test reviewer\) · .*Manila/.test(await c.ev(`document.querySelectorAll('.kr-col')[0].querySelector('.kr-saved').textContent`)) && /Last saved by Jonjo/.test(await c.ev(`document.querySelectorAll('.kr-col')[1].querySelector('.kr-saved').textContent`)));
+        // a VA with no Team & Access member yet (Bea): reviewable, in two different months
+        const pickVa = (re) => c.ev(`(() => { const s = document.querySelector('[data-ch="kremp"]'); s.value = [...s.options].find((o) => ${re}.test(o.text)).value; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        for (const idx of [0, 1]) {
+          await c.ev(`(() => { const s = document.querySelector('[data-ch="krperiod"]'); s.selectedIndex = ${idx}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await pickVa('/^Bea/'); await until(`document.querySelectorAll('.kr-col').length === 2 && !!document.querySelectorAll('.kr-col')[1].querySelector('textarea') && /Bea/.test(document.querySelector('.kr-emp h3').textContent)`);
+          await type('coaching', 'Jonjo coaching Bea m' + idx); await type('feedback', 'Jonjo feedback Bea m' + idx);
+          await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
+          await until(`/Last saved by Jonjo/.test(document.querySelectorAll('.kr-col')[1].querySelector('.kr-saved').textContent)`);
+        }
+        check('Jonjo saves for a VA not yet on Team & Access, in two months', true);
 
         // the Blackhouse account (a Manager): no KPI Review in the UI, nothing private in the page, direct API calls refused
         await signIn(ACCOUNTS[2][0]);
@@ -180,6 +191,11 @@ async function cdp(wsUrl) {
         await signIn(ACCOUNTS[0][0]); await go('kpireview'); await until(`!!document.querySelector('[data-ch="kremp"]')`); await pickLara();
         await until(`/Lara<\\/b> confirmed/.test(document.querySelector('#view').innerHTML)`);
         check('Toby sees Lara\'s own acknowledgment', true);
+        await pickVa('/^Bea/'); await until(`/Bea/.test(document.querySelector('.kr-emp h3').textContent) && document.querySelectorAll('.kr-col').length === 2`);
+        check('Toby reads Jonjo\'s section for Bea, read-only; his own is empty and editable',
+          /Jonjo coaching Bea m0/.test(await c.ev(`document.querySelectorAll('.kr-col')[1].textContent`)) && !(await c.ev(`!!document.querySelectorAll('.kr-col')[1].querySelector('textarea')`))
+          && (await c.ev(`document.querySelectorAll('.kr-col')[0].querySelector('textarea[data-k="coaching"]').value`)) === '');
+        await pickVa('/^Lara/'); await until(`/Lara/.test(document.querySelector('.kr-emp h3').textContent)`);
         await c.ev(`document.querySelector('[data-act="krsnap"]').click()`);
         await until(`/Snapshot saved/.test(document.querySelector('#toast').textContent)`);
         await until(`!!document.querySelector('[data-act="krmode"][data-v="snap"].btn')`);
