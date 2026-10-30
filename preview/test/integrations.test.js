@@ -223,11 +223,27 @@ test('Team & Access: VA labels come from the Monday board and are enforced on sa
   const post = (body) => fetch(base + '/api/team', { method: 'POST', headers: { 'content-type': 'application/json', cookie: boss }, body: JSON.stringify(body) }).then((x) => x.status);
   const member = { name: 'Cora Test', email: 'cora@example.com', role: 'VA', modules: { leads: 'view' }, password: 'a-long-temporary-pw' };
   assert.strictEqual(await post({ ...member, vaLabel: 'Not A Label' }), 400);
+  // the preview's fictional VA names are not accepted when the board doesn't have them (Carlo isn't on it)
+  assert.strictEqual(await post({ ...member, vaLabel: 'Carlo' }), 400);
   assert.strictEqual(await post({ ...member, vaLabel: 'Cora Fake' }), 201);                   // real board label accepted
   const cora = await login(base, 'cora@example.com', 'a-long-temporary-pw');
   assert.deepStrictEqual((await call(base, 'GET', '/api/monday/bootstrap', cora)).data.leads.map((l) => l.code), ['BH-T5']);
   const ana = await login(base, 'ana@example.com');
   assert.strictEqual((await call(base, 'GET', '/api/team/labels', ana)).status, 403);
+});
+
+test('VA Portal "Asking owner": the open Asking records of the clients this member can see, VA Portal access only', async () => {
+  const boss = await login(base, 'boss@example.com');
+  const post = (url, body, cookie) => fetch(base + url, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify(body) }).then((x) => x.status);
+  assert.ok([200, 201].includes(await post('/api/leads/monday/9001/asking', { listingId: '7001' }, boss)));   // Ana's client (test database)
+  assert.ok([200, 201].includes(await post('/api/leads/monday/9003/asking', { listingId: '7001' }, boss)));   // Bea's client
+  const all = (await call(base, 'GET', '/api/asking/open?source=monday', boss)).data.rows.map((r) => r.leadId).sort();
+  assert.deepStrictEqual(all, ['9001', '9003']);
+  const ana = await login(base, 'ana@example.com');
+  assert.strictEqual((await call(base, 'GET', '/api/asking/open?source=monday', ana)).status, 403, 'no VA Portal access');
+  await User.updateOne({ email: 'ana@example.com' }, { $set: { 'modules.vaportal': 'view' } });
+  assert.deepStrictEqual((await call(base, 'GET', '/api/asking/open?source=monday', ana)).data.rows.map((r) => r.leadId), ['9001'], 'only her own clients');
+  assert.deepStrictEqual((await call(base, 'GET', '/api/asking/open?source=mongo', ana)).data.rows, [], 'per source');
 });
 
 test('listing photos: proxied, image types only, Monday token never sent to the file host', async () => {

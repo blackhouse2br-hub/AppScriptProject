@@ -33,13 +33,17 @@ function upsellRoutes(r, config, integ) {
   // excludeCampaign: "last offer" leaves out that campaign's own sends (they are tracked per client by its records,
   // so its recipients stay on its list with their status instead of dropping out after the send)
   async function clientRows(user, excludeCampaign) {
-    let source, leads, tenants = new Set();
+    let source, leads, tenants = new Set(), tenantsNote = '';
     if (integ.monday) {
       const all = await integ.monday.loadAll(false);
       if (all.errors.leads) { const e = new Error('The Monday leads board could not be read: ' + all.errors.leads); e.integration = 'monday'; throw e; }
       leads = scopeExternal(user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads; source = 'monday';
       // tenants: a closed or contracted (not failed) deal on the Calendar board, as the Renewals screen reads leases
       (all.deals || []).forEach((d) => { if (d.leadId && !SH.dealFailed(d) && (d.contract || /^closed$/i.test(String(d.status || '').trim()) || d.exp)) tenants.add(d.leadId); });
+      // and a client whose own status or group is "Closed" (Code.gs isDeal_ reads the lead's status and group; the portal
+      // reads Monday's status as two fields, Next Action and Client Status, so both are checked), unless failed
+      leads.forEach((l) => { if (![l.nextAction, l.clientStatus].some((s) => /^(failed|lost|disqualif)/i.test(String(s || '').trim())) && [l.nextAction, l.clientStatus, l.group].some((s) => /^closed$/i.test(String(s || '').trim()))) tenants.add(String(l.id)); });
+      if (all.errors.viewings || !all.calendarOk) tenantsNote = `The Monday Calendar board ${all.errors.viewings ? 'could not be read' : 'is not set up'}, so tenants are only the clients marked Closed on the leads board.`;
     } else {
       source = 'mongo';
       const ovs = new Set((await LeadOverride.find({ source: 'mongo', failed: { $ne: null } }, { leadId: 1 }).lean()).map((o) => o.leadId));
@@ -55,7 +59,7 @@ function upsellRoutes(r, config, integ) {
     const cidOf = (l) => String(l.contactId || '').replace(/\D/g, '');
     // an opt-out covers every lead with the same respond.io contact (a returning client can have two leads)
     const optedCids = new Set(leads.filter((l) => opted.has(String(l.id))).map(cidOf).filter(Boolean));
-    return { source, rows: leads.map((l) => ({ id: String(l.id), source, name: l.name || '', email: l.email || '', phone: l.phone || '', status: l.clientStatus || l.status || '',
+    return { source, tenantsNote, rows: leads.map((l) => ({ id: String(l.id), source, name: l.name || '', email: l.email || '', phone: l.phone || '', status: l.clientStatus || l.status || '',
       type: l.inquiry === 'Buy' ? 'Buy' : l.inquiry === 'Rent' ? 'Rent' : '', city: l.city || '', building: l.building || '', va: l.va || '',
       contactId: cidOf(l), onRespond: !!cidOf(l), tenant: tenants.has(String(l.id)), lastOffer: last.get(String(l.id)) || 0,
       optedSelf: opted.has(String(l.id)), optedOut: opted.has(String(l.id)) || (!!cidOf(l) && optedCids.has(cidOf(l))) })) };
@@ -66,7 +70,7 @@ function upsellRoutes(r, config, integ) {
    * One respond.io contact is never in a batch twice, nor sent to again when another of its leads already got it.
    */
   async function audienceOf(user, c) {
-    const { source, rows } = await clientRows(user, c._id);
+    const { source, rows, tenantsNote } = await clientRows(user, c._id);
     const list = SH.upsellAudience(rows, c.audience, Date.now());
     const recs = await UpsellSend.find({ campaignId: c._id, source }).lean();
     const batch = (action, retry) => {
@@ -83,7 +87,7 @@ function upsellRoutes(r, config, integ) {
       const hash = crypto.createHash('sha256').update(JSON.stringify([source, action, !!retry, out.map((x) => x.id), c.text, c.image ? c.image.id : '', c.tag])).digest('hex').slice(0, 32);
       return { list: out, hash };
     };
-    return { source, rows, list, recs, batches: { message: batch('message', false), tag: batch('tag', false), retry: batch('message', true) } };
+    return { source, rows, list, recs, tenantsNote, batches: { message: batch('message', false), tag: batch('tag', false), retry: batch('message', true) } };
   }
   const recipientOut = (x) => ({ id: x.id, name: x.name, status: x.status, type: x.type, city: x.city, email: x.email, phone: x.phone, onRespond: x.onRespond, tenant: x.tenant, lastOffer: x.lastOffer || null });
   const failed = (res, err) => { if (!err.integration) throw err; res.status(err.httpStatus || 502).json({ error: err.message }); };
@@ -180,7 +184,7 @@ function upsellRoutes(r, config, integ) {
       const done = new Map(a.recs.map((s) => [s.action + ':' + s.leadId, s]));
       const statuses = [...new Set(a.rows.map((x) => x.status).filter(Boolean))].sort();
       const bOut = (k) => ({ hash: a.batches[k].hash, ids: a.batches[k].list.map((x) => x.id), names: a.batches[k].list.map((x) => x.name) });
-      res.json({ source: a.source, total: a.rows.length, optedOut: a.rows.filter((x) => x.optedOut).length, statuses,
+      res.json({ source: a.source, total: a.rows.length, tenantsNote: a.tenantsNote || '', optedOut: a.rows.filter((x) => x.optedOut).length, statuses,
         batches: { message: bOut('message'), tag: bOut('tag'), retry: bOut('retry') },
         opted: a.rows.filter((x) => x.optedOut).slice(0, 500).map((x) => ({ id: x.id, name: x.name, self: x.optedSelf })),
         counts: { audience: a.list.length, respond: a.list.filter((x) => x.onRespond).length, email: a.list.filter((x) => x.email).length, phone: a.list.filter((x) => x.phone).length },
@@ -189,8 +193,11 @@ function upsellRoutes(r, config, integ) {
   });
   r.get('/upsell/campaigns/:id/preview', view, async (req, res) => {
     const c = await campaignFor(req, res); if (!c) return;
-    let lead = { name: 'Maria Santos', building: '' };
-    if (req.query.lead) { try { const a = await audienceOf(req.user, c); lead = a.list.find((x) => x.id === String(req.query.lead)) || lead; } catch (err) { return failed(res, err); } }
+    // always a real client of the audience: never a stand-in name
+    if (!req.query.lead) return res.status(400).json({ error: 'Pick a client to preview the message for.' });
+    let lead;
+    try { const a = await audienceOf(req.user, c); lead = a.list.find((x) => x.id === String(req.query.lead)); } catch (err) { return failed(res, err); }
+    if (!lead) return res.status(409).json({ error: 'The audience changed. Press Refresh and review again.' });
     res.json({ text: SH.upsellText(c.text, lead, req.user.name), to: lead.name, image: c.image ? `/api/upsell/campaigns/${c.id}/image` : '' });
   });
   r.get('/upsell/campaigns/:id/csv', view, async (req, res) => {

@@ -19,7 +19,7 @@
     if (!/^\/api\/[A-Za-z0-9/_-]+(\?[A-Za-z0-9=&_-]*)?$/.test(path)) throw new Error('Only /api/ calls are allowed.');
     return BASE + path;
   };
-  async function request(method, path, body, file) {
+  async function request(method, path, body, file, asText) {
     let res;
     try {
       res = await fetch(url(path), {
@@ -33,6 +33,7 @@
       const local = !BASE && /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
       throw new Error(local ? 'Could not reach the local server. Is it still running?' : 'Could not reach the portal. Check your connection, or try again in a minute.');
     }
+    if (asText && res.ok) return asText === 'blob' ? res.blob() : res.text();
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; err.stale = !!(data && data.stale); err.partial = !!(data && data.partial); throw err; }
@@ -43,11 +44,15 @@
     /** Full address of an API path, for links and images (listing photos). */
     url,
     get: (u) => request('GET', u),
+    /** A text download (CSV); errors come back as JSON like every other call. */
+    getText: (u) => request('GET', u, undefined, undefined, true),
+    /** A file download (an LOI .docx). */
+    getBlob: (u) => request('GET', u, undefined, undefined, 'blob'),
     post: (u, b) => request('POST', u, b || {}),
     patch: (u, b) => request('PATCH', u, b),
     put: (u, b) => request('PUT', u, b),
     del: (u) => request('DELETE', u),
-    /** Uploads one File (Project Pages media). */
+    /** Uploads one File (Project Pages media, Upselling images, LOI templates). */
     upload: (u, file) => request('POST', u, undefined, file),
   };
 })();

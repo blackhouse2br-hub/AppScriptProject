@@ -402,3 +402,31 @@ test('label edge cases: a shared label moves nothing; a blocked move stays visib
   await call('GET', `/api/kpi-review/review/${dev1.id}/${p}`, { cookie: toby });
   assert.strictEqual(await KpiFeedback.countDocuments({ employeeId: subject }), 1, 'not moved to either member');
 });
+
+test('coaching form: achievements and dated action plan saved per reviewer; earlier Coaching / Feedback are kept, never blanked', async () => {
+  const toby = await login('toby'), jonjo = await login('jonjo');
+  const [y, m] = PERIOD.split('-').map(Number), p = new Date(Date.UTC(y, m - 1 - 5, 1)).toISOString().slice(0, 7);
+  const url = `/api/kpi-review/review/${ids.ana}/${p}`;
+  // a record from before the new layout: only Coaching / Feedback
+  assert.strictEqual((await call('PUT', url + '/feedback', { cookie: toby, body: { coaching: 'Old coaching', feedback: 'Old feedback', version: 0 } })).status, 200);
+  // the new form sends only its fields: the earlier text stays
+  const s = await call('PUT', url + '/feedback', { cookie: toby, body: { achievements: 'Met the reply target; slow on follow-ups.',
+    actions: [{ text: 'Follow up every lead within 24 h', date: '2026-11-15' }, { text: '', date: '' }, { text: 'Weekly check-in' }], version: 1 } });
+  assert.strictEqual(s.status, 200, JSON.stringify(s.data));
+  const r = (await call('GET', url, { cookie: jonjo })).data.reviews.toby;   // the other reviewer reads it
+  assert.deepStrictEqual([r.achievements, r.actions, r.coaching, r.feedback, r.version],
+    ['Met the reply target; slow on follow-ups.', [{ text: 'Follow up every lead within 24 h', date: '2026-11-15' }, { text: 'Weekly check-in', date: '' }], 'Old coaching', 'Old feedback', 2]);
+  // Jonjo's own section is separate and starts empty
+  assert.strictEqual((await call('GET', url, { cookie: toby })).data.reviews.jonjo, null);
+  // validation: a date without an action, a bad date, too many rows, unknown fields; and a save that would empty the review
+  for (const body of [{ actions: [{ text: '', date: '2026-11-15' }], version: 2 }, { actions: [{ text: 'x', date: '2026-02-30' }], version: 2 },
+    { actions: Array.from({ length: 11 }, (v, i) => ({ text: 'a' + i, date: '' })), version: 2 }, { actions: [{ text: 'x', by: 'Jonjo' }], version: 2 },
+    { achievements: '', actions: [], coaching: '', feedback: '', version: 2 }]) {
+    assert.strictEqual((await call('PUT', url + '/feedback', { cookie: toby, body })).status, 400, JSON.stringify(body));
+  }
+  // the snapshot copies the new fields
+  const snap = await call('POST', '/api/kpi-review/snapshots', { cookie: toby, body: { period: p } });
+  assert.strictEqual(snap.status, 201, JSON.stringify(snap.data));
+  const tr = snap.data.snapshot.employees.find((e) => e.vaLabel === 'Ana').reviews.find((x) => x.reviewerKey === 'toby');
+  assert.deepStrictEqual([tr.achievements, tr.actions.length, tr.coaching], ['Met the reply target; slow on follow-ups.', 2, 'Old coaching']);
+});

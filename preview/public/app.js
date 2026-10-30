@@ -54,9 +54,6 @@
   };
   const LATER_TAB = {
     approval: 'Owner-confirmed units waiting for the client, and the “send confirmed units” chat pop-up.',
-    loic: 'LOI created from the Lease/Sale templates, sent for e-signature, and the signed copy returned.',
-    loio: 'Owner side of the LOI.', contract: 'Contract stage, with the 5-day owner-signing rule.',
-    collection: 'Payments and commission collection.', active: 'Active lease with lease-term tracking.', renewal: 'Leases coming up for renewal.',
   };
 
   // ---------- storage (all wrapped: storage can be blocked or full) ----------
@@ -334,7 +331,7 @@
     const fsel = (key, cap, cur, options, all) => `<label class="fsel ${cur ? 'on' : ''}"><span class="cap">${cap}</span><select data-ch="${key}" aria-label="${cap}">${opt('', cur, all)}${options}</select></label>`;
     // VA choices: the board's labels for live Monday data (as VA Management), the preview's list otherwise; a chosen VA
     // that isn't in the data any more stays visible and selected, so the select never says "All" while it applies
-    const vaList = viewSrc() === 'monday' ? vaNames() : SH.vaLabels(LISTS.vas.concat(uniqueVals('va')));
+    const vaList = vaNames();
     const vaCur = S.va === '__none' ? '__none' : vaList.find((v) => SH.sameVa(v, S.va)) || S.va;
     const vaMissing = S.va && S.va !== '__none' && !vaList.some((v) => SH.sameVa(v, S.va));
     const vas = isManager() ? fsel('va', 'VA', vaCur, opt('__none', vaCur, 'Unassigned') + vaList.map((v) => opt(v, vaCur)).join('') + (vaMissing ? opt(S.va, vaCur, S.va + ' (no leads)') : ''), 'All') : '';
@@ -342,7 +339,7 @@
         ${fsel('ai1', 'AI Status', S.ai.length === 1 ? S.ai[0] : S.ai.length ? '__multi' : '', (S.ai.length > 1 ? opt('__multi', '__multi', S.ai.length + ' selected') : '') + AI_STAGES.map((s) => opt(s, S.ai.length === 1 ? S.ai[0] : '')).join(''), 'Any')}
         ${fsel('temp1', 'Temperature', S.temp.length === 1 ? S.temp[0] : S.temp.length ? '__multi' : '', (S.temp.length > 1 ? opt('__multi', '__multi', S.temp.length + ' selected') : '') + TEMPS.map((s) => opt(s, S.temp.length === 1 ? S.temp[0] : '')).join(''), 'Any')}
         ${fsel('type', 'Type', S.type, opt('Rent', S.type) + opt('Buy', S.type, 'Buy (Sale)'), 'Any')}
-        ${fsel('from', 'Source', S.from, LISTS.sources.concat(uniqueVals('source')).filter((v, i, a) => a.indexOf(v) === i).map((s) => opt(s, S.from)).join(''), 'All')}
+        ${fsel('from', 'Source', S.from, (DEMO ? LISTS.sources : []).concat(uniqueVals('source'), S.from ? [S.from] : []).filter((v, i, a) => a.indexOf(v) === i).map((s) => opt(s, S.from)).join(''), 'All')}
         <label class="fsel ${S.sortCol ? 'on' : ''}"><span class="cap">Sort</span><select data-ch="sort" aria-label="Sort">${S.sortCol ? `<option value="" selected>${esc(COLS.find((c) => c[0] === S.sortCol)[1])} ${S.sortDir === 'desc' ? '↓' : '↑'}</option>` : ''}${SORTS.map(([v, l]) => opt(v, S.sortCol ? '' : S.sort, l)).join('')}</select></label>`;
   }
   const activeFilters = () => (S.va && isManager() ? 1 : 0) + S.ai.length + S.temp.length + (S.wait ? 1 : 0) + (S.type ? 1 : 0) + (S.from ? 1 : 0);
@@ -531,9 +528,9 @@
     if (!S.open) S.returnFocus = document.activeElement;
     S.open = id; S.tab = tab || 'details'; S.draft = {};
     if (!DEMO) {   // notes are loaded per lead from the API (MongoDB or Monday updates)
-      l.notes = null;
+      l.notes = null; l.notesError = '';
       const url = S.source === 'monday' ? `/api/monday/leads/${encodeURIComponent(id)}/notes` : `/api/leads/${encodeURIComponent(id)}/notes`;
-      API.get(url).then((r) => { l.notes = r.notes; if (S.open === id && S.tab === 'details') renderDrawerBody(); })
+      API.get(url).then((r) => { l.notes = r.notes; l.notesError = ''; if (S.open === id && S.tab === 'details') renderDrawerBody(); })
         .catch((e) => { l.notes = []; l.notesError = e.message; if (!signedOut(e) && S.open === id) renderDrawerBody(); });
     }
     renderDrawer();
@@ -591,14 +588,117 @@
           <button class="btn ghost" data-act="close" aria-label="Close (Esc)">${P('<path d="M18 6 6 18M6 6l12 12"/>')}</button></div></div>
       <div class="tabs" role="tablist" aria-label="Lead sections">${tab('details', 'Details')}${tab('props', 'Properties')}${tab('asking', askTabLabel(l))}${tab('approval', 'For Client Approval', 1)}
         ${tab('viewings', 'For Scheduling' + (nS ? ` (${nS})` : ''))}${tab('confirmed', 'Confirmed Schedule' + (nC ? ` (${nC})` : ''))}${tab('done', 'Done' + (nD ? ` (${nD})` : ''))}
-        ${Object.entries(DEAL_TABS).map(([k, v]) => tab(k, v, 1)).join('')}${tab('chat', 'Respond.io Chat')}</div>
+        ${Object.entries(DEAL_TABS).map(([k, v]) => tab(k, v)).join('')}${tab('chat', 'Respond.io Chat')}</div>
       <div class="d-body" id="dbody" role="tabpanel"></div><div id="dfoot"></div>`;
     renderDrawerBody();
+  }
+  // ---------- LOI / Contract tabs: read-only (Code.gs apiLoiDefaults / loiMap_ / dealTerm_) ----------
+  /** This lead's Calendar-board rows (Monday source), or null with the reason they can't be shown. */
+  function leadDeals(l) {
+    if (DEMO || viewSrc() !== 'monday') return { rows: null, note: 'Deal dates come from the Monday Calendar board; switch the data source to Monday.com to see them.' };
+    // the server's /api/monday/deals rule (routes.js DEAL_SCREENS)
+    if (!['ldash', 'pl', 'brokers', 'renewals'].some((m) => SH.access(S.user, m) !== 'none')) return { rows: null, note: 'Deal dates are shown to members with access to the Leads Report, P&L, Brokers or Renewals.' };
+    const st = dealsState();
+    if (!st.at) return { rows: null, note: 'Loading the Monday Calendar board…', loading: true };
+    if (st.error) return { rows: null, note: st.error, error: true };
+    return { rows: st.rows.filter((d) => d.leadId === l.id) };
+  }
+  // e-signature, sending and the signed copy: not available (what they need is listed); `what` names the step
+  const setupBox = (what) => `<div class="later-box"><b>${esc(what)} isn't available in this portal yet.</b> The Apps Script portal did it with its own signing page. The portal still needs:<ul>${SH.LOI_SETUP.map((x) => `<li>${esc(x)}</li>`).join('')}</ul><span class="sub">Until these are set up, nothing here sends a message, shares a document or asks anyone to sign.</span></div>`;
+  const warnList = (ws) => (ws.length ? `<div class="src-err" role="alert"><b>Check before preparing:</b><ul>${ws.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '');
+  /** The LOI pre-fill for a lead (Code.gs apiLoiDefaults): its latest Calendar deal → listing, or its latest portal viewing. */
+  function loiDraftFor(l) {
+    const dl = leadDeals(l);
+    let deal = null, listing = null, ambiguous = false;
+    if (dl.rows) {
+      const st = SH.dealStages(dl.rows, today()); deal = st && st.deal;
+      if (deal) ({ listing, ambiguous } = SH.loiListing(D.listings, deal.building, deal.rate || deal.price));
+    } else {
+      // portal (MongoDB / demo) viewings name their listing directly: the latest done or confirmed one
+      const v = leadViewings(l, ['Done', 'Confirmed']).filter((x) => listingById(x.listingId)).pop();
+      if (v) { listing = listingById(v.listingId); deal = { sp: v.broker, building: listing.building }; }
+    }
+    return { dl, deal, listing, dr: SH.loiDraft({ lead: l, listing, deal, ambiguous, today: today() }) };
+  }
+  const loiSrc = () => (viewSrc() === 'monday' ? 'monday' : 'mongo');
+  /** This lead's LOIs and the uploaded templates (server), loaded when the tab opens. */
+  function loiState(l) {
+    S.loi = S.loi || {};
+    const k = loiSrc() + ':' + l.id;
+    if (!S.loi[k] && !DEMO) { S.loi[k] = { loading: true }; setTimeout(() => loadLoi(l, k), 0); }
+    return S.loi[k] || {};
+  }
+  async function loadLoi(l, k) {
+    try { const r = await API.get(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}`); S.loi[k] = { ...(S.loi[k] || {}), loading: false, err: '', lois: r.lois, templates: r.templates }; }
+    catch (e) { if (signedOut(e)) return; S.loi[k] = { ...(S.loi[k] || {}), loading: false, err: e.message }; }
+    if (S.open === l.id && DEAL_TABS[S.tab]) renderDrawerBody();
+  }
+  const LOI_DATE = () => new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'long', day: 'numeric', year: 'numeric' });
+  function loiPanel(l, side) {
+    const { dl, deal, listing, dr } = loiDraftFor(l), st = loiState(l);
+    const lois = st.lois || [], tpls = st.templates || [], hasTpl = (s) => tpls.some((t) => t.slot === s);
+    const head = `${dl.note ? `<div class="${dl.error ? 'src-err' : 'empty'}" ${dl.error ? 'role="alert"' : ''}>${esc(dl.note)}</div>` : ''}
+      <div class="panel-sub"><b>${esc(dr.kind)}</b>${deal && deal.loi ? ` · LOI date on Monday ${esc(fmtDate(deal.loi))}` : ''}${deal && deal.files ? ` · LOI file on the Calendar item: ${deal.files.loi ? 'yes' : 'no'}` : ''}</div>`;
+    const list = st.loading ? '<div class="empty">Loading this client\'s LOIs…</div>' : st.err ? `<div class="src-err" role="alert">${esc(st.err)}</div>`
+      : `<table class="t deal-t" aria-label="Prepared LOIs"><thead><tr><th>Prepared</th><th>Kind</th><th>Missing when made</th><th></th></tr></thead><tbody>${lois.map((x) => `<tr><td>${esc(manilaTime(x.createdAt))}<div class="sub">${esc(x.by || '')}</div></td><td>${esc(x.slotLabel)}</td>
+          <td>${x.missing.length ? `<span class="tag warn">${esc(x.missing.join(', '))}</span>` : '—'}</td><td><button class="btn sm" data-act="loidl" data-id="${esc(x.id)}">Download .docx</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted">No LOI prepared for this client yet.</td></tr>'}</tbody></table>`;
+    if (side === 'owner') {
+      return `${head}<p class="sub">The owner signs the same LOI after the client (Code.gs apiSendLoiOwner). Owner on the listing: <b>${esc((listing && listing.contact) || 'unknown')}</b>${listing ? ` · owner phone on the listing: ${listing.contactPhone ? 'yes' : 'no'}` : ''}.</p>
+        <h4 class="kr-h">LOIs prepared for this client</h4>${list}${setupBox('Sending the LOI to the owner for signature')}`;
+    }
+    if (DEMO) return head + '<div class="empty">Preparing an LOI needs the portal\'s server (not in demo mode).</div>';
+    // the form: defaults from the records (missing ones stay empty), the user's edits kept while the drawer is open
+    // until the user edits a field, the form follows the records (the Calendar board may still be loading)
+    const defaults = Object.fromEntries(dr.fields.filter((x) => x.state !== 'missing' && x.state !== 'entered').map((x) => [x.key, x.value]).concat([['DATE', LOI_DATE()]]));
+    // (only what the records hold now: nothing left over from an earlier, fuller read)
+    if (!st.form || !st.form.touched) st.form = { slot: dr.lease ? 'lease' : st.form && st.form.slot !== 'lease' ? st.form.slot : 'absolute', fields: defaults };
+    const f = st.form;
+    const chk = SH.validateLoi({ slot: f.slot, fields: f.fields }), byKey = Object.fromEntries(dr.fields.map((x) => [x.key, x]));
+    // an LOI is the portal's own record (Monday stays read-only), so Leads edit access is enough on either source
+    const lease = f.slot === 'lease', canMake = access('leads') === 'edit';
+    const keys = SH.LOI_FIELDS.filter((k) => (lease ? k !== 'PRICE' : !['LEASE_TERM', 'MONTHLY_RENT', 'ADVANCE', 'DEPOSIT'].includes(k)));
+    const LBL = { DATE: 'Date', TO_1: 'To / Owner', TO_2: 'Unit, building', TO_3: 'Location', DEAR: 'Dear', CLIENT: 'Client', BROKER_SIGN: 'Broker', PROPERTY: 'Property', LEASE_TERM: 'Lease term', MONTHLY_RENT: 'Monthly rent',
+      ADVANCE: 'Advance rental', DEPOSIT: 'Security deposit', PRICE: 'Total purchase price', TERMS: 'Terms of payment', CONCESSIONS: 'Other concessions', COMM_PCT: 'Commission %' };
+    const src = (k) => { const x = byKey[k]; if (k === 'DATE') return 'Today (Manila)';
+      if (k === 'TERMS') return lease ? 'Typed when preparing, if any' : 'If left empty: the original default for this deed <span class="tag">original default</span>';
+      if (!x) return 'Typed when preparing'; const def = x.state === 'missing' ? '<span class="tag warn">not in the records</span>' : x.state === 'default' ? '<span class="tag">original default</span>' : ''; return esc(x.note || 'From the records') + ' ' + def; };
+    return `${head}${warnList(dr.warnings)}
+      <div class="panel"><h3>Prepare LOI <span class="muted">filled from the records; check and complete every field, then make the document to review</span></h3><div class="pad">
+        <label>Template <select data-ch="loislot" ${canMake ? '' : 'disabled'}>${Object.entries(SH.LOI_SLOTS).filter(([s]) => (dr.lease ? s === 'lease' : s !== 'lease') || s === f.slot).map(([s, lab]) => `<option value="${s}" ${f.slot === s ? 'selected' : ''}>${esc(lab)}${hasTpl(s) ? '' : ' (not uploaded)'}</option>`).join('')}</select></label>
+        ${!st.loading && !hasTpl(f.slot) ? `<div class="src-err" role="alert">The ${esc(SH.LOI_SLOTS[f.slot])} template hasn't been uploaded. Someone with edit access to Settings uploads the team's Word template in Settings → Files.</div>` : ''}
+        <table class="t deal-t loi-form" aria-label="LOI fields"><thead><tr><th>Field</th><th>Value</th><th>Source</th></tr></thead><tbody>
+          ${keys.map((k) => `<tr><th scope="row">${esc(LBL[k])}</th><td><input data-in="loif" data-k="${k}" value="${esc(f.fields[k] || '')}" ${k === 'COMM_PCT' ? 'inputmode="decimal" placeholder="e.g. 3"' : ''} aria-label="${esc(LBL[k])}" ${canMake ? '' : 'disabled'}>${k === 'COMM_PCT' && f.fields[k] ? `<div class="sub">${esc(SH.numberWords(f.fields[k]))} percent</div>` : ''}</td><td class="sub">${src(k)}</td></tr>`).join('')}</tbody></table>
+        ${chk.errors.length ? `<div class="src-err" role="alert">${esc(chk.errors[0])}</div>` : chk.missing.length ? `<div class="src-err" role="alert"><b>Still empty:</b> ${esc(chk.missing.join(', '))}. They stay as blank lines in the document.</div>` : ''}
+        <div class="kr-actions">${canMake ? `<button class="btn primary" data-act="loimake" ${st.making || chk.errors.length || !hasTpl(f.slot) ? 'disabled' : ''}>${st.making ? 'Making…' : 'Make the LOI document for review'}</button>` : '<span class="sub">Making an LOI needs edit access to Leads.</span>'}
+          <span class="sub">Makes a filled copy of the template to download and check. Nothing is sent.</span></div></div></div>
+      <h4 class="kr-h">LOIs prepared for this client</h4>${list}${setupBox('Sending the LOI for e-signature and returning the signed copy')}`;
+  }
+  function dealPanel(l, tab) {
+    const dl = leadDeals(l), st = dl.rows ? SH.dealStages(dl.rows, today()) : null, d = st && st.deal;
+    // the Apps Script portal never generated contracts: the signed contract, deposit slip and renewal contract were
+    // uploaded files (Code.gs DEAL_SLOTS_ / apiDealUpload, to Google Drive)
+    const head = `<div class="later-box"><b>${tab === 'contract' ? 'The contract is not generated by the portal' : 'Uploads for this stage are not in the portal'}.</b>
+      In the Apps Script portal the signed contract${tab === 'contract' ? '' : ', deposit slip and renewal contract'} were uploaded files kept in Google Drive, with the lease start and months typed in; it had no contract template.
+      ${tab === 'contract' ? 'The team\'s Contract of Lease form also needs details the portal doesn\'t hold (both parties\' addresses and IDs, lease start and end dates, the agreed rent and deposits), so it is not filled from guesses. ' : ''}Uploading needs Google Drive write access (the portal can only read Drive), or a decision to keep these files in the portal.
+      <span class="sub">The dates and amounts below are read from the Monday Calendar board; nothing here changes them.</span></div>`;
+    if (!dl.rows) return head + `<div class="${dl.error ? 'src-err' : 'empty'}" ${dl.error ? 'role="alert"' : ''}>${esc(dl.note)}</div>`;
+    if (!d) return head + (st ? warnList(st.warnings) : '<div class="empty">No Calendar-board item is linked to this client yet.</div>');
+    const yn = (b) => (b ? 'yes' : 'no'), dt = (s) => (s ? esc(fmtDate(s)) : '<span class="muted">—</span>'), pz = (n) => (n ? esc(money(n)) : '<span class="muted">—</span>');
+    const rows = {
+      contract: [['Status', esc(d.status || '—')], ['LOI date', dt(d.loi)], ['Contract Date', dt(d.contract)], ['Contract file on the Calendar item', yn(d.files && d.files.contract)], ['Signed Contract file', yn(d.files && d.files.signed)], ['Rental rate / price', pz(d.rate || d.price)]],
+      collection: [['Total Paid', pz(d.paid)], ['Date of Payment', dt(d.pay)], ['Collection Date', dt(d.coll)], ['Blackhouse commission', pz(d.comm)]],
+      active: [['Contract Date', dt(d.contract)], ['Contract expiration', dt(d.exp)], ['Renewal date', dt(d.rdate)], ['Type', esc(d.type || '—')]],
+      renewal: [['Renewal date', dt(d.rdate)], ['Renewal status', esc(d.rst || '—')], ['Contract expiration', dt(d.exp)]],
+    }[tab];
+    return `${head}<div class="panel-sub">From the Monday Calendar board${d.building ? ` · ${esc(d.building)}` : ''}${st.others ? ` · ${st.others} other Calendar item${st.others > 1 ? 's' : ''} for this client` : ''}</div>
+      ${warnList(tab === 'contract' ? st.warnings : st.warnings.filter((w) => !/5-day/.test(w)))}
+      <table class="t deal-t" aria-label="Deal details"><tbody>${rows.map(([k, v]) => `<tr><th scope="row">${esc(k)}</th><td>${v}</td></tr>`).join('')}</tbody></table>`;
   }
   /** Redraws only the open tab's content and footer (header and tabs stay, so focus is kept). */
   function renderDrawerBody() {
     const l = leadById(S.open), body = $('#dbody'); if (!l || !body) return;
-    const panel = { details: detailsPanel, props: propsPanel, asking: askingPanel, viewings: () => viewingsPanel(l, ['Proposed']), confirmed: () => viewingsPanel(l, ['Confirmed']), done: () => viewingsPanel(l, ['Done', 'Cancelled']), chat: chatPanel }[S.tab];
+    const panel = { details: detailsPanel, props: propsPanel, asking: askingPanel, viewings: () => viewingsPanel(l, ['Proposed']), confirmed: () => viewingsPanel(l, ['Confirmed']), done: () => viewingsPanel(l, ['Done', 'Cancelled']), chat: chatPanel,
+      loic: (x) => loiPanel(x, 'client'), loio: (x) => loiPanel(x, 'owner'), contract: (x) => dealPanel(x, 'contract'), collection: (x) => dealPanel(x, 'collection'), active: (x) => dealPanel(x, 'active'), renewal: (x) => dealPanel(x, 'renewal') }[S.tab];
     body.innerHTML = panel ? panel(l) : laterBox(DEAL_TABS[S.tab] || 'For Client Approval', LATER_TAB[S.tab] || '');
     loadAsking(l);
     $('#dfoot').innerHTML = S.tab === 'details' ? footHtml()
@@ -845,24 +945,57 @@
   }
 
   // ---------- VA Portal / VA Management / Brokers / Renewals ----------
+  // VA Portal task groups. The Apps Script (apiGetVaPortal) had Asking → For Client Approval (new / sent) → For Scheduling
+  // (interested) → Proposed → Confirmed → Mark done → Record result. For Client Approval and the "interested" status are
+  // not in the portal (see README), so those groups are not shown; the portal adds Reply to client and Send more units.
+  const VA_GROUPS = ['Reply to client', 'Asking owner', 'Confirm schedule', 'Confirmed viewing', 'Mark as done', 'Record result', 'Send more units'];
+  /** The open Asking for Availability records of the visible clients (loaded for the VA Portal). */
+  function vaAskState() {
+    if (DEMO || access('vaportal') === 'none') return { rows: [], at: 1 };
+    if (!S.vaAsk || (!S.vaAsk.loading && Date.now() - S.vaAsk.at > 120e3)) {
+      S.vaAsk = { ...(S.vaAsk || { rows: [], at: 0 }), loading: true };
+      const token = S.srcToken;
+      API.get('/api/asking/open?source=' + (viewSrc() === 'monday' ? 'monday' : 'mongo'))
+        .then((r) => { if (token === S.srcToken) S.vaAsk = { rows: r.rows || [], at: Date.now(), loading: false }; }, (e) => { if (!signedOut(e)) S.vaAsk = { rows: [], at: Date.now(), loading: false, error: e.message }; })
+        .then(() => { if (S.view === 'vaportal') renderView(); renderSide(); });
+    }
+    return S.vaAsk;
+  }
   function vaPending() {
-    const out = [], vis = visibleLeads(), vv = visibleViewings();
-    vis.filter((l) => l.onRespond && l.waiting === 'va' && !['Failed'].includes(l.ai)).forEach((l) => out.push([l, 'Reply to client', 'Needs VA Reply']));
-    vv.filter((v) => v.status === 'Proposed').forEach((v) => { const l = leadById(v.leadId); if (l) out.push([l, 'Confirm schedule', fmtShort(v.date) + ' ' + v.time]); });
+    const out = [], now = Date.now(), vv = visibleViewings();
+    // as the Apps Script: failed, disqualified, unresponsive and closed clients have nothing pending
+    const vis = visibleLeads().filter((l) => l.ai !== 'Failed' && !/fail|disqualif|unresponsive|closed/i.test(String(l.clientStatus || l.status || '')));
+    const ok = new Set(vis.map((l) => l.id)), lead = (id) => (ok.has(id) ? leadById(id) : null);
+    vis.filter((l) => l.onRespond && l.waiting === 'va').forEach((l) => out.push([l, 'Reply to client', 'Needs VA Reply']));
+    (vaAskState().rows || []).forEach((a) => { const l = lead(a.leadId); if (l) out.push([l, 'Asking owner', a.listingName || 'a unit']); });
+    const pendIds = new Set(S.pend && S.pend.at ? S.pend.rows.map((r) => String(r.id)) : []);
+    vv.forEach((v) => {
+      const l = lead(v.leadId); if (!l || pendIds.has(String(v.id))) return;   // listed once, under Record result
+      const when = fmtShort(v.date) + ' ' + (v.time || ''), unit = unitOf(v).building;
+      if (v.status === 'Proposed') out.push([l, 'Confirm schedule', when + ' · ' + unit]);
+      else if (v.status === 'Confirmed') out.push([l, SH.viewingAt(v) < now ? 'Mark as done' : 'Confirmed viewing', when + ' · ' + unit]);
+      else if (v.status === 'Done' && !resultOf(v) && !v.feedback && !(S.pend && S.pend.at)) out.push([l, 'Record result', when + ' · ' + unit]);
+    });
+    // a viewing that happened without a result: the Pending Broker Feedback list once loaded (the Apps Script rules)
+    if (S.pend && S.pend.at) S.pend.rows.forEach((r) => { const l = lead(r.leadId); if (l) out.push([l, 'Record result', fmtShort(r.date) + ' ' + (r.time || '') + ' · ' + ((r.unit && r.unit.building) || '')]); });
     vis.filter((l) => l.ai === 'Property Matching' && l.daysInStage > 14).forEach((l) => out.push([l, 'Send more units', l.daysInStage + ' days in Property Matching']));
-    return out;
+    return out.sort((a, b) => VA_GROUPS.indexOf(a[1]) - VA_GROUPS.indexOf(b[1]));
   }
   function vaPortalView() {
-    const rows = vaPending();
-    return `<div class="cards">${['Reply to client', 'Confirm schedule', 'Send more units'].map((k) => `<div class="card"><div class="n">${rows.filter((r) => r[1] === k).length}</div><div class="l">${k}</div></div>`).join('')}</div>
+    if (!(S.pend && S.pend.at) && canSee('calendar')) setTimeout(loadPending, 0);
+    const rows = vaPending(), ask = vaAskState();
+    return `<div class="cards">${VA_GROUPS.map((k) => `<div class="card"><div class="n">${rows.filter((r) => r[1] === k).length}</div><div class="l">${k}</div></div>`).join('')}</div>
+      ${ask.error ? `<div class="src-err" role="alert">The Asking for Availability list could not be loaded (${esc(ask.error)}), so "Asking owner" may be incomplete.</div>` : ''}
       <div class="panel"><h3>Pending actions <span class="muted">${rows.length} items · ${srcName()}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Lead</th><th>Client</th><th>VA</th><th>Action</th><th>Detail</th><th>AI Status</th></tr></thead><tbody>
       ${rows.map(([l, a, d]) => `<tr class="click" data-act="open" data-id="${esc(l.id)}"><td>${esc(l.code)}</td><td>${esc(l.name)}</td><td>${esc(l.va || 'Unassigned')}</td><td><b>${esc(a)}</b></td><td>${esc(d)}</td><td>${aiPill(l)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing pending.</td></tr>'}
-      </tbody></table></div></div>`;
+      </tbody></table></div></div>
+      <div class="sub">Not in this portal yet: the Apps Script's “For Client Approval” groups (units the owner confirmed, new and sent to the client) and “For Scheduling” (client interested), because those stages aren't built here.</div>`;
   }
   // people on screen: the board's own labels for live Monday data; the preview's lists for MongoDB / demo records
   // (one entry per VA: "Ana" and "ana" on the board are the same VA, as the server's lead scoping treats them)
-  const vaNames = () => (viewSrc() === 'monday' ? SH.vaLabels(D.leads.map((l) => l.va)) : LISTS.vas);
-  const brokerNames = () => (viewSrc() === 'monday' ? [...new Set(visibleViewings().map((v) => v.broker).filter(Boolean))].sort() : LISTS.brokers);
+  // the preview's fictional names only in demo mode; live data (Monday or MongoDB) lists the names it actually holds
+  const vaNames = () => SH.vaLabels((DEMO ? LISTS.vas : []).concat(D.leads.map((l) => l.va)));
+  const brokerNames = () => (DEMO ? LISTS.brokers : [...new Set(visibleViewings().map((v) => v.broker).filter(Boolean))].sort());
   function monitorView() {
     const vis = visibleLeads(), vv = visibleViewings(), vas = isManager() ? vaNames() : [me().vaLabel].filter(Boolean);
     const rows = vas.map((va) => { const w = SH.vaWorkload(vis, vv, va); return [va, w.leads, w.needsReply, w.hot, w.viewings, w.loiPlus, w.failed]; });
@@ -883,7 +1016,7 @@
       return [b, vs.filter((v) => v.status !== 'Cancelled').length, ids.size, pend ? pend.filter((r) => r.broker === b).length : vs.filter((v) => v.status === 'Done' && !resultOf(v) && !v.feedback).length,
         ls.filter((l) => LEAD_PLUS.includes(l.ai)).length, ls.filter((l) => ['Active', 'For Renewal'].includes(l.ai)).length]; });
     return `<div class="panel"><h3>Brokers <span class="muted">${srcName()}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Broker</th><th class="num">Viewings</th><th class="num">Unique clients</th><th class="num">Pending feedback</th><th class="num">LOIs or later</th><th class="num">Closed</th></tr></thead><tbody>
-      ${rows.map((r) => `<tr><td><b>${esc(r[0])}</b></td>${r.slice(1).map((n, i) => `<td class="num ${i === 2 && n ? 'hotnum' : ''}">${n}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>
+      ${rows.map((r) => `<tr><td><b>${esc(r[0])}</b></td>${r.slice(1).map((n, i) => `<td class="num ${i === 2 && n ? 'hotnum' : ''}">${n}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="6" class="muted">${S.srcErrors && Object.keys(S.srcErrors).length ? 'The viewings could not be loaded (see the message above).' : 'No brokers with viewings.'}</td></tr>`}</tbody></table></div></div>
       ${brokerMonthsHtml()}`;
   }
   // ---------- Calendar-board deals: Leads Report, Renewals, P&L, Broker / VA figures (Monday source; read only) ----------
@@ -903,6 +1036,7 @@
       S.deals = { rows: r.deals || [], at: Date.now(), loading: false, error: '' };
     } catch (e) { if (signedOut(e)) return; S.deals = { rows: [], at: Date.now(), loading: false, error: e.message }; }
     if (['ldash', 'renewals', 'pl', 'brokers', 'monitor'].includes(S.view)) renderView();
+    if (S.open && DEAL_TABS[S.tab]) renderDrawerBody();
   }
   const dealsNote = (st) => (!st.at ? '<div class="empty">Loading the Monday Calendar board…</div>' : st.error ? `<div class="src-err" role="alert">${esc(st.error)}</div>` : '');
   // period selector (Last 3 / 6 / 12 months / All time), kept per screen
@@ -997,23 +1131,27 @@
       if (!st.at || st.error) return head + dealsNote(st) + '</div>';
       const all = leasesFromDeals(st.rows), seg = RN_SEG[S.rnSeg] ? S.rnSeg : 'due90', q = (S.rnQ || '').toLowerCase().trim();
       const vaF = isManager() ? S.rnVa || '' : '';
-      const rows = all.filter(RN_SEG[seg][1]).filter((x) => (!vaF || x.lead.va === vaF) && (!q || [x.lead.name, x.building, x.lead.va, x.broker].join(' ').toLowerCase().includes(q)));
+      const rows = all.filter(RN_SEG[seg][1]).filter((x) => (!vaF || SH.sameVa(x.lead.va, vaF)) &&(!q || [x.lead.name, x.building, x.lead.va, x.broker].join(' ').toLowerCase().includes(q)));
       const due90 = all.filter(RN_SEG.due90[1]), messaged = due90.filter((x) => rnLogOf(x.leadId).some((e) => /^renew/.test(e.kind))).length;
       const tile = (k, n, extra) => `<button type="button" class="card ${seg === k ? 'on' : ''}" data-act="rnseg" data-v="${k}" aria-pressed="${seg === k}"><div class="n">${n}</div><div class="l">${RN_SEG[k][0]}${extra || ''}</div></button>`;
       const badge = (d) => `<span class="pill" style="--c:${d < 0 || d <= 30 ? '#f85149' : d <= 60 ? '#d29922' : d <= 90 ? 'var(--accent)' : '#8b949e'}">${d < 0 ? Math.abs(d) + ' d overdue' : d + ' d'}</span>`;
       const edit = access('renewals') === 'edit';
+      // until the message log has loaded, "Last message" and "Messaged" are unknown (not "none"), so nobody is messaged twice
+      const logOk = !!(S.rnLog && S.rnLog.at && !S.rnLog.error);
+      const logNote = S.rnLog && S.rnLog.error ? `<div class="src-err" role="alert">The renewal message log could not be loaded (${esc(S.rnLog.error)}), so "Last message" is unknown. Check respond.io before messaging anyone. <button class="linkbtn" data-act="rnlogretry">Try again</button></div>`
+        : !logOk ? '<div class="empty">Loading the renewal message log…</div>' : '';
       return `<div class="cards">${tile('overdue', all.filter(RN_SEG.overdue[1]).length)}${tile('due30', all.filter(RN_SEG.due30[1]).length)}${tile('due60', all.filter(RN_SEG.due60[1]).length)}
-          <div class="card"><div class="n">${due90.length ? Math.round(messaged / due90.length * 100) + '%' : '—'}</div><div class="l">Messaged (next 90 days)</div></div>
+          <div class="card"><div class="n">${due90.length && logOk ? Math.round(messaged / due90.length * 100) + '%' : '—'}</div><div class="l">Messaged (next 90 days)</div></div>
           ${tile('renewed', all.filter(RN_SEG.renewed[1]).length)}${tile('lost', all.filter(RN_SEG.lost[1]).length)}</div>
         ${head}<div class="pad toolbar"><select data-ch="rnseg" aria-label="Show">${Object.entries(RN_SEG).map(([k, [lab]]) => `<option value="${k}" ${seg === k ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>
           <input type="search" data-in="rnq" value="${esc(S.rnQ || '')}" placeholder="Search client, building, VA, broker" aria-label="Search leases">
-          ${isManager() ? `<select data-ch="rnva" aria-label="VA"><option value="">All VAs</option>${vaNames().map((v) => `<option ${vaF === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>` : ''}</div>
-        <div class="scroll-x"><table class="t"><thead><tr><th>Client</th><th>Unit</th><th class="num">Rent</th><th>Lease ends</th><th>Renewal status</th><th>VA</th><th>Broker</th><th>Last message</th><th></th></tr></thead><tbody>
+          ${isManager() ? `<select data-ch="rnva" aria-label="VA"><option value="">All VAs</option>${vaNames().map((v) => `<option ${SH.sameVa(vaF, v) ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select>` : ''}</div>
+        ${logNote}<div class="scroll-x"><table class="t"><thead><tr><th>Client</th><th>Unit</th><th class="num">Rent</th><th>Lease ends</th><th>Renewal status</th><th>VA</th><th>Broker</th><th>Last message</th><th></th></tr></thead><tbody>
         ${rows.map((x) => { const lg = rnLogOf(x.leadId), last = lg[0];
           return `<tr><td><button type="button" class="linkbtn" data-act="open" data-id="${esc(x.leadId)}">${esc(x.lead.name || x.lead.code)}</button>${x.renewals ? `<div class="sub">renewed ${x.renewals}×</div>` : ''}</td>
             <td>${esc(x.building || '—')}<div class="sub">${esc(x.city || '')}</div></td><td class="num">${esc(peso(x.rent))}</td>
             <td>${esc(fmtDate(x.due))}${x.est ? ' <span class="sub">(estimated)</span>' : ''} ${badge(x.days)}</td><td>${esc(x.status)}</td><td>${esc(x.lead.va || '—')}</td><td>${esc(x.broker || '—')}</td>
-            <td class="sub">${last ? `${esc(tplLabel(last.kind))} · ${esc(ago(last.at))}${last.by ? ' · ' + esc(last.by) : ''}${lg.length > 1 ? ` · ${lg.length} sent` : ''}` : '—'}</td>
+            <td class="sub">${last ? `${esc(tplLabel(last.kind))} · ${esc(ago(last.at))}${last.by ? ' · ' + esc(last.by) : ''}${lg.length > 1 ? ` · ${lg.length} sent` : ''}` : logOk ? '—' : 'unknown'}</td>
             <td>${edit ? `<button type="button" class="btn sm" data-act="rnmsg" data-id="${esc(x.leadId)}">Message</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="9" class="muted">No leases in this view.</td></tr>'}
         </tbody></table></div></div>
         <div class="sub">The Renewal Status shown is Monday's; changing it from the portal is not connected yet. Sending messages from the portal is not connected: write the message here, copy it to respond.io, then press “I sent it from respond.io”.</div>`;
@@ -1057,31 +1195,34 @@
   /** P&L (Code.gs apiGetPL / plMonth): commission per month from the Calendar board + the team's own cost lines. */
   async function loadPlCells() {
     if (DEMO || !S.user || (S.plCells && S.plCells.loading)) return;
-    S.plCells = { cells: {}, at: 0, loading: true };
+    S.plCells = { ...(S.plCells && !S.plCells.error ? S.plCells : { cells: {}, at: 0 }), loading: true };
     try { const r = await API.get('/api/pl/cells'); S.plCells = { cells: r.cells || {}, at: Date.now(), loading: false }; }
     catch (e) { if (signedOut(e)) return; S.plCells = { cells: {}, at: Date.now(), loading: false, error: e.message }; }
     if (S.view === 'pl') renderView();
   }
   const PL_OPEX = ['salaries', 'comm_inhouse', 'benefits', 'contracted', 'advertising', 'misc', 'permits', 'medical', 'corporate', 'supplies', 'dues'];
+  // the P&L counts a row as failed only when its Status is exactly "Failed" (Code.gs apiGetPL), not by its group
+  const plFailed = (d) => /^failed$/i.test(String(d.status || '').trim());
   function plDeals(rows) {
     return rows.filter((d) => d.comm || d.paid).map((d) => {
-      const ty = dType(d), t = ty === 'Renewal' ? d.rdate : d.contract;
-      return { d, ty, t, m: (t || '').slice(0, 7), comm: d.comm || 0, coll: dCollected(d), ded: d.ded || 0, failed: dFailed(d) };
+      const ty = dType(d), t = ty === 'Renewal' ? d.rdate : d.contract, failed = plFailed(d);
+      const coll = !failed && /^closed$/i.test(String(d.status || '').trim()) && d.pay ? d.paid || 0 : 0;
+      return { d, ty, t, m: (t || '').slice(0, 7), comm: d.comm || 0, coll, ded: d.ded || 0, failed };
     });
   }
-  /** Code.gs Data Check rules for the P&L (rows to fix on Monday). */
+  /** Code.gs Data Check rules for the P&L (rows to fix on Monday), as apiGetPL has them. */
   function plChecks(list) {
     const out = [], past = (s, days) => s && daysUntil(s) < -days;
-    list.forEach(({ d, ty, t }) => {
+    list.forEach(({ d, ty, t, failed }) => {
       const add = (what) => out.push({ d, ty, m: (t || '').slice(0, 7), what });
       const closed = /^closed$/i.test(String(d.status || '').trim());
-      if (!t) add(ty === 'Renewal' ? 'No Renewal Date (not in the P&L)' : 'No Contract Date (not in the P&L)');
-      if (!d.type) add('No Type');
-      if (d.paid && !d.pay) add('Total Paid but no Date of Payment');
-      if (d.paid && !closed) add('Paid, but the Status is “' + (d.status || 'empty') + '”');
-      if (closed && Math.abs((d.comm || 0) - (d.paid || 0) - (d.ded || 0)) >= 1) add('Closed: commission ≠ Total Paid + Deductions');
+      if (!t && !failed) add(ty === 'Renewal' ? 'No Renewal Date (not in the P&L)' : 'No Contract Date (not in the P&L)');
+      if (!d.type && !failed) add('No Type');
+      if (d.paid && !d.pay && !failed) add('Total Paid but no Date of Payment');
+      if (d.pay && !closed && !failed) add('Paid, but the Status is “' + (d.status || 'empty') + '”');
+      if (closed && d.comm && d.paid && Math.abs(d.comm - d.paid - (d.ded || 0)) >= 1) add('Closed: commission ≠ Total Paid + Deductions');
       if (closed && past(t, 7) && !d.pay) add('Closed more than 7 days ago, no Date of Payment');
-      if (!closed && !dFailed(d) && !/renewed/i.test(d.status) && d.comm && !d.paid && past(t, 7)) add('Commission not paid yet (date passed more than 7 days ago)');
+      if (!closed && !failed && !/renewed$/i.test(d.status) && d.comm && !d.paid && past(t, 7)) add('Commission not paid yet (date passed more than 7 days ago)');
       if (ty === 'Renewal' && d.pay && d.rdate && daysUntil(d.pay) - daysUntil(d.rdate) < -60) add('Renewal paid more than 60 days before the Renewal Date (copied from the old lease?)');
     });
     return out;
@@ -1094,6 +1235,10 @@
     if (!st.at || st.error) return head + dealsNote(st) + '</div>';
     const list = plDeals(st.rows), months = monthsIn(rangeOf('pl', '6'), firstMonth(list, (x) => x.m)), cells = (S.plCells && S.plCells.cells) || {};
     const edit = access('pl') === 'edit', cell = (line, m) => Number((cells[line] || {})[m]) || 0;
+    // cost lines, Gross Margin and Net are hidden (not shown as ₱0) until the saved cost lines have loaded
+    const pc = S.plCells || {}, costsOk = !!pc.at && !pc.error;
+    const costsNote = pc.error ? `<div class="src-err" role="alert">The cost lines could not be loaded (${esc(pc.error)}), so Direct cost, Gross Margin and Net Income are not shown. <button class="linkbtn" data-act="plretry">Try again</button></div>`
+      : !pc.at ? '<div class="empty">Loading the cost lines…</div>' : '';
     const per = months.map((m) => {
       const xs = list.filter((x) => x.m === m && !x.failed), by = (f, ty) => xs.filter((x) => x.ty === ty).reduce((a, x) => a + x[f], 0);
       const est = { Sale: by('comm', 'Sale'), Rental: by('comm', 'Rental'), Renewal: by('comm', 'Renewal') }, col = { Sale: by('coll', 'Sale'), Rental: by('coll', 'Rental'), Renewal: by('coll', 'Renewal') };
@@ -1108,9 +1253,9 @@
         ${row('<b>Total Estimated Commission</b>', (p) => p.E)}${row('Est. Sales', (p) => p.est.Sale, 'sub')}${row('Est. Rentals', (p) => p.est.Rental, 'sub')}${row('Est. Renewals', (p) => p.est.Renewal, 'sub')}
         ${row('Collected Sales', (p) => p.col.Sale, 'sub')}${row('Collected Rentals', (p) => p.col.Rental, 'sub')}${row('Collected Renewals', (p) => p.col.Renewal, 'sub')}
         ${row('Total Deductions', (p) => p.ded)}${row('Uncollected', (p) => p.unc)}${row('<b>Collected Commission Revenue</b>', (p) => p.C)}
-        <tr><th colspan="${months.length + 2}" class="left">Direct cost</th></tr>${input('cos')}${row('<b>Gross Margin</b>', (p) => p.gm)}
-        <tr><th colspan="${months.length + 2}" class="left">Operating expenses</th></tr>${PL_OPEX.map(input).join('')}${row('Total operating expenses', (p) => p.opT)}${row('<b>Net Income / Loss</b>', (p) => p.net)}
-      </tbody></table></div></div>
+        ${costsOk ? `<tr><th colspan="${months.length + 2}" class="left">Direct cost</th></tr>${input('cos')}${row('<b>Gross Margin</b>', (p) => p.gm)}
+        <tr><th colspan="${months.length + 2}" class="left">Operating expenses</th></tr>${PL_OPEX.map(input).join('')}${row('Total operating expenses', (p) => p.opT)}${row('<b>Net Income / Loss</b>', (p) => p.net)}` : ''}
+      </tbody></table></div>${costsNote}</div>
       <div class="panel"><h3>Data Check <span class="muted">${checks.length} Calendar item${checks.length === 1 ? '' : 's'} to fix on Monday</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Item</th><th>Building</th><th>Type</th><th>Month</th><th>What to check</th></tr></thead><tbody>
         ${checks.slice(0, 200).map((c) => `<tr><td>${esc(c.d.id)}</td><td>${esc(c.d.building || '—')}</td><td>${esc(c.ty)}</td><td>${esc(c.m ? monLabel(c.m) : '—')}</td><td>${esc(c.what)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Nothing to check.</td></tr>'}</tbody></table></div></div>
       <div class="sub">Commission and collection are read from the Calendar board (Blackhouse Commission, Total Paid, Deductions, Date of Payment, Type, Contract / Renewal Date); cost lines are saved in the portal${edit ? ' when you leave a cell' : ''}. Commission rules and monthly targets are not in the portal yet.</div>`;
@@ -1122,12 +1267,26 @@
     const head = `<div class="panel"><h3>Per period <span class="muted">Monday Calendar board</span><span class="spacer"></span>${rangeSel('brokers', '3')}</h3>`;
     if (!st.at || st.error) return head + dealsNote(st) + '</div>';
     const months = monthsIn(rangeOf('brokers', '3')), from = months[0] + '-01', to = today();
-    const inR = (s) => s && s >= from && s <= to, rows = st.rows.filter((d) => !/renewal/i.test(d.type) && !dFailed(d));
-    const names = [...new Set(rows.map((d) => d.sp).filter(Boolean))].sort();
+    // Code.gs apiGetBrokerDashboard: every past viewing counts (failed deals too), renewal rows don't; the broker is the
+    // row's Salesperson, else the client's; a client is closed once, on their deal row (Contract Date, or Status / group
+    // Closed or Waiting for Payment), unless that row failed
+    const inR = (s) => s && s >= from && s <= to, rows = st.rows.filter((d) => !/renewal/i.test(d.type));
+    const spOf = {}; D.leads.forEach((l) => { spOf[l.id] = l.salesperson || ''; });
+    const bk = (d) => d.sp || spOf[d.leadId] || 'Unassigned';
+    const closeOf = {};
+    rows.forEach((d) => {
+      const stc = /^closed$|waiting for payment/i.test(d.status) || /^closed$|waiting for payment/i.test(d.group);
+      if (!d.leadId || !(d.contract || stc) || /^failed$/i.test(String(d.status || '').trim()) || /failed|archive/i.test(d.group)) return;
+      const t = d.contract || d.fin || '', sc = (stc ? 2 : 0) + (d.price || d.rate || d.comm || d.paid ? 1 : 0), o = closeOf[d.leadId];
+      // earliest dated row wins a tie; an undated row never replaces a dated one (Code.gs compares real dates)
+      if (!o || sc > o.sc || (sc === o.sc && t && (!o.t || t < o.t))) closeOf[d.leadId] = { t, d, sc };
+    });
+    const names = [...new Set(rows.map(bk))].filter((b) => b !== 'Unassigned').sort().concat(rows.some((d) => bk(d) === 'Unassigned') ? ['Unassigned'] : []);
     return head + `<div class="scroll-x"><table class="t"><thead><tr><th>Broker</th><th class="num">Viewings</th><th class="num">Clients viewed</th><th class="num">LOI clients</th><th class="num">Closed clients</th><th class="num">Commission collected</th></tr></thead><tbody>
-      ${names.map((b) => { const rs = rows.filter((d) => d.sp === b), v = rs.filter((d) => inR(d.fin));
-        return `<tr><td><b>${esc(b)}</b></td><td class="num">${v.length}</td><td class="num">${new Set(v.map((d) => d.leadId).filter(Boolean)).size}</td><td class="num">${new Set(rs.filter((d) => inR(d.loi)).map((d) => d.leadId)).size}</td>
-          <td class="num">${new Set(rs.filter((d) => inR(d.contract)).map((d) => d.leadId)).size}</td><td class="num">${peso(rs.filter((d) => inR(d.pay)).reduce((a, d) => a + dCollected(d), 0))}</td></tr>`; }).join('') || '<tr><td colspan="6" class="muted">No Calendar data for this period.</td></tr>'}
+      ${names.map((b) => { const rs = rows.filter((d) => bk(d) === b), v = rs.filter((d) => inR(d.fin));
+        const closed = Object.values(closeOf).filter((x) => bk(x.d) === b && inR(x.t)).length;
+        return `<tr><td><b>${esc(b)}</b></td><td class="num">${v.length}</td><td class="num">${new Set(v.map((d) => d.leadId || 'cal' + d.id)).size}</td><td class="num">${new Set(rs.filter((d) => inR(d.loi)).map((d) => d.leadId || 'cal' + d.id)).size}</td>
+          <td class="num">${closed}</td><td class="num">${peso(rs.filter((d) => inR(d.pay)).reduce((a, d) => a + dCollected(d), 0))}</td></tr>`; }).join('') || '<tr><td colspan="6" class="muted">No Calendar data for this period.</td></tr>'}
       </tbody></table></div></div>`;
   }
   function vaPerformanceHtml() {
@@ -1199,24 +1358,48 @@
       <h4 class="kr-h">${live ? 'Current workload <span class="muted">(as of now, not tied to the month · Response monitor &amp; KPIs per VA)</span>' : 'Workload at capture time <span class="muted">(Response monitor &amp; KPIs per VA)</span>'}</h4>
       ${kpiCards(kpis.current, live ? 'Needs reply and Hot count only chats the portal has already checked on respond.io.' : '')}`;
   }
-  /** One reviewer's column: editable for that reviewer, read-only for the other. */
+  /**
+   * A review in the coaching-form layout (kpi ref.png): Performance Achievements / Gaps, Action Plan with Commitment
+   * Date rows, then Acknowledgment. `form` gives editable inputs (the reviewer's own section); otherwise read-only.
+   * Earlier free-text Coaching / Feedback (saved before this layout) stay visible, and editable for their author.
+   */
+  function krFormHtml(r, form, ackHtml) {
+    const dis = form && form.saving ? 'disabled' : '', val = (k) => (form && k in form.d ? form.d[k] : r ? r[k] || '' : '');
+    const acts = form && form.d.actions ? form.d.actions : (r && r.actions) || [];
+    const rows = form ? acts.concat(Array.from({ length: Math.max(KR.actionRows - acts.length, acts.length < KR.actionsMax ? 1 : 0) }, () => ({ text: '', date: '' }))).slice(0, KR.actionsMax) : acts;
+    const old = ['coaching', 'feedback'].filter((k) => String(val(k)).trim() || (r && String(r[k] || '').trim()));
+    return `<div class="kr-form2">
+      <div class="kr-bar2">Performance achievements / gaps</div>
+      ${form ? `<textarea class="kr-big" data-in="krtext" data-k="achievements" rows="9" maxlength="${KR.textMax}" aria-label="Performance achievements / gaps" ${dis}>${esc(val('achievements'))}</textarea>`
+        : `<div class="kr-big kr-text">${esc(r && r.achievements) || '<span class="muted">—</span>'}</div>`}
+      <div class="kr-plan"><div class="kr-bar2">Action plan</div><div class="kr-bar2">Commitment date</div>
+        ${rows.length ? rows.map((a, i) => form ? `<input data-in="kraction" data-i="${i}" data-f="text" value="${esc(a.text)}" maxlength="${KR.actionMax}" aria-label="Action ${i + 1}" ${dis}><input type="date" data-in="kraction" data-i="${i}" data-f="date" value="${esc(a.date)}" aria-label="Commitment date ${i + 1}" ${dis}>`
+          : `<div class="kr-cell">${esc(a.text)}</div><div class="kr-cell">${a.date ? esc(fmtDate(a.date)) : '<span class="muted">—</span>'}</div>`).join('') : '<div class="kr-cell muted">—</div><div class="kr-cell muted">—</div>'}</div>
+      ${old.length ? `<div class="kr-old"><div class="sub">Written before this layout${form ? ' (kept as is; edit or clear it here)' : ''}:</div>${old.map((k) => form
+        ? `<label>${esc(KR.fieldLabels[k])}<textarea data-in="krtext" data-k="${k}" rows="3" maxlength="${KR.textMax}" ${dis}>${esc(val(k))}</textarea></label>`
+        : `<div class="kr-lbl">${esc(KR.fieldLabels[k])}</div><div class="kr-text">${esc(r[k])}</div>`).join('')}</div>` : ''}
+      <div class="kr-bar2">Acknowledgment</div>${ackHtml}</div>`;
+  }
+  /** The acknowledgment strip of one reviewer's section: the employee's own verification and this reviewer's discussion record. */
+  function krAckStrip(rv, r, x) {
+    const a = rv.ack, empSlot = !rv.employee.linked ? '<span class="muted">Possible once they are on Team &amp; Access</span>'
+      : a ? `<b>${esc(a.by.name)}</b><br><span class="sub">${esc(manilaTime(a.at))}${r && r.version > ((a.reviewVersions || {})[x.key] || 0) ? ' · this section changed afterwards' : ''}</span>` : '<span class="muted">Not acknowledged yet</span>';
+    const revSlot = r && r.discussedAt ? `<span class="sub">Reviewer recorded discussion</span><br><b>${esc(r.discussedBy ? r.discussedBy.name : x.label)}</b><br><span class="sub">${esc(manilaTime(r.discussedAt))}${r.version > r.discussedVersion ? ' · text changed afterwards' : ''}</span>` : '<span class="muted">No discussion recorded</span>';
+    return `<div class="kr-ack"><div><div class="kr-sig">${empSlot}</div><div class="kr-cap">Employee (${esc(rv.employee.name)})</div></div>
+      <div><div class="kr-sig">${revSlot}</div><div class="kr-cap">${esc(x.label)} (reviewer's own record)</div></div></div>`;
+  }
+  /** One reviewer's section: editable for that reviewer, read-only for the other. */
   function krColumn(rv, x) {
     const st = kr(), r = rv.reviews[x.key], mine = rv.can.write && rv.can.slot === x.key, d = st.draft || {};
     // who last saved this reviewer's section, and when (at the top of the section)
-    const head = `<h3>${esc(x.label)} — coaching &amp; feedback${mine ? ' <span class="pill" style="--c:var(--accent)">yours</span>' : ''}</h3>
+    const head = `<h3>${esc(x.label)} — coaching${mine ? ' <span class="pill" style="--c:var(--accent)">yours</span>' : ''}</h3>
       <div class="pad kr-saved" role="status">${r ? `Last saved by <b>${esc(r.author.name)}</b> · ${esc(manilaTime(r.updatedAt))}${r.createdAt !== r.updatedAt ? ' <span class="muted">(first saved ' + esc(manilaTime(r.createdAt)) + ')</span>' : ''}` : '<span class="muted">Not saved yet for this month.</span>'}</div>`;
-    const meta = r ? `<div class="sub">${r.discussedAt ? `<b>Reviewer recorded discussion</b>: ${esc(r.discussedBy ? r.discussedBy.name : x.label)}, ${esc(manilaTime(r.discussedAt))} <span class="muted">(the reviewer's own record, not the employee's verification)</span>${r.version > r.discussedVersion ? ' · <b>the text was changed after this record</b>' : ''}` : 'Reviewer has not recorded a discussion.'}</div>` : '';
     if (!(krMe().reviewers || []).find((y) => y.key === x.key && y.configured)) return `<section class="panel kr-col">${head}<div class="pad sub">${esc(x.label)}'s reviewer account isn't set up on the server yet (KPI_REVIEWER_${x.key.toUpperCase()}_EMAIL).</div></section>`;
     if (!mine) {
-      return `<section class="panel kr-col">${head}<div class="pad">${r ? `<div class="kr-lbl">Coaching</div><div class="kr-text">${esc(r.coaching) || '<span class="muted">—</span>'}</div>
-        <div class="kr-lbl">Feedback</div><div class="kr-text">${esc(r.feedback) || '<span class="muted">—</span>'}</div>${meta}` : `<div class="empty">No coaching or feedback from ${esc(x.label)} for this month yet.</div>`}
+      return `<section class="panel kr-col">${head}<div class="pad">${r ? '' : `<div class="sub">No review from ${esc(x.label)} for this month yet.</div>`}${krFormHtml(r, null, krAckStrip(rv, r, x))}
         ${rv.can.slot !== x.key ? `<div class="sub">Only ${esc(x.label)} can edit this section.</div>` : '<div class="sub">You can\'t review yourself.</div>'}</div></section>`;
     }
-    const val = (k) => (k in d ? d[k] : r ? r[k] : '');
-    return `<section class="panel kr-col">${head}<div class="pad grid kr-form">
-        <label>Coaching<textarea data-in="krtext" data-k="coaching" rows="5" maxlength="${KR.textMax}" ${st.saving ? 'disabled' : ''}>${esc(val('coaching'))}</textarea></label>
-        <label>Feedback<textarea data-in="krtext" data-k="feedback" rows="5" maxlength="${KR.textMax}" ${st.saving ? 'disabled' : ''}>${esc(val('feedback'))}</textarea></label></div>
-      <div class="pad">${meta}
+    return `<section class="panel kr-col">${head}<div class="pad">${krFormHtml(r, { d, saving: st.saving }, krAckStrip(rv, r, x))}
         ${st.saveErr ? `<div class="src-err" role="alert">${esc(st.saveErr)}</div>` : ''}
         <div class="kr-actions"><button class="btn primary" data-act="krsave" ${st.saving ? 'disabled' : ''}>${st.saving ? 'Saving…' : 'Save my review'}</button>
         ${r && !r.discussedAt ? `<button class="btn" data-act="krdiscussed" ${st.saving ? 'disabled' : ''}>I discussed this with ${esc(rv.employee.name)}</button>` : ''}
@@ -1254,7 +1437,7 @@
       ${s.employees.map((e) => `<div class="panel"><h3>${esc(e.name)} <span class="muted">${e.employeeId ? 'Employee ID ' + esc(e.employeeId) : 'No Team & Access member at capture time'} · VA label ${esc(e.vaLabel)}</span></h3><div class="pad">
         ${kpiBlock(e.kpis, s.period, null, false)}
         <div class="kr-cols">${KR.reviewers.map((x) => { const r = e.reviews.find((y) => y.reviewerKey === x.key);
-          return `<section class="panel kr-col"><h3>${esc(x.label)} — coaching &amp; feedback</h3><div class="pad">${r ? `<div class="kr-lbl">Coaching</div><div class="kr-text">${esc(r.coaching) || '—'}</div><div class="kr-lbl">Feedback</div><div class="kr-text">${esc(r.feedback) || '—'}</div>
+          return `<section class="panel kr-col"><h3>${esc(x.label)} — coaching</h3><div class="pad">${r ? `${krFormHtml(r, null, `<div class="sub">${e.ack.status === 'acknowledged' ? `Employee: <b>${esc(e.ack.by.name)}</b>, ${esc(manilaTime(e.ack.at))}` : e.ack.status === 'not_available' ? 'Employee: not possible (no Team & Access member)' : 'Employee: not acknowledged'}</div>`)}
             <div class="sub">By ${esc(r.reviewer.name)} (${esc(r.reviewer.email)}) · last saved ${esc(manilaTime(r.updatedAt))}</div><div class="sub">${r.discussedAt ? 'Reviewer recorded discussion ' + esc(manilaTime(r.discussedAt)) : 'No reviewer discussion record.'}</div>` : '<div class="muted">No coaching or feedback.</div>'}</div></section>`; }).join('')}</div>
         <div class="sub">${e.ack.status === 'acknowledged' ? `<b>Employee acknowledged discussion</b>: ${esc(e.ack.by.name)}, ${esc(manilaTime(e.ack.at))}` : e.ack.status === 'not_available' ? 'Acknowledgment not possible (no Team & Access member).' : 'Employee had not acknowledged the discussion.'}</div></div></div>`).join('')}`;
   }
@@ -1284,13 +1467,19 @@
         ${rv.kpiError ? `<div class="src-err" role="alert">KPIs unavailable: ${esc(rv.kpiError)} No other data is shown in their place.</div>` : kpiBlock(rv.kpis, rv.period, rv.hasDeals, true)}</div></div>
       <div class="kr-cols">${KR.reviewers.map((x) => krColumn(rv, x)).join('')}</div>
       ${(rv.unmoved || []).length ? `<div class="panel"><h3>Earlier reviews kept under the VA label <span class="muted">written before ${esc(e.name)} was on Team &amp; Access; not moved because a review already existed</span></h3><div class="pad">
-        ${rv.unmoved.map((r) => `<div class="kr-lbl">${esc((KR.reviewers.find((x) => x.key === r.reviewerKey) || {}).label || r.reviewerKey)} · ${esc(r.author.name)} · ${esc(manilaTime(r.updatedAt))}</div><div class="kr-text">${esc(r.coaching)}${r.coaching && r.feedback ? '\n\n' : ''}${esc(r.feedback)}</div>`).join('')}</div></div>` : ''}
+        ${rv.unmoved.map((r) => `<div class="kr-lbl">${esc((KR.reviewers.find((x) => x.key === r.reviewerKey) || {}).label || r.reviewerKey)} · ${esc(r.author.name)} · ${esc(manilaTime(r.updatedAt))}</div>${krFormHtml(r, null, '')}`).join('')}</div></div>` : ''}
       ${krAckBlock(rv)}${krSnapshotBar(rv)}`;
   }
   async function krSave() {
     const st = kr(), rv = st.rev; if (!rv || st.saving) return;
     const mine = rv.reviews[rv.can.slot], d = st.draft || {};
-    const body = { coaching: ('coaching' in d ? d.coaching : mine ? mine.coaching : ''), feedback: ('feedback' in d ? d.feedback : mine ? mine.feedback : ''), version: mine ? mine.version : 0 };
+    // only what was edited is sent, so earlier Coaching / Feedback are never blanked by a save
+    const body = { version: mine ? mine.version : 0 };
+    ['achievements', 'coaching', 'feedback'].forEach((k) => { if (k in d) body[k] = d[k]; });
+    if (d.actions) body.actions = d.actions;
+    if (Object.keys(body).length === 1) { st.saveErr = 'Nothing changed to save.'; return renderView(); }
+    if (!mine && SH.kpiReviewEmpty({ ...body, actions: (body.actions || []).filter((a) => String(a.text || '').trim() || a.date) })) { st.saveErr = 'Write the review first.'; return renderView(); }
+    if (mine && SH.kpiReviewEmpty({ ...mine, ...body, actions: (body.actions || mine.actions || []).filter((a) => String(a.text || '').trim() || a.date) })) { st.saveErr = 'The review can\'t be left empty. Write something, or keep the earlier text.'; return renderView(); }
     const { errors } = SH.validateKpiFeedback(body); if (errors.length) { st.saveErr = errors[0]; return renderView(); }
     st.saving = true; st.saveErr = ''; renderView();
     try {
@@ -1309,6 +1498,8 @@
   }
   async function krSnapshot() {
     const st = kr(), p = krPeriod(); if (st.snapping) return;
+    // the snapshot reloads the review, which would drop unsaved text: save it first
+    if (st.draft && Object.keys(st.draft).length) return toast('Save your review first: the snapshot copies saved reviews only.', true);
     if (!confirm(`Create the ${periodLabel(p)} snapshot now? It copies every VA's KPIs, both reviewers' comments and acknowledgments as they are now, and can't be changed or replaced.`)) return;
     st.snapping = true; renderView();
     try { await API.post('/api/kpi-review/snapshots', { period: p }); toast('Snapshot saved for ' + periodLabel(p) + '.'); st.snapTag = ''; await krLoadSnaps(); }
@@ -1645,6 +1836,7 @@
         <label>City<input data-up="city" value="${esc(a.city)}" maxlength="60" ${dis}></label>
         <label>Contact<select data-up="contact" ${dis}>${UPS.contacts.map((c) => `<option value="${c}" ${a.contact === c ? 'selected' : ''}>${esc(UPS.contactLabels[c])}</option>`).join('')}</select></label>
         <label>Skip if offered in the last<span class="up-days"><input type="number" data-up="skipDays" min="0" max="365" value="${esc(a.skipDays)}" ${dis}> days</span></label>
+        ${aud && aud.tenantsNote && a.preset === 'tenants' ? `<div class="full src-err" role="alert">${esc(aud.tenantsNote)}</div>` : ''}
         ${statuses.length ? `<div class="full up-st"><span class="sub">Client Status:</span> ${statuses.map((s) => `<label class="tagck"><input type="checkbox" data-upst="${esc(s)}" ${a.statuses.includes(s) ? 'checked' : ''} ${dis}> ${esc(s)}</label>`).join('')}</div>` : ''}</div></div>`;
     const tpl = m.templates.concat([{ k: 'project', label: 'Developer project (from Project Pages)' }]);
     const offer = `<div class="panel"><h3>2 · Offer <span class="spacer"></span>${edit ? `<button class="btn sm primary" data-act="upsave" ${st.saving || !st.dirty ? 'disabled' : ''}>${st.saving ? 'Saving…' : 'Save draft'}</button>` : ''}</h3><div class="pad">
@@ -1663,7 +1855,7 @@
         ${edit ? `<button class="btn primary" data-act="upreview" data-v="message" ${m.sends && !st.dirty && bn('message') ? '' : 'disabled'}>Review &amp; send 1:1 (next ${bn('message')})</button>
           <button class="btn" data-act="upreview" data-v="tag" ${m.sends && !st.dirty && bn('tag') && d.tag ? '' : 'disabled'}>Review &amp; tag ${bn('tag')} in respond.io</button>
           ${bn('retry') ? `<button class="btn" data-act="upreview" data-v="retry" ${m.sends && !st.dirty ? '' : 'disabled'}>Review &amp; retry ${bn('retry')} failed</button>` : ''}` : ''}
-        <a class="btn" href="${esc(API.url('/api/upsell/campaigns/' + st.sel + '/csv'))}">Export for email (CSV)</a>
+        <button class="btn" data-act="upcsv">Export for email (CSV)</button>
         ${edit && st.picked.size ? `<button class="btn" data-act="upoptout" data-v="1">Mark ${st.picked.size} opted out</button>` : ''}
         <div class="sub full">1:1 sends go only to clients on respond.io who haven't had this offer, at most ${UPS.batchMax} per batch, ${UPS.gapMs} ms apart. WhatsApp only allows free text within 24 hours of the client's last message; for the rest, tag them and send an approved template broadcast from respond.io.</div></div></div>`;
     const res = (st.results || []), resById = new Map(res.filter((x) => x.action === 'message').map((x) => [x.id, x]));
@@ -1743,6 +1935,42 @@
     },
     upsave: () => upSave(),
     upaud: () => upAudience(),
+    // LOI: make the filled document from the reviewed fields (nothing is sent), and download one for review
+    loimake: async () => {
+      const l = leadById(S.open); if (!l) return; const st = loiState(l), f = st.form; if (!f || st.making) return;
+      const chk = SH.validateLoi({ slot: f.slot, fields: f.fields }); if (chk.errors.length) return toast(chk.errors[0], true);
+      if (chk.missing.length && !confirm(`These are still empty and will be blank lines in the document: ${chk.missing.join(', ')}. Make it anyway?`)) return;
+      st.making = true; renderDrawerBody();
+      try { const r = await API.post(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}`, { slot: f.slot, fields: f.fields }); st.lois = [r.loi].concat(st.lois || []); toast('LOI made. Download it and check it; nothing was sent.'); }
+      catch (e) { if (!signedOut(e)) toast('Not made: ' + e.message, true); }
+      st.making = false; renderDrawerBody();
+    },
+    loitplretry: () => { S.loiTpl = null; renderView(); },
+    loitpldel: async (el) => {
+      if (!confirm(`Remove the ${SH.LOI_SLOTS[el.dataset.slot]} template? LOIs already made are kept.`)) return;
+      try { await API.del('/api/loi/templates/' + el.dataset.slot); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      S.loiTpl = null; S.loi = null; renderView();
+    },
+    loidl: async (el) => {
+      const l = leadById(S.open); if (!l) return;
+      try {
+        const blob = await API.getBlob(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}/${el.dataset.id}/docx`);
+        const a = document.createElement('a'), href = URL.createObjectURL(blob);
+        a.href = href; a.download = `LOI-${l.code || l.id}.docx`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(href), 1000);
+      } catch (e) { if (!signedOut(e)) toast('Download failed: ' + e.message, true); }
+    },
+    // the CSV is fetched (not a plain link), so an error is a message here, not a page that leaves the portal
+    upcsv: async () => {
+      const st = up();
+      if (st.dirty) return toast('Save the offer first: the export uses the saved audience.', true);
+      if (st.aud && !st.aud.counts.email) return toast('Nobody in this audience has an email address.', true);
+      try {
+        const csv = await API.getText('/api/upsell/campaigns/' + st.sel + '/csv');
+        const a = document.createElement('a'), href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.href = href; a.download = `blackhouse-upsell-${st.sel}.csv`; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 1000);
+      } catch (e) { if (!signedOut(e)) toast('Export failed: ' + e.message, true); }
+    },
     upreview: (el) => upReview(el.dataset.v),
     upgo: () => upGo(),
     upprojtext: async () => {
@@ -1777,6 +2005,9 @@
     const m = S.calMonth || (() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1); })();
     S.calMonth = m;
     const start = new Date(m); start.setDate(1 - m.getDay());
+    // a broker filter that no longer matches any broker (source switch, Monday refresh) is dropped, never left hiding everything
+    // (not while the viewings are still loading: an empty list says nothing yet; a source switch clears it anyway)
+    if (S.calBroker && brokerNames().length && !brokerNames().includes(S.calBroker)) S.calBroker = '';
     let vv = visibleViewings(); if (S.calBroker) vv = vv.filter((v) => v.broker === S.calBroker);
     const byDay = {}; vv.forEach((v) => { (byDay[v.date] = byDay[v.date] || []).push(v); });
     const t = today(); let cells = '';
@@ -1922,7 +2153,7 @@
         <div class="card"><div class="n">${vis.filter((l) => ['Active', 'For Renewal'].includes(l.ai)).length}</div><div class="l">Active clients</div></div>
         <div class="card"><div class="n">${money(counted.reduce((a, l) => a + (l.budget || 0), 0)) || '₱0'}</div><div class="l">Counted lead value</div></div></div>
       <div class="sub" style="margin-bottom:12px">Minimum budget rule: rent below ₱200k/month or sale below ₱20M is not counted; unknown budgets are counted.</div>
-      <div class="cols2">${table('By AI Status', AI_STAGES, (l) => l.ai)}${table('By source', LISTS.sources, (l) => l.source)}</div>
+      <div class="cols2">${table('By AI Status', AI_STAGES, (l) => l.ai)}${table('By source', DEMO ? LISTS.sources : [...new Set(vis.map((l) => l.source || 'Not set'))].sort(), (l) => l.source || 'Not set')}</div>
       ${isManager() ? (() => { const names = vaNames(); return table('By VA', names.concat(['']), (l) => names.find((n) => SH.sameVa(n, l.va)) || (SH.vaKey(l.va) ? l.va : '')); })() : ''}
       ${closedDealsHtml()}`;
   }
@@ -1941,6 +2172,7 @@
     if (S.dr.loaded) return;
     S.dr.loaded = true;
     if (DEMO) { S.dr.notes = D.dailyNotes || { call: '', extra: '' }; return; }
+    S.dr.err = '';
     try { S.dr.notes = (await API.get('/api/daily/notes')).notes; } catch (e) { if (signedOut(e)) return; S.dr.notes = { call: '', extra: '' }; S.dr.err = e.message; }
     if (S.view === 'daily') renderView();
   }
@@ -1951,8 +2183,10 @@
   }
   function dailyView() {
     if (!S.dr || !S.dr.loaded) setTimeout(loadDailyNotes, 0);
-    const edit = access('daily') === 'edit', n = (S.dr && S.dr.notes) || { call: '', extra: '' }, off = (S.dr && S.dr.off) || {};
+    // while the saved notes failed to load they can't be edited or cleared (that would overwrite them with blanks)
+    const err = S.dr && S.dr.err, edit = access('daily') === 'edit' && !err, n = (S.dr && S.dr.notes) || { call: '', extra: '' }, off = (S.dr && S.dr.off) || {};
     return `<div class="panel"><h3>Daily Report <span class="muted">for the broker group · numeric lead IDs only, no client names, numbers or notes</span><span class="spacer"></span><button class="btn sm" data-act="copydaily">Copy text</button></h3>
+      ${err ? `<div class="src-err" role="alert">Your saved call plan and notes could not be loaded (${esc(err)}), so they are left out of the text and can't be edited. <button class="linkbtn" data-act="drretry">Try again</button></div>` : ''}
       <div class="pad toolbar"><label>Report date <input type="date" data-ch="drdate" value="${esc(drDate())}" max="${esc(today())}"></label>
         ${DR_SECTIONS.map(([k, lab]) => `<label class="tagck"><input type="checkbox" data-ch="drsec" data-k="${k}" ${off[k] ? '' : 'checked'}> ${esc(lab)}</label>`).join('')}
         <button type="button" class="btn sm" data-act="drclear">Clear</button></div>
@@ -2004,10 +2238,21 @@
   // ---------- Settings ----------
   function settingsView() {
     const tabs = [['team', 'Team & Access'], ['files', 'Files'], ['wa', 'WhatsApp Templates'], ['integ', 'Integrations'], ['sync', 'Monday Sync']];
-    const body = S.setTab === 'wa' ? waView() : S.setTab === 'files' ? laterBox('Files (LOI templates)', 'upload the Lease and Sale LOI templates, stored in Google Drive.')
+    const body = S.setTab === 'wa' ? waView() : S.setTab === 'files' ? (DEMO ? laterBox('Files (LOI templates)', 'upload the Lease and Sale LOI templates, stored in Google Drive.') : loiTemplatesView())
       : S.setTab === 'integ' ? integView()
       : S.setTab === 'sync' ? laterBox('Monday Sync', 'AI STATUS write-back and client subitem sync to Monday.com are not part of the portal. ' + (mondayWritesOn() ? 'Only the confirmed updates listed under Integrations are written to Monday.' : 'Monday updates are switched off on this server.')) : teamView();
     return `<div class="subtabs" role="tablist">${tabs.map(([k, l]) => `<button class="btn ${S.setTab === k ? 'on' : ''}" role="tab" aria-selected="${S.setTab === k}" data-act="settab" data-v="${k}">${esc(l)}</button>`).join('')}</div>${body}`;
+  }
+  /** Settings → Files: the team's LOI Word templates (Code.gs LOI_TPL_*), kept in the portal's database. */
+  function loiTemplatesView() {
+    const st = S.loiTpl || (S.loiTpl = { loading: true });
+    if (st.loading && !st.started) { st.started = true; API.get('/api/loi/templates').then((r) => { S.loiTpl = { list: r.templates }; }, (e) => { if (!signedOut(e)) S.loiTpl = { err: e.message }; }).then(() => { if (S.view === 'team') renderView(); }); }
+    const edit = canEdit('team'), byS = Object.fromEntries((st.list || []).map((t) => [t.slot, t]));
+    return `<div class="panel"><h3>LOI templates <span class="muted">the team's own Word (.docx) LOIs; the portal fills a copy for each client</span></h3><div class="pad">
+      ${st.err ? `<div class="src-err" role="alert">${esc(st.err)} <button class="linkbtn" data-act="loitplretry">Try again</button></div>` : st.loading ? '<div class="empty">Loading…</div>' : `<table class="t deal-t"><tbody>${Object.entries(SH.LOI_SLOTS).map(([s, lab]) => { const t = byS[s];
+        return `<tr><th scope="row">${esc(lab)}</th><td>${t ? `${esc(t.name)} <span class="sub">· ${Math.round(t.size / 1024)} KB · ${esc(t.by || '')} · ${esc(manilaTime(t.at))}</span>` : '<span class="tag warn">not uploaded</span>'}</td>
+          <td>${edit ? `<label class="btn sm">${t ? 'Replace' : 'Upload'}<input type="file" data-ch="loitpl" data-slot="${s}" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden></label>${t ? ` <button class="btn sm danger" data-act="loitpldel" data-slot="${s}">Remove</button>` : ''}` : ''}</td></tr>`; }).join('')}</tbody></table>`}
+      <div class="sub">The template's blank lines (Date, To, Dear), its Annex A rows (Lessor / Seller, Lessee / Buyer, Property, Lease Term, Monthly Rental, Advance Rental, Security Deposit, Total Purchase Price, Terms of Payment, Other Concessions), the broker's commission % and the names under the signature lines are filled; everything else is kept as written. Older .doc files must be saved as .docx first.</div></div></div>`;
   }
   function integView() {
     if (DEMO) return `<div class="panel"><div class="pad"><div class="later-box"><b>Integrations are off in demo mode.</b><br>Demo mode only uses fictional data in this browser.
@@ -2039,9 +2284,12 @@
       .finally(() => { S.teamLabelsBusy = false; if (S.view === 'team' && (S.setTab || 'team') === 'team') renderView(); });
   }
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const vaChoices = () => [...new Set(LISTS.vas.concat(!DEMO && S.teamLabels ? S.teamLabels.va || [] : []))];
+  // the fictional lists only in demo mode or when the server has no Monday board (it then offers them itself)
+  const vaChoices = () => [...new Set((DEMO || (S.teamLabels && S.teamLabels.source === 'preview') ? LISTS.vas : S.teamLabels && S.teamLabels.source === 'monday' ? S.teamLabels.va || [] : [])
+    // plus the labels on the portal's own (MongoDB) leads, which the server accepts too
+    .concat(!DEMO && viewSrc() === 'mongo' ? uniqueVals('va').filter(Boolean) : []))];
   // a Broker's exact Monday Salesperson label (Leads and Calendar boards); the preview's fictional list when not connected
-  const salesChoices = () => (!DEMO && S.teamLabels && S.teamLabels.source !== 'error' ? S.teamLabels.salesperson || [] : LISTS.brokers);
+  const salesChoices = () => (DEMO ? LISTS.brokers : S.teamLabels && S.teamLabels.source !== 'error' ? S.teamLabels.salesperson || [] : []);
   /** Does this member match a label on the Monday board (the visibility rules depend on it)? */
   function boardMatch(u) {
     const t = S.teamLabels; if (DEMO || !t || t.source !== 'monday') return '';
@@ -2090,7 +2338,8 @@
     $$('[data-mod]').forEach((s) => { modules[s.dataset.mod] = s.value; });
     const input = { name: $('#mName').value, email: $('#mEmail').value, role: $('#mRole').value, vaLabel: $('#mVa').value, salesLabel: $('#mSales').value, modules };
     if (!DEMO && !GOOGLE) input.password = $('#mPass').value;
-    const { value, errors } = SH.validateUser(input, { vaLabels: vaChoices(), salesLabels: salesChoices() });
+    const u = (orig && D.users.find((x) => x.email === orig)) || {};
+    const { value, errors } = SH.validateUser(input, { vaLabels: vaChoices().concat(u.vaLabel ? [u.vaLabel] : []), salesLabels: salesChoices() });
     if (errors.length) return toast(errors[0], true);
     if (value.salesLabel && D.users.some((x) => x.email !== orig && x.role === 'Broker' && x.active !== false && x.salesLabel === value.salesLabel)) return toast(`The Salesperson label "${value.salesLabel}" is already set for another broker.`, true);
     if (!DEMO && !GOOGLE && !orig && !value.password) return toast(`Set a temporary password (at least ${SH.MIN_PASSWORD} characters).`, true);
@@ -2453,7 +2702,7 @@
   function resetLeadFilters() { Object.assign(S, { q: '', va: '', ai: [], temp: [], wait: '', type: '', from: '', list: null, pp: null, up: null }); }
   function signedOut(e) {
     if (DEMO || !e || e.status !== 401) return false;
-    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null;
+    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null; S.loi = null; S.loiTpl = null; S.teamLabels = null; S.integ = null; S.mTest = null; S.vaAsk = null;
     resetLeadFilters();
     $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
     renderLogin('Your session ended. Please sign in again.');
@@ -2724,7 +2973,14 @@
     rncopy: async () => { try { await copyText($('#rnText').value); toast('Copied. Paste it in respond.io; nothing was sent from the portal.'); } catch (e) { toast('Copy was blocked by the browser.', true); } },
     rnsent: () => rnSent(),
     // Daily Report: back to today, every section, no extra lines
-    drclear: async () => { S.dr = { ...(S.dr || {}), date: '', off: {} }; if (access('daily') === 'edit') await saveDailyNotes({ call: '', extra: '' }); renderView(); toast('Daily Report cleared.'); },
+    drclear: async () => {
+      const n = (S.dr && S.dr.notes) || {}, wipe = access('daily') === 'edit' && !(S.dr && S.dr.err) && !!(String(n.call || '').trim() || String(n.extra || '').trim());
+      if (wipe && !confirm('Clear the date and sections, and delete your saved call plan and notes?')) return;
+      S.dr = { ...(S.dr || {}), date: '', off: {} }; if (wipe) await saveDailyNotes({ call: '', extra: '' }); renderView(); toast('Daily Report cleared.');
+    },
+    drretry: () => { S.dr = { ...(S.dr || {}), loaded: false, err: '' }; renderView(); },
+    plretry: () => { S.plCells = null; renderView(); },
+    rnlogretry: () => { S.rnLog = null; renderView(); },
     settab: (el) => { S.setTab = el.dataset.v; renderView(); if (S.setTab === 'integ') refreshStatus().then(() => { if (S.view === 'team' && S.setTab === 'integ') renderView(); }); },
     integstatus: async () => { await refreshStatus(); renderView(); },
     mtest: async (el) => {
@@ -2736,7 +2992,7 @@
     source: async (el) => {
       const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
-      prefs.source = v; S.source = v; S.pend = null; S.deals = null; S.rnLog = null; savePrefs();
+      prefs.source = v; S.source = v; S.pend = null; S.deals = null; S.rnLog = null; S.vaAsk = null; S.loi = null; S.calBroker = ''; savePrefs();
       if (v === 'monday') { await openMondaySource(false); toast(S.srcNoAccess ? 'No Monday.com data for your account: it needs Leads access.' : mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
       S.srcBusy = false;
       if (!(await attempt(loadAll))) return;
@@ -2785,7 +3041,7 @@
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
       S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
-      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null; S.loi = null; S.loiTpl = null; S.teamLabels = null; S.integ = null; S.mTest = null; S.vaAsk = null;
       resetLeadFilters();
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
@@ -2863,6 +3119,12 @@
     from: (el) => { S.from = el.value; filtersChanged(); },
     sort: (el) => { if (!el.value) return; S.sort = el.value; S.sortCol = ''; refreshLeads(true); },
     calbroker: (el) => { S.calBroker = el.value; renderView(); },
+    loitpl: async (el) => {
+      const file = el.files && el.files[0]; if (!file) return;
+      try { await API.upload('/api/loi/templates/' + el.dataset.slot, file); toast('Template saved.'); } catch (e) { if (!signedOut(e)) toast('Not saved: ' + e.message, true); }
+      S.loiTpl = null; S.loi = null; renderView();
+    },
+    loislot: (el) => { const l = leadById(S.open), st = l && loiState(l); if (st && st.form) { st.form.slot = el.value; st.form.touched = true; renderDrawerBody(); } },
     rng: (el) => { S.rng = { ...(S.rng || {}), [el.dataset.k]: el.value }; renderView(); },
     rnseg: (el) => { S.rnSeg = el.value; renderView(); },
     rnva: (el) => { S.rnVa = el.value; renderView(); },
@@ -2952,6 +3214,17 @@
     else if (el.dataset.pp || el.dataset.ppu != null || el.dataset.ppm) ppField(el);
     else if (el.dataset.up && el.tagName !== 'SELECT') upField(el);
     else if (el.dataset.in === 'krtext') { const st = kr(); st.draft = { ...(st.draft || {}), [el.dataset.k]: el.value }; }
+    else if (el.dataset.in === 'loif') {
+      // typing only updates the form (no redraw, so focus stays); "Still empty" is checked again when the LOI is made
+      const l = leadById(S.open), st = l && loiState(l); if (st && st.form) { st.form.fields[el.dataset.k] = el.value; st.form.touched = true; }
+    }
+    else if (el.dataset.in === 'kraction') {
+      // the action rows as on screen (saved rows plus blank lines); blank rows are dropped when saved
+      const st = kr(), rv = st.rev, mine = rv && rv.reviews[rv.can.slot];
+      const rows = ((st.draft && st.draft.actions) || (mine && mine.actions) || []).map((a) => ({ ...a }));
+      const i = Number(el.dataset.i); while (rows.length <= i) rows.push({ text: '', date: '' });
+      rows[i][el.dataset.f] = el.value; st.draft = { ...(st.draft || {}), actions: rows };
+    }
     else if (PF_IN[el.dataset.in]) { const k = PF_IN[el.dataset.in], v = el.value; clearTimeout(searchT); searchT = setTimeout(() => pfSet(k, v, true), 200); }
     else if (el.dataset.field) onField(el);
   });

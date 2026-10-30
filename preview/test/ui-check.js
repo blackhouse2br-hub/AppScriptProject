@@ -484,9 +484,11 @@ async function cdp(wsUrl) {
       await until(`/NOTES\\nTeam meeting at 4pm/.test(document.querySelector('#drText').textContent)`, 10000);
       const drt = await text('#drText');
       check(`${label}: Daily Report leaves out an unticked section and adds the team's own lines`, !/NEW CLIENT REQUIREMENTS/.test(drt) && /NOTES Team meeting at 4pm/.test(drt) && !/Lease Client|Sourcing Client|\+63/.test(drt), drt.slice(0, 140));
+      // Clear deletes the saved call plan / notes, so it asks first (accepted here)
+      await c.ev(`(() => { window.__asked = ''; window.confirm = (m) => { window.__asked = m; return true; }; })()`);
       await click('[data-act="drclear"]');
       await until(`/NEW CLIENT REQUIREMENTS/.test(document.querySelector('#drText').textContent) && !/NOTES/.test(document.querySelector('#drText').textContent)`, 10000);
-      check(`${label}: Clear brings back every section and removes the extra lines`, true);
+      check(`${label}: Clear asks before deleting the saved notes, then brings back every section and removes the extra lines`, /delete your saved call plan and notes/.test(await c.ev('window.__asked')), await c.ev('window.__asked'));
       check(`${label}: no sideways scrolling on the Daily Report`, await noSideScroll());
     }
     check('parity screens: nothing written to Monday, nothing sent to respond.io', writesSent().length === mutBefore && fx.calls.respond.slice(respondBefore).every((x) => x.method === 'GET'));

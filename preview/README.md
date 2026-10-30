@@ -215,7 +215,8 @@ test-data portal (fake Monday board, in-memory database, fictional accounts) run
 |---|---|---|
 | Leads list: tiles, search, filters, sort, chips | Working | Working |
 | Lead drawer: Details edit + validation, Notes, Properties matching, Book Viewing, For Scheduling → Confirmed Schedule → Done | Working | Working |
-| VA Portal, VA Management, Calendar, Inventory Dashboard (availability edit), Leads Report, Broker Management, Renewals, Daily Report, Property Requirements | Working | Working |
+| VA Management, Calendar, Inventory Dashboard (availability edit), Leads Report, Broker Management, Renewals, Daily Report, Property Requirements | Working | Working |
+| VA Portal: Reply to client, Asking owner, Confirm schedule, Confirmed viewing, Mark as done, Record result, Send more units (failed / disqualified / unresponsive / closed clients left out, as the Apps Script) | Working | Working. The Apps Script's "For Client Approval" (new / sent) and "For Scheduling" (client interested) groups are **not** included: those stages aren't built in the portal (the For Client Approval tab is a placeholder) |
 | Settings: Team & Access, WhatsApp Templates (stored only) | Working | Working (passwords, at least one Manager kept) |
 | Manager / VA / Broker permissions and lead visibility | Simulated in the browser | Enforced by the server on every request |
 | Respond.io Chat | Read-only sample | Read-only from respond.io when `RESPOND_TOKEN` is set, else "not connected" |
@@ -223,11 +224,14 @@ test-data portal (fake Monday board, in-memory database, fictional accounts) run
 | Properties tab: the VA's own search (city, bedrooms, rent/sale, price, furnishing, pets, keyword, "ignore the client's requirements") | Working | Working |
 | Asking for Availability: units being checked with owners (one per lead + listing, up to 60 per lead), owner Call / WhatsApp / Viber links that open only when tapped (taps logged, newest 20), owner confirmed / not available. Nothing is sent and nothing goes to Monday or respond.io | This browser | MongoDB (`AvailabilityRequest`), for Monday and MongoDB leads |
 | Mark as Failed: a **portal override** with a reason, **Managers only** (set and remove; enforced by the server), labelled "Portal override" wherever AI Status shows; Monday's Client Status / AI STATUS are not changed | This browser | MongoDB (`LeadOverride`) |
-| For Client Approval, LOI / Contract / Collection / Active / For Renewal, Service Requests, Files, Monday Sync | Placeholder | Placeholder |
+| LOI (Client): the Prepare LOI form, pre-filled from the lead, the listing matched to its Calendar deal (same building, price within 15 %) and the viewing's broker, with missing and conflicting values flagged; **Make the LOI document** fills a copy of the team's Word template (Settings → Files) for download and review. LOI (Owner): the owner and the prepared LOIs | Not in demo | MongoDB (`LoiTemplate`, `Loi`); nothing is sent or signed |
+| Contract / Collection / Active / For Renewal tabs: the lead's Calendar-board dates, amounts and file columns (read only), with the 5-day rule warnings | Not in demo | Read from the Monday Calendar board |
+| E-signature of LOIs (client and owner), sending the signing link, keeping the signed copy; contract generation and uploads | Not available | Not available: needs a public signing page, PDF conversion, a sending channel and Drive write access (`shared.js` `LOI_SETUP`); the Apps Script never generated contracts |
+| For Client Approval, Service Requests, Monday Sync | Placeholder | Placeholder |
 | Project Pages: projects by developer, details, units, uploads (MongoDB), preview, WordPress HTML, published page `/p/<slug>`, optional read-only Drive + Build from Drive | n/a | Working (see "Project Pages") |
 | Upselling: audience, offers from Renewals → Message / Concierge / Project Pages, image, reviewed 1:1 sends and tags through respond.io, opt-outs, CSV | n/a | Working; sending only with `RESPOND_SENDS=on` (see "Upselling") |
 | Google sign-in | n/a | Built for the hosted server (DEPLOYMENT.md); the local preview keeps email and password |
-| Monday writes, respond.io messaging, Drive files, e-signatures, webhooks, scheduled jobs | Not connected | Not connected |
+| Monday writes, respond.io messaging, Drive files, webhooks, scheduled jobs | Not connected | Not connected |
 
 ## Everyday use: quick keys and shortcuts
 

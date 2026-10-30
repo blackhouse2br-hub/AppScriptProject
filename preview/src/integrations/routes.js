@@ -33,10 +33,10 @@ function createIntegrations(config) {
     const salesperson = [...new Set(all.labels.salesperson.concat(all.calendarSalesperson || []))];
     return { source: 'monday', va: all.labels.va, salesperson, vaColumn: all.labels.vaColumn, salespersonColumn: all.labels.salespersonColumn };
   }
-  /** VA labels a team member may be given (preview list plus the Monday board's labels when available). */
+  /** VA labels a team member may be given: the Monday board's labels when connected (the preview list only without Monday). */
   async function allowedVaLabels() {
     const t = await teamLabels().catch(() => ({ va: [] }));
-    return [...new Set(SH.LISTS.vas.concat(t.va || []))];
+    return t.va || [];
   }
   /** Exact Salesperson labels a Broker may be given; null when Monday is connected but its labels can't be read. */
   async function allowedSalesLabels() {

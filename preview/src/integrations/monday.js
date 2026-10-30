@@ -115,7 +115,9 @@ function shapeDeal(it, cols) {
     fin: ymdIn(v.fin), sp: v.broker, status: v.status, type: v.ctype || '', rst: v.rst || '', rdate: ymdIn(v.rdate), exp: ymdIn(v.exp),
     contract: ymdIn(v.cdate), loi: ymdIn(v.loi) || ymdIn(v.loi2), pay: ymdIn(v.pay), coll: ymdIn(v.coll),
     rate: money(v.rate), price: money(v.price), comm: money(v.comm), paid: money(v.paid), ded: money(v.ded),
-    building: String(v.bld || '').split(',')[0].trim(), city: String(v.city || '').split(',')[0].trim() };
+    building: String(v.bld || '').split(',')[0].trim(), city: String(v.city || '').split(',')[0].trim(),
+    // whether the LOI / Contract / Signed Contract file columns hold a file (the files themselves are not read)
+    files: { loi: !!String(v.file || '').trim(), contract: !!String(v.cfile || '').trim(), signed: !!String(v.sfile || '').trim() } };
 }
 /** Status/dropdown label names from a column's settings_str (Code.gs statusOptions_). */
 function labelsOf(col) {
@@ -190,7 +192,7 @@ function shapeListing(it, cols) {
     .sort((a, b) => { const ia = order.indexOf(String(a.id)), ib = order.indexOf(String(b.id)); return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib); });
   const st = v.status;
   return {
-    id: String(it.id), code: String(it.id), building: v.building || it.name, tower: v.unit ? 'Unit ' + v.unit : '', floor: null,
+    id: String(it.id), code: String(it.id), building: v.building || it.name, tower: v.unit ? (/^unit\b/i.test(String(v.unit).trim()) ? String(v.unit).trim() : 'Unit ' + v.unit) : '',   // never "Unit Unit 5A" (Code.gs apiLoiDefaults) floor: null,
     // one city per listing ("Taguig", "BGC" and a BGC tower with no City all become "Taguig (BGC)"); cityRaw keeps Monday's text
     city: canonCity(v.location, v.building) || 'City not set', cityRaw: v.location,
     type: /sale|sell|buy/i.test(v.type + ' ' + group) ? 'For Sale' : 'For Rent', price: money(v.price),

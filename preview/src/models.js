@@ -226,6 +226,9 @@ const KpiFeedback = mongoose.model('KpiFeedback', new Schema({
   employeeId: { type: ObjectId, ref: 'User', required: true },
   period: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
   reviewerKey: { type: String, enum: KPI_KEYS, required: true },
+  // the coaching form (kpi ref.png). Records saved before it have only coaching / feedback; those are kept and shown.
+  achievements: { type: String, default: '', maxlength: SH_KPI.textMax },
+  actions: { type: [new Schema({ text: { type: String, required: true, maxlength: SH_KPI.actionMax }, date: { type: String, default: '', match: /^(\d{4}-\d{2}-\d{2})?$/ } }, { _id: false })], default: [] },
   coaching: { type: String, default: '', maxlength: SH_KPI.textMax },
   feedback: { type: String, default: '', maxlength: SH_KPI.textMax },
   author: { type: new Schema(person, { _id: false }), required: true },   // who saved the current text
@@ -259,6 +262,7 @@ const KpiSnapshot = mongoose.model('KpiSnapshot', writeOnce(new Schema({
     name: { type: String, default: '' }, vaLabel: { type: String, default: '' },
     kpis: { month: [kpiValue], current: [kpiValue] },
     reviews: [new Schema({ reviewerKey: String, reviewerLabel: String, reviewer: snapPerson, coaching: String, feedback: String,
+      achievements: { type: String, default: '' }, actions: { type: [new Schema({ text: String, date: String }, { _id: false })], default: [] },
       updatedAt: Date, version: Number, discussedAt: { type: Date, default: null }, discussedVersion: { type: Number, default: 0 } }, { _id: false })],
     ack: { type: new Schema({ status: { type: String, enum: ['acknowledged', 'not_acknowledged', 'not_available'], required: true },
       by: { type: new Schema(snapPerson, { _id: false }), default: null }, at: { type: Date, default: null } }, { _id: false }), required: true },
@@ -320,4 +324,21 @@ const UpsellSend = mongoose.model('UpsellSend', new Schema({
 // "never contact": set by staff (e.g. the client replied STOP); excluded from every audience and checked again on send
 const UpsellOptOut = mongoose.model('UpsellOptOut', new Schema({ ...leadRef, by }, opts).index({ source: 1, leadId: 1 }, { unique: true }));
 
-module.exports = { Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };
+// ---- LOI (src/loi.js): the team's Word templates and the LOIs made from them for review (nothing is sent or signed) ----
+const LOI_SLOT_KEYS = Object.keys(require('../public/shared').LOI_SLOTS);
+const LoiTemplate = mongoose.model('LoiTemplate', new Schema({
+  slot: { type: String, enum: LOI_SLOT_KEYS, required: true, unique: true },
+  name: { type: String, default: '', maxlength: 200 }, size: { type: Number, default: 0 },
+  data: { type: Buffer, required: true },   // the .docx (a few tens of KB)
+  uploadedBy: { type: new Schema(person, { _id: false }), required: true },
+}, opts));
+const Loi = mongoose.model('Loi', new Schema({
+  source: { type: String, enum: ['mongo', 'monday'], required: true }, leadId: { type: String, required: true, index: true },
+  slot: { type: String, enum: LOI_SLOT_KEYS, required: true }, templateName: { type: String, default: '' }, templateAt: { type: Date, default: null },
+  fields: { type: Schema.Types.Mixed, default: {} }, missing: { type: [String], default: [] },
+  data: { type: Buffer, required: true },   // the filled .docx, for the team's review
+  status: { type: String, enum: ['draft'], default: 'draft' },   // sending and signing are not available in the portal
+  createdBy: { type: new Schema(person, { _id: false }), required: true },
+}, { ...opts, minimize: false }));
+
+module.exports = { LoiTemplate, Loi, Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };

@@ -92,6 +92,8 @@ async function cdp(wsUrl) {
       await c.ev(`document.querySelector('[data-act="nav"][data-v="${v}"]').click()`);
     };
     const type = (k, v) => c.ev(`(() => { const t = document.querySelector('textarea[data-k="${k}"]'); t.value = ${JSON.stringify(v)}; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+    // one Action plan / Commitment date input in the editable section
+    const act = (i, f, v) => c.ev(`(() => { const t = document.querySelectorAll('.kr-col input[data-in="kraction"][data-f="${f}"]')[${i}]; t.value = ${JSON.stringify(v)}; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
     const pickLara = async () => { await until(`[...document.querySelector('[data-ch="kremp"]').options].some((o) => /^Lara/.test(o.text))`); await c.ev(`(() => { const s = document.querySelector('[data-ch="kremp"]'); s.value = [...s.options].find((o) => /^Lara/.test(o.text)).value; s.dispatchEvent(new Event('change', { bubbles: true })); })()`); };
 
     for (const [label, w, h, mobile] of [['desktop', 1440, 1000, false], ['phone', 390, 844, true]]) {
@@ -110,7 +112,7 @@ async function cdp(wsUrl) {
       check(`Lara's KPIs and labels shown${tag}`, /2\s*Clients assigned in the month/.test(kp) && /50%\s*To viewing/.test(kp) && /50%\s*Lost/.test(kp) && /2\s*Leads/.test(kp), kp);
       check(`live data labelled as live${tag}`, /Live review data/.test(await c.ev(`document.querySelector('.kr-banner').textContent`)));
       const cols = await c.ev(`[...document.querySelectorAll('.kr-col')].map((x) => x.querySelector('h3').textContent + (x.querySelector('textarea') ? ' [edit]' : ' [read]')).join(' | ')`);
-      check(`separate Toby / Jonjo columns, only Toby's editable${tag}`, /Toby — coaching & feedback yours \[edit\] \| Jonjo — coaching & feedback \[read\]/.test(cols), cols);
+      check(`separate Toby / Jonjo columns, only Toby's editable${tag}`, /Toby — coaching yours \[edit\] \| Jonjo — coaching \[read\]/.test(cols), cols);
       const pos = await c.ev(`[...document.querySelectorAll('.kr-col')].map((x) => [Math.round(x.getBoundingClientRect().top), Math.round(x.getBoundingClientRect().left)])`);
       check(mobile ? 'phone: columns stacked' : 'desktop: columns side by side', mobile ? pos[1][0] > pos[0][0] && pos[1][1] === pos[0][1] : pos[1][0] === pos[0][0] && pos[1][1] > pos[0][1], JSON.stringify(pos));
       check(`no sideways scrolling${tag}`, await c.ev('document.documentElement.scrollWidth <= window.innerWidth + 1'));
@@ -118,18 +120,31 @@ async function cdp(wsUrl) {
       const clipped = await c.ev(`[...document.querySelectorAll('.kr-bar label, .kr-bar .seg')].filter((x) => x.getBoundingClientRect().right > window.innerWidth + 1).map((x) => x.textContent.trim().slice(0, 20)).join(', ')`);
       check(`month and employee pickers fully visible${tag}`, !clipped, clipped);
       if (label === 'desktop') {
-        await type('coaching', SECRET); await type('feedback', 'Toby feedback for Lara');
+        // the coaching form (kpi ref.png): the four parts, in order, in each reviewer's section; five action rows to start
+        const parts = await c.ev(`[...document.querySelectorAll('.kr-col')].map((x) => [...x.querySelectorAll('.kr-bar2')].map((b) => b.textContent.trim().toLowerCase()).join('/')).join(' | ')`);
+        check('both sections use the coaching-form layout', parts === 'performance achievements / gaps/action plan/commitment date/acknowledgment | performance achievements / gaps/action plan/commitment date/acknowledgment' || /^performance achievements \/ gaps\/action plan\/commitment date\/acknowledgment \| /.test(parts), parts);
+        check('five action plan rows, each with a commitment date', (await c.ev(`document.querySelectorAll('.kr-col')[0].querySelectorAll('input[data-f="text"]').length`)) === 5 && (await c.ev(`document.querySelectorAll('.kr-col')[0].querySelectorAll('input[type="date"][data-f="date"]').length`)) === 5);
+        check('acknowledgment part shows the employee and the reviewer slots', /Employee \(Lara\)/.test(await c.ev(`document.querySelector('.kr-col .kr-ack').textContent`)) && /Toby \(reviewer's own record\)/.test(await c.ev(`document.querySelector('.kr-col .kr-ack').textContent`)));
+        await type('achievements', SECRET);
+        await act(0, 'text', 'Toby feedback for Lara'); await act(0, 'date', '2026-11-30'); await act(1, 'text', 'Second action, no date yet');
         await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
         await until(`/aved by Toby/.test(document.querySelector('.kr-col').textContent)`);
         check('Toby\'s save shows success', /Review saved/.test(await c.ev(`document.querySelector('#toast').textContent`)));
         // a save that the server refuses shows an error and keeps the text
-        await type('coaching', ''); await type('feedback', '');
+        await type('achievements', ''); await act(0, 'text', ''); await act(0, 'date', ''); await act(1, 'text', '');
         await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
-        check('empty save shows an error', /Write some coaching or feedback first/.test(await c.ev(`document.querySelector('.kr-col .src-err').textContent`)));
+        check('empty save shows an error', /can't be left empty/.test(await c.ev(`document.querySelector('.kr-col .src-err').textContent`)));
         await c.ev(`document.querySelector('[data-act="krreload"]') ; location.reload()`);
         await until(`!!document.querySelector('[data-ch="kremp"]')`); await c.ev('window.confirm = () => true');
         await pickLara(); await until(`!!document.querySelector('.kr-col textarea')`);
-        check('Toby\'s review persists after reload', (await c.ev(`document.querySelector('textarea[data-k="coaching"]').value`)) === SECRET);
+        check('Toby\'s review persists after reload (achievements, actions with dates)', (await c.ev(`document.querySelector('textarea[data-k="achievements"]').value`)) === SECRET
+          && (await c.ev(`[...document.querySelectorAll('.kr-col')[0].querySelectorAll('input[data-in="kraction"]')].slice(0, 4).map((i) => i.value).join('|')`)) === 'Toby feedback for Lara|2026-11-30|Second action, no date yet|');
+        // creating a snapshot with unsaved text asks to save first (the snapshot would reload the review and drop it)
+        await type('achievements', SECRET + ' (edited, not saved)');
+        await c.ev(`document.querySelector('[data-act="krsnap"]').click()`);
+        check('snapshot with unsaved text: asks to save first, keeps the text', /Save your review first/.test(await c.ev(`document.querySelector('#toast').textContent`))
+          && (await c.ev(`document.querySelector('textarea[data-k="achievements"]').value`)) === SECRET + ' (edited, not saved)' && !(await c.ev(`!!document.querySelector('.kr-banner.snap')`)));
+        await type('achievements', SECRET); await c.ev(`document.querySelector('[data-act="krsave"]').click()`); await sleep(800);
         await c.ev(`document.querySelector('[data-act="krdiscussed"]').click()`);
         await until(`/Reviewer recorded discussion/.test(document.querySelector('.kr-col').textContent)`);
         check('reviewer discussion record shown separately from employee acknowledgment', /Not acknowledged by Lara yet/.test(await c.ev(`document.body.textContent`)));
@@ -139,7 +154,7 @@ async function cdp(wsUrl) {
         await signIn(ACCOUNTS[1][0]); await go('kpireview'); await until(`!!document.querySelector('[data-ch="kremp"]')`); await pickLara();
         await until(`document.querySelectorAll('.kr-col').length === 2 && !!document.querySelectorAll('.kr-col')[1].querySelector('textarea')`);
         check('Jonjo reads Toby\'s review, edits only his own', (await c.ev(`document.querySelectorAll('.kr-col')[0].textContent`)).includes(SECRET) && !(await c.ev(`!!document.querySelectorAll('.kr-col')[0].querySelector('textarea')`)));
-        await type('feedback', 'Jonjo feedback for Lara'); await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
+        await type('achievements', 'Jonjo feedback for Lara'); await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
         await until(`/aved by Jonjo/.test(document.querySelectorAll('.kr-col')[1].textContent)`);
         check('Jonjo\'s save leaves Toby\'s column unchanged', (await c.ev(`document.querySelectorAll('.kr-col')[0].textContent`)).includes(SECRET));
         check('each section shows who last saved it and when', /Last saved by Toby \(test reviewer\) · .*Manila/.test(await c.ev(`document.querySelectorAll('.kr-col')[0].querySelector('.kr-saved').textContent`)) && /Last saved by Jonjo/.test(await c.ev(`document.querySelectorAll('.kr-col')[1].querySelector('.kr-saved').textContent`)));
@@ -148,7 +163,7 @@ async function cdp(wsUrl) {
         for (const idx of [0, 1]) {
           await c.ev(`(() => { const s = document.querySelector('[data-ch="krperiod"]'); s.selectedIndex = ${idx}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
           await pickVa('/^Bea/'); await until(`document.querySelectorAll('.kr-col').length === 2 && !!document.querySelectorAll('.kr-col')[1].querySelector('textarea') && /Bea/.test(document.querySelector('.kr-emp h3').textContent)`);
-          await type('coaching', 'Jonjo coaching Bea m' + idx); await type('feedback', 'Jonjo feedback Bea m' + idx);
+          await type('achievements', 'Jonjo coaching Bea m' + idx); await act(0, 'text', 'Jonjo action Bea m' + idx);
           await c.ev(`document.querySelector('[data-act="krsave"]').click()`);
           await until(`/Last saved by Jonjo/.test(document.querySelectorAll('.kr-col')[1].querySelector('.kr-saved').textContent)`);
         }
@@ -194,7 +209,8 @@ async function cdp(wsUrl) {
         await pickVa('/^Bea/'); await until(`/Bea/.test(document.querySelector('.kr-emp h3').textContent) && document.querySelectorAll('.kr-col').length === 2`);
         check('Toby reads Jonjo\'s section for Bea, read-only; his own is empty and editable',
           /Jonjo coaching Bea m0/.test(await c.ev(`document.querySelectorAll('.kr-col')[1].textContent`)) && !(await c.ev(`!!document.querySelectorAll('.kr-col')[1].querySelector('textarea')`))
-          && (await c.ev(`document.querySelectorAll('.kr-col')[0].querySelector('textarea[data-k="coaching"]').value`)) === '');
+          && (await c.ev(`document.querySelectorAll('.kr-col')[0].querySelector('textarea[data-k="achievements"]').value`)) === ''
+          && /Jonjo action Bea m0/.test(await c.ev(`document.querySelectorAll('.kr-col')[1].querySelector('.kr-plan').textContent`)));
         await pickVa('/^Lara/'); await until(`/Lara/.test(document.querySelector('.kr-emp h3').textContent)`);
         await c.ev(`document.querySelector('[data-act="krsnap"]').click()`);
         await until(`/Snapshot saved/.test(document.querySelector('#toast').textContent)`);
@@ -217,7 +233,8 @@ async function cdp(wsUrl) {
         await shot('4-toby-lara-phone');
         await c.ev(`document.querySelector('.kr-bar [data-act="krmode"][data-v="snap"]').click()`);
         await until(`!!document.querySelector('.kr-banner.snap')`);
-        check('phone: snapshot readable without sideways scrolling', await c.ev('document.documentElement.scrollWidth <= window.innerWidth + 1'));
+        check('phone: snapshot readable without sideways scrolling, action plan and dates side by side', (await c.ev('document.documentElement.scrollWidth <= window.innerWidth + 1')) && (await c.ev(`(() => { const c = document.querySelector('.kr-plan .kr-cell:nth-of-type(2)') || document.querySelector('.kr-plan .kr-bar2:nth-of-type(2)'); const a = document.querySelector('.kr-plan .kr-bar2'); return !!c && a.getBoundingClientRect().top === document.querySelectorAll('.kr-plan .kr-bar2')[1].getBoundingClientRect().top; })()`)));
+        check('phone: snapshot readable without sideways scrolling (page)', await c.ev('document.documentElement.scrollWidth <= window.innerWidth + 1'));
         await shot('5-snapshot-phone');
         await signIn(ACCOUNTS[3][0]); await go('kpiack', true); await until(`/You confirmed/.test(document.querySelector('#view').textContent)`);
         check('phone: Lara\'s acknowledgment screen fits', await c.ev('document.documentElement.scrollWidth <= window.innerWidth + 1'));

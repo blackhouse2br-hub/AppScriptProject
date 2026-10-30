@@ -12,6 +12,7 @@ const { saveMondayResult, saveMongoResult, pendingFeedback } = require('./integr
 const { kpiReviewRoutes } = require('./kpiReview');
 const { projectRoutes } = require('./projects');
 const { upsellRoutes } = require('./upsell');
+const { loiRoutes } = require('./loi');
 
 const bad = (res, errors) => res.status(400).json({ error: errors[0], errors });
 const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'propreq', 'brokers'];
@@ -33,8 +34,8 @@ function apiRouter(config) {
       let host = ''; try { host = new URL(origin).host; } catch (e) { /* invalid */ }
       if (host !== req.headers.host) return res.status(403).json({ error: 'Cross-site request blocked.' });
     }
-    // JSON only; the one exception is a Project Pages file upload (the file itself, checked by projects.js / projectMedia.js)
-    const upload = req.method === 'POST' && /^\/(projects\/[a-f0-9]{24}\/media|upsell\/campaigns\/[a-f0-9]{24}\/image)$/.test(req.path);
+    // JSON only; the exceptions are file uploads (the file itself, checked by projects.js / projectMedia.js / docx.js)
+    const upload = req.method === 'POST' && /^\/(projects\/[a-f0-9]{24}\/media|upsell\/campaigns\/[a-f0-9]{24}\/image|loi\/templates\/(lease|absolute|conditional))$/.test(req.path);
     if (!upload && !req.is('application/json') && req.headers['content-length'] !== '0' && req.method !== 'DELETE') return res.status(415).json({ error: 'Send JSON.' });
     next();
   });
@@ -235,6 +236,19 @@ function apiRouter(config) {
     const entry = await RenewalLog.create({ source: req.params.source, leadId: lead.id, kind, by: { name: req.user.name, userId: req.user._id } });
     res.status(201).json({ entry: { leadId: lead.id, kind, at: entry.createdAt, by: req.user.name } });
   });
+  /** VA Portal "Asking owner" (Code.gs apiGetVaPortal b.asking): the units still being checked, for the clients this user can see. */
+  r.get('/asking/open', need('vaportal', 'view'), async (req, res) => {
+    const source = req.query.source === 'mongo' ? 'mongo' : 'monday';
+    let ids;
+    if (source === 'mongo') ids = (await Lead.find(await leadScope(req.user), { _id: 1 }).limit(20000).lean()).map((l) => String(l._id));
+    else {
+      if (!integ.monday) return res.json({ rows: [] });
+      let all; try { all = await integ.monday.loadAll(false); } catch (err) { if (!err.integration) throw err; return res.status(502).json({ error: err.message }); }
+      ids = scopeExternal(req.user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads.map((l) => l.id);
+    }
+    const rows = await AvailabilityRequest.find({ source, status: 'asking', leadId: { $in: ids } }, { leadId: 1, listingName: 1, createdAt: 1 }).sort({ createdAt: 1 }).limit(5000).lean();
+    res.json({ rows: rows.map((x) => ({ leadId: x.leadId, listingName: x.listingName, at: x.createdAt })) });
+  });
   /** The renewal log of the clients this user can see: { leadId: [{ kind, at, by }] } (newest first, 12 each). */
   r.get('/renewals/log', need('renewals', 'view'), async (req, res) => {
     const source = req.query.source === 'mongo' ? 'mongo' : 'monday';
@@ -292,7 +306,12 @@ function apiRouter(config) {
   async function checkMember(body, selfId) {
     const salesLabels = await integ.allowedSalesLabels();
     if (body && body.role === 'Broker' && body.salesLabel && !salesLabels) return { errors: ['The Monday Salesperson labels could not be read, so a broker\'s label can\'t be checked. Try again shortly, or save without a label.'] };
-    const { value, errors } = SH.validateUser(body, { vaLabels: await integ.allowedVaLabels(), salesLabels: salesLabels || [] });
+    // a member being edited may keep the VA label they already have, even if it has left the board
+    const current = selfId ? await User.findById(selfId, { vaLabel: 1 }).lean() : null;
+    // also the VA labels the portal's own (MongoDB) leads use, so a VA can be given those leads with Monday connected
+    const mongoVas = (await Lead.distinct('va')).filter(Boolean);
+    const vaLabels = (await integ.allowedVaLabels()).concat(mongoVas, current && current.vaLabel ? [current.vaLabel] : []);
+    const { value, errors } = SH.validateUser(body, { vaLabels, salesLabels: salesLabels || [] });
     if (errors.length) return { errors };
     if (value.salesLabel && await User.exists({ _id: { $ne: selfId || null }, role: 'Broker', active: true, salesLabel: value.salesLabel })) {
       return { errors: [`The Salesperson label "${value.salesLabel}" is already set for another broker. Each broker needs their own label.`] };
@@ -364,6 +383,8 @@ function apiRouter(config) {
   projectRoutes(r, config);
   // Upselling: offers to clients, sent 1:1 or tagged through respond.io (sending off unless RESPOND_SENDS=on)
   upsellRoutes(r, config, integ);
+  // LOI: the team's Word templates and LOIs filled from them for review (no sending or e-signature)
+  loiRoutes(r, config, integ);
 
   // Monday.com / respond.io (status, live reads); nothing is written to either service except the allowlisted,
   // confirmed Monday updates (POST /monday/write, mondayWrite.js; off unless MONDAY_WRITES=on)

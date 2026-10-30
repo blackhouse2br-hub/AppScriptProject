@@ -24,7 +24,9 @@ L.items.push({ id: '9301', name: 'BH-U1', group: 'ALL CLIENTS', v: { cn: 'Tenant
   { id: '9303', name: 'BH-U3', group: 'ALL CLIENTS', v: { cn: 'Rate Ricky', va1: 'Bea', inq: 'Buy', cs: 'Failed', city: 'Pasig', rid: '555303' } },
   // a returning client: a second lead with the same respond.io contact as Tina; and one whose send hits a respond.io server error
   { id: '9304', name: 'BH-U4', group: 'ALL CLIENTS', v: { cn: 'Tina Cruz (2nd inquiry)', va1: 'Ana', inq: 'Rent', cs: 'Qualified', city: 'Makati', rid: '555301' } },
-  { id: '9305', name: 'BH-U5', group: 'ALL CLIENTS', v: { cn: 'Server Error Sam', va1: 'Bea', inq: 'Rent', cs: 'Qualified', city: 'Pasig', rid: '555305' } });
+  { id: '9305', name: 'BH-U5', group: 'ALL CLIENTS', v: { cn: 'Server Error Sam', va1: 'Bea', inq: 'Rent', cs: 'Qualified', city: 'Pasig', rid: '555305' } },
+  // a client in the leads board's "Closed" group with no Calendar deal (Code.gs isDeal_ counts them as tenants); not on respond.io
+  { id: '9306', name: 'BH-U6', group: 'Closed', v: { cn: 'Closed Group Carl', va1: 'Ana', inq: 'Rent', city: 'Makati' } });
 CAL.columns.push({ id: 'ccd', title: 'Contract Date', type: 'date', settings_str: '{}' });
 CAL.items.push({ id: '6401', name: 'Deal U1', group: 'Closed', created: '2026-09-01', v: { fs: '2026-09-01', cl: { linked: ['9301'] }, b: 'Fake Tower', c: 'Makati', tm: '10:00', sp: 'Ely Santos', st: 'Closed', ccd: '2026-09-10' } });
 
@@ -110,6 +112,10 @@ test('audience: worked out on the server from visible Monday clients; presets, f
   assert.strictEqual(batch(a, 'message').ids.filter((id) => ['9301', '9304'].includes(id)).length, 1);
   await save(boss, { audience: { preset: 'tenants', statuses: [], type: '', city: '', contact: 'respond', skipDays: 14 } });
   assert.deepStrictEqual(names((await audience(boss)).data.recipients), ['Tenant Tina Cruz'], 'tenants: a closed deal');
+  await save(boss, { audience: { preset: 'tenants', statuses: [], type: '', city: '', contact: 'any', skipDays: 14 } });
+  const ten = (await audience(boss)).data;
+  assert.deepStrictEqual(names(ten.recipients), ['Closed Group Carl', 'Tenant Tina Cruz'], 'tenants: also a client in the Closed group (as the original)');
+  assert.strictEqual(ten.tenantsNote, '', 'the Calendar board was read');
   await save(boss, { audience: { preset: 'past', statuses: [], type: 'Buy', city: 'pas', contact: 'any', skipDays: 0 } });
   assert.deepStrictEqual(names((await audience(boss)).data.recipients), ['Rate Ricky'], 'past + Buy + city');
   await save(boss, { audience: { preset: 'all', statuses: [], type: '', city: '', contact: 'respond', skipDays: 14 } });
@@ -129,6 +135,10 @@ test('message rendering and preview; image checks, persistent public link for re
   await save(boss, { text: 'Hi {firstName}! {va} here. Concierge for {building}.' });
   const pv = (await call(base, 'GET', `/api/upsell/campaigns/${cid}/preview?lead=9301`, { cookie: boss })).data;
   assert.strictEqual(pv.text, 'Hi Tenant! Jonjo here. Concierge for your unit.');
+  // never a stand-in client: no client, or one no longer in the audience, is refused
+  assert.strictEqual((await call(base, 'GET', `/api/upsell/campaigns/${cid}/preview`, { cookie: boss })).status, 400);
+  const gone = await call(base, 'GET', `/api/upsell/campaigns/${cid}/preview?lead=9306`, { cookie: boss });
+  assert.deepStrictEqual([gone.status, /audience changed/.test(gone.data.error), /Maria/.test(JSON.stringify(gone.data))], [409, true, false]);
   assert.strictEqual(SH.upsellText('Hi {firstName}', { name: '' }, ''), 'Hi there');
   for (const [buf, n] of [[Buffer.from('<svg onload=alert(1)>'), 'a.png'], [Buffer.from('%PDF-1.4'), 'a.pdf'], [Buffer.concat([PNG(), Buffer.alloc(5 * 1024 * 1024)]), 'big.png']]) {
     assert.ok([400, 413].includes((await call(base, 'POST', `/api/upsell/campaigns/${cid}/image`, { cookie: boss, file: buf, name: n })).status), n);

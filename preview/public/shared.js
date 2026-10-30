@@ -440,6 +440,9 @@
   const KPI_REVIEW = {
     reviewers: [{ key: 'toby', label: 'Toby' }, { key: 'jonjo', label: 'Jonjo' }],
     textMax: 4000, timezone: 'Asia/Manila', monthsBack: 24, scope: 'all-vas',
+    // the coaching form (kpi ref.png): achievements / gaps, then action plan rows with a commitment date
+    actionsMax: 10, actionMax: 300, actionRows: 5,
+    fieldLabels: { achievements: 'Performance Achievements / Gaps', coaching: 'Coaching', feedback: 'Feedback' },
     // shared accounts that may never be a reviewer (the coaching is private to Toby's and Jonjo's own accounts)
     neverReviewers: ['blackhouse2br@gmail.com'],
   };
@@ -475,16 +478,44 @@
       ],
     };
   }
-  /** A reviewer's coaching + feedback from the page: { coaching, feedback, version } (version 0 = first save). */
+  /**
+   * A reviewer's section from the page (the coaching form: Performance Achievements / Gaps, Action Plan rows with a
+   * Commitment Date). { achievements, actions: [{ text, date }], coaching?, feedback?, version } (version 0 = first save).
+   * Coaching and Feedback are the earlier free-text fields: only the ones sent are changed, so a save never blanks them.
+   * Returns { value } with only the fields sent; the caller checks the merged record isn't empty (kpiReviewEmpty).
+   */
   function validateKpiFeedback(b) {
-    if (!isPlainObject(b) || Object.keys(b).some((k) => !['coaching', 'feedback', 'version'].includes(k))) return { errors: ['Invalid request.'] };
-    if (typeof b.coaching !== 'string' || typeof b.feedback !== 'string') return { errors: ['Coaching and feedback must be text.'] };
-    const coaching = b.coaching.trim(), feedback = b.feedback.trim();
-    if (coaching.length > KPI_REVIEW.textMax || feedback.length > KPI_REVIEW.textMax) return { errors: [`Coaching and feedback: ${KPI_REVIEW.textMax} characters at most each.`] };
-    if (!coaching && !feedback) return { errors: ['Write some coaching or feedback first.'] };
+    const KEYS = ['achievements', 'actions', 'coaching', 'feedback', 'version'];
+    if (!isPlainObject(b) || Object.keys(b).some((k) => !KEYS.includes(k))) return { errors: ['Invalid request.'] };
     if (!Number.isInteger(b.version) || b.version < 0) return { errors: ['Reload the review and try again.'] };
-    return { value: { coaching, feedback, version: b.version }, errors: [] };
+    const value = { version: b.version };
+    for (const k of ['achievements', 'coaching', 'feedback']) {
+      if (b[k] === undefined) continue;
+      if (typeof b[k] !== 'string') return { errors: ['The review must be text.'] };
+      const s = b[k].replace(/\r\n/g, '\n').trim();
+      if (s.length > KPI_REVIEW.textMax) return { errors: [`${KPI_REVIEW.fieldLabels[k]}: ${KPI_REVIEW.textMax} characters at most.`] };
+      value[k] = s;
+    }
+    if (b.actions !== undefined) {
+      if (!Array.isArray(b.actions) || b.actions.length > 50) return { errors: ['Invalid action plan.'] };
+      const rows = [];
+      for (const r of b.actions) {
+        if (!isPlainObject(r) || Object.keys(r).some((k) => k !== 'text' && k !== 'date') || typeof (r.text ?? '') !== 'string' || typeof (r.date ?? '') !== 'string') return { errors: ['Invalid action plan.'] };
+        const text = (r.text || '').trim(), date = (r.date || '').trim();
+        if (!text && !date) continue;   // an empty row is just an unused line
+        if (!text) return { errors: [`Commitment date ${date} has no action. Write the action, or clear the date.`] };
+        if (text.length > KPI_REVIEW.actionMax) return { errors: [`Each action: ${KPI_REVIEW.actionMax} characters at most.`] };
+        if (date && !isYmd(date)) return { errors: [`The commitment date for “${text.slice(0, 40)}” isn't a valid date.`] };
+        rows.push({ text, date });
+      }
+      if (rows.length > KPI_REVIEW.actionsMax) return { errors: [`At most ${KPI_REVIEW.actionsMax} actions.`] };
+      value.actions = rows;
+    }
+    if (Object.keys(value).length === 1) return { errors: ['Write the review first.'] };
+    return { value, errors: [] };
   }
+  /** True when a review (saved fields merged with the new ones) has nothing in it. */
+  const kpiReviewEmpty = (r) => !String(r.achievements || '').trim() && !(r.actions || []).length && !String(r.coaching || '').trim() && !String(r.feedback || '').trim();
 
   // ---------- Project Pages (the original Apps Script fields; server: src/projects.js) ----------
   const PROJECT = {
@@ -602,6 +633,133 @@
     return out;
   }
 
+  // ---------- LOI / Contract (Code.gs apiLoiDefaults, apiSaveCalFeedback listing match, dealTerm_) — read only here ----------
+  /**
+   * What generating, sending and signing LOIs / contracts needs and the portal doesn't have (Code.gs LOI_TPL_*,
+   * DocumentApp/DriveApp, LOI_OUT_FOLDER, PUBLIC_HOOK_URL signing page, MailApp / respond.io sending).
+   */
+  // e-signature and the signed copy (Code.gs apiSendLoi / loiSignPage_ / apiSubmitLoiSignature / apiSendLoiOwner)
+  const LOI_SETUP = [
+    'A public signing page that clients and owners can open without a portal account (the Apps Script public hook ?sign=), with sign-link storage and expiry',
+    'Turning the LOI into a PDF to show and sign (the Apps Script exported it through Google Drive; the portal has no document converter)',
+    'Sending the signing link: email (the Apps Script used MailApp; the portal has no mail service) or respond.io (sending is switched off: RESPOND_SENDS)',
+    'Where the signed copy is kept: Google Drive with write access (the portal can only read Drive), or the portal\'s own storage, once decided',
+  ];
+  const pesoText = (n) => (Number(n) > 0 ? '₱' + Math.round(Number(n)).toLocaleString('en-US') : '');
+  // the LOI templates (Settings → Files): one per kind, as the Apps Script LOI_TPL_lease / _absolute / _conditional
+  const LOI_SLOTS = { lease: 'Lease (Contract of Lease)', absolute: 'Sale: Deed of Absolute Sale', conditional: 'Sale: Deed of Conditional Sale' };
+  // the fields the Prepare LOI form edits (Code.gs apiLoiDefaults); OWNER / OWNER_SIGN / CLIENT_SIGN follow TO_1 / CLIENT
+  const LOI_TERMS_DEFAULT = { absolute: 'Full payment upon signing of the Deed of Absolute Sale, unless otherwise stated', conditional: 'As stated in the payment schedule under Annex "A"' };
+  const LOI_FIELDS = ['DATE', 'TO_1', 'TO_2', 'TO_3', 'DEAR', 'CLIENT', 'BROKER_SIGN', 'PROPERTY', 'LEASE_TERM', 'MONTHLY_RENT', 'ADVANCE', 'DEPOSIT', 'PRICE', 'TERMS', 'CONCESSIONS', 'COMM_PCT'];
+  /** Code.gs numberWords_: 3 → "Three", 2.5 → "Two point five". */
+  function numberWords(n) {
+    n = Number(n); if (!isFinite(n) || n < 0) return '';
+    const ones = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+    const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+    const int = (w) => (w < 20 ? ones[w] : w < 100 ? tens[Math.floor(w / 10)] + (w % 10 ? '-' + ones[w % 10] : '') : w === 100 ? 'one hundred' : String(w));
+    const [a, b] = String(n).split('.');
+    const words = int(Number(a)) + (b ? ' point ' + b.split('').map((d) => ones[Number(d)]).join(' ') : '');
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
+  /**
+   * The Prepare LOI form, checked: { slot, fields } → { value: { slot, fields (all template keys) }, missing: [labels], errors }.
+   * Missing values are allowed (the document keeps the template's blank line) and listed, never filled in.
+   */
+  function validateLoi(b) {
+    if (!isPlainObject(b) || !LOI_SLOTS[b.slot] || !isPlainObject(b.fields) || Object.keys(b.fields).some((k) => !LOI_FIELDS.includes(k))) return { errors: ['Invalid request.'] };
+    const f = {};
+    for (const k of LOI_FIELDS) {
+      const v = b.fields[k] == null ? '' : b.fields[k];
+      if (typeof v !== 'string') return { errors: ['Invalid request.'] };
+      // control characters would make the Word document unreadable: removed (they are never visible text)
+      const s = v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '').replace(/\s+/g, ' ').trim();
+      if (s.length > (k === 'TERMS' ? 1000 : 300)) return { errors: [`${k}: too long.`] };
+      f[k] = s;
+    }
+    if (f.COMM_PCT && !(/^\d{1,3}(\.\d{1,2})?$/.test(f.COMM_PCT) && Number(f.COMM_PCT) <= 100)) return { errors: ['Commission % must be a number from 0 to 100.'] };
+    const lease = b.slot === 'lease';
+    // Code.gs apiMakeLoi: the original's default Terms of Payment for a sale when none is typed
+    if (!f.TERMS) f.TERMS = LOI_TERMS_DEFAULT[b.slot] || '';
+    const fields = { ...f, OWNER: f.TO_1, OWNER_SIGN: f.TO_1, CLIENT_SIGN: f.CLIENT, COMM_WORDS: f.COMM_PCT ? numberWords(f.COMM_PCT) : '',
+      ...(lease ? { PRICE: '' } : { MONTHLY_RENT: '', ADVANCE: '', DEPOSIT: '', LEASE_TERM: '' }) };
+    const need = { DATE: 'Date', TO_1: 'Owner', TO_2: 'Unit, building', CLIENT: 'Client', BROKER_SIGN: 'Broker', PROPERTY: 'Property', COMM_PCT: 'Commission %', ...(lease ? { LEASE_TERM: 'Lease term', MONTHLY_RENT: 'Monthly rent' } : { PRICE: 'Price' }) };
+    const missing = Object.keys(need).filter((k) => !fields[k]).map((k) => need[k]);
+    return { value: { slot: b.slot, fields }, missing, errors: [] };
+  }
+  /**
+   * The listing a Calendar deal is about (Code.gs apiSaveCalFeedback): same building (either name containing the other),
+   * closest price, and only if within 15 % of the deal's rental rate / price. → { listing, ambiguous }
+   */
+  function loiListing(listings, building, price) {
+    const b = normT(building); if (!b) return { listing: null, ambiguous: false };
+    const p = Number(price) || 0, near = (x) => !p || Math.abs((Number(x.price) || 0) - p) <= p * 0.15;
+    const same = listings.filter((x) => { const xb = normT(x.building); return xb && (xb.includes(b) || b.includes(xb)); })
+      .sort((x, y) => Math.abs((Number(x.price) || 0) - p) - Math.abs((Number(y.price) || 0) - p));
+    const ok = same.filter(near);
+    return { listing: ok[0] || null, ambiguous: ok.length > 1 };
+  }
+  /**
+   * The LOI fields as the Apps Script would pre-fill them (apiLoiDefaults), each with where it comes from and its state:
+   * 'ok' (from the records), 'default' (the original's fixed default), 'missing', 'entered' (typed when preparing).
+   * Plus warnings for conflicting records. Nothing here is invented: an unknown value stays empty.
+   * { lead, listing, deal (Calendar row), ambiguous, today 'YYYY-MM-DD' }
+   */
+  function loiDraft({ lead, listing, deal, ambiguous, today }) {
+    const L = listing || {}, d = deal || {}, warn = [];
+    // lease or sale: the listing first, then the client's inquiry (loiIsLease_)
+    const lease = listing ? L.type !== 'For Sale' : d.type ? !/sale/i.test(d.type) : lead.inquiry !== 'Buy';
+    if (listing && lead.inquiry && (lead.inquiry === 'Buy') === lease) warn.push(`The listing is ${L.type}, but the client's inquiry is ${lead.inquiry === 'Buy' ? 'Buy' : 'Rent'}. Check which LOI applies.`);
+    if (!listing) warn.push(d.building ? `No listing matches “${d.building}” at the deal's price (within 15 %), so property, owner and price are unknown.` : 'No viewing with a building to match a listing yet.');
+    if (ambiguous) warn.push('More than one listing in that building is near the deal\'s price; the closest one is shown. Check it is the right unit.');
+    const dealPrice = Number(d.rate || d.price) || 0;
+    if (listing && dealPrice && L.price && Math.abs(L.price - dealPrice) > 1) warn.push(`The listing's price (${pesoText(L.price)}) differs from the Calendar's ${d.rate ? 'Rental Rate' : 'Monthly Contract Price'} (${pesoText(dealPrice)}). The LOI used the listing's price; confirm the agreed amount.`);
+    const broker = d.sp || lead.salesperson || '';
+    if (d.sp && lead.salesperson && d.sp !== lead.salesperson) warn.push(`The viewing's broker (${d.sp}) differs from the client's Salesperson (${lead.salesperson}); the LOI uses the viewing's broker.`);
+    const owner = L.contact || '', unit = L.tower || '', building = L.building || d.building || '', location = L.cityRaw || d.city || '';
+    const specs = [L.bedrooms && (/^\d+$/.test(L.bedrooms) ? L.bedrooms + ' BR' : L.bedrooms), L.sizeSqm && L.sizeSqm + ' sqm', L.furnishing].filter(Boolean).join(', ');
+    const f = (key, label, value, state, note) => ({ key, label, value: value || '', state: value ? state || 'ok' : state === 'entered' ? 'entered' : 'missing', note: note || '' });
+    const fields = [
+      f('DATE', 'Date', today, 'ok', 'The day it is prepared (Manila)'),
+      f('TO_1', 'To (owner)', owner, 'ok', 'The listing\'s owner (its Monday item name)'),
+      f('TO_2', 'Unit, building', [unit, building].filter(Boolean).join(', ')),
+      f('TO_3', 'Location', location),
+      f('DEAR', 'Dear', owner || 'Sir/Madam', owner ? 'ok' : 'default'),
+      f('CLIENT', 'Client', lead.name), f('BROKER_SIGN', 'Broker', broker, 'ok', d.sp ? 'From the Calendar viewing' : 'From the client\'s Salesperson'),
+      f('PROPERTY', 'Property', [unit, building, location].filter(Boolean).join(', ') + (specs ? ' (' + specs + ')' : '')),
+      ...(lease ? [f('LEASE_TERM', 'Lease term', lead.leaseTerm || 'One (1) year', lead.leaseTerm ? 'ok' : 'default'), f('MONTHLY_RENT', 'Monthly rent', pesoText(L.price)),
+        f('ADVANCE', 'Advance', 'One (1) month', 'default'), f('DEPOSIT', 'Deposit', 'Two (2) months', 'default')] : [f('PRICE', 'Price', pesoText(L.price))]),
+      f('CONCESSIONS', 'Concessions', '', 'entered', lead.pets === 'With Pets' ? 'The client has pets; the number of pets isn\'t read by the portal, so it is typed when preparing.' : 'Typed when preparing, if any'),
+      f('COMM_PCT', 'Commission %', '', 'entered', 'Typed when preparing'),
+    ];
+    return { kind: lease ? 'Lease (Contract of Lease)' : 'Sale (Deed of Absolute or Conditional Sale)', lease, fields, warnings: warn };
+  }
+  /**
+   * A lead's deal stages from its Calendar rows (Code.gs loiMap_ / dealTerm_ / the 5-day rule): the latest row with a
+   * Contract Date, else with an LOI date, else the latest viewing. Dates as on Monday; nothing is computed that Monday doesn't hold.
+   */
+  function dealStages(deals, today) {
+    const all = (deals || []).slice().sort((a, b) => String(b.contract || b.loi || b.fin || '').localeCompare(String(a.contract || a.loi || a.fin || '')));
+    if (!all.length) return null;
+    // as Code.gs loiMap_: failed items (Status, or a Failed / Archive group) don't count
+    const rows = all.filter((x) => !/fail/i.test(String(x.status || '')) && !/failed|archive/i.test(String(x.group || '')));
+    if (!rows.length) return { deal: null, others: 0, failed: all.length, warnings: [`This client's Calendar item${all.length > 1 ? 's are' : ' is'} marked Failed, so there is no deal to show.`] };
+    // the furthest stage: a row with a Contract Date (the deal), else one with an LOI date, else the latest viewing
+    const d = rows.find((x) => x.contract) || rows.find((x) => x.loi) || rows[0];
+    // across all the client's items (loiMap_): latest contract date, total paid, any LOI / contract / signed file
+    const f = (k) => rows.some((x) => (x.files || {})[k]);
+    const cd = rows.map((x) => x.contract).filter(Boolean).sort().pop() || '', loi = rows.map((x) => x.loi).filter(Boolean).sort().pop() || '';
+    const paid = rows.reduce((a, x) => a + (Number(x.paid) || 0), 0);
+    const days = (s) => Math.round((Date.parse(today + 'T00:00:00Z') - Date.parse(s + 'T00:00:00Z')) / 864e5);
+    // the 5-day rules (Code.gs stage rules 4588-4596): signed contract or payment → no rule; contract date not signed;
+    // LOI not signed by the owner (a contract file on the Calendar counts as the owner's signature)
+    const warn = [];
+    if (!f('signed') && !(paid > 0)) {
+      if (cd && days(cd) > 5) warn.push(`Contract Date was ${days(cd)} days ago and no Signed Contract file is on the Calendar item (the 5-day rule moves the client back to Property Matching).`);
+      else if (!cd && loi && !f('contract') && days(loi) > 5) warn.push(`The LOI was ${days(loi)} days ago and the owner hasn't signed (no Contract Date or Contract file): the 5-day rule moves the client back to Property Matching.`);
+    }
+    return { deal: { ...d, files: { loi: f('loi'), contract: f('contract'), signed: f('signed') } }, others: rows.length - 1, failed: all.length - rows.length, warnings: warn };
+  }
+
   // ---------- Upselling (Code.gs / Index.html Upselling; server: src/upsell.js) ----------
   const UPSELL = {
     presets: ['tenants', 'active', 'past', 'all'],
@@ -659,9 +817,9 @@
   }
 
   return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
-    UPSELL, upsellTemplates, upsellTag, upsellText, validateCampaign, upsellAudience,
+    UPSELL, upsellTemplates, upsellTag, upsellText, validateCampaign, upsellAudience, LOI_SETUP, LOI_SLOTS, LOI_FIELDS, numberWords, validateLoi, loiListing, loiDraft, dealStages,
     PROJECT, parseDriveLink, youtubeId, isHttpsUrl, validHook, toList, validateProject, mediaKind, driveProposal, isId24,
-    vaKey, sameVa, vaLabels, LEAD_PLUS, dealFailed, vaWorkload, vaPerformance, KPI_REVIEW, manilaMonth, manilaDay, validPeriod, periodDays, kpiReviewValues, validateKpiFeedback,
+    vaKey, sameVa, vaLabels, LEAD_PLUS, dealFailed, vaWorkload, vaPerformance, KPI_REVIEW, manilaMonth, manilaDay, validPeriod, periodDays, kpiReviewValues, validateKpiFeedback, kpiReviewEmpty,
     validateLeadPatch, leadUpdateNote, validateNote, validateBooking, bookingLeadChanges, bookingNote,
     validateViewingPatch, validateAvailability, validateUser, validateTemplate,
     normPets, petWords, canonCity, citiesIn, filterListings, ASK, validateAsk, validateAskPatch, contactLinks, validateFailOverride, applyOverride,

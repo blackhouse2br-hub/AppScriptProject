@@ -131,7 +131,8 @@ function kpiReviewRoutes(r, config, integ) {
     return emp;
   }
   const kpisFor = (data, va, p) => SH.kpiReviewValues({ leads: data.leads, viewings: data.viewings, deals: data.deals, va, period: p, today: SH.manilaDay() });
-  const reviewOut = (f) => f && ({ reviewerKey: f.reviewerKey, coaching: f.coaching, feedback: f.feedback, version: f.version,
+  const reviewOut = (f) => f && ({ reviewerKey: f.reviewerKey, achievements: f.achievements || '', actions: (f.actions || []).map((a) => ({ text: a.text, date: a.date || '' })),
+    coaching: f.coaching || '', feedback: f.feedback || '', version: f.version,
     author: { name: f.author.name, userId: String(f.author.userId) }, createdAt: f.createdAt, updatedAt: f.updatedAt,
     discussedAt: f.discussedAt || null, discussedBy: f.discussedBy ? { name: f.discussedBy.name } : null, discussedVersion: f.discussedVersion || 0 });
   // for the reviewers: who acknowledged, from which account, and which versions of the text it covered
@@ -196,11 +197,17 @@ function kpiReviewRoutes(r, config, integ) {
     const conflict = async () => res.status(409).json({ conflict: true, review: reviewOut(await KpiFeedback.findOne(key).lean()),
       error: 'Your review for this month was changed in another tab or device since you opened it. Your text was not saved: copy it, reload, and save again.' });
     await KpiFeedback.init();   // the unique index must exist first, so two first saves can't both insert
+    // only the fields sent change: an earlier record's Coaching / Feedback stay unless the reviewer edits them
+    const { version, ...fields } = value;
     let doc;
-    if (value.version === 0) {
-      try { doc = await KpiFeedback.create({ ...key, coaching: value.coaching, feedback: value.feedback, author: who(req.user), createdBy: who(req.user) }); } catch (err) { if (err.code !== 11000) throw err; return conflict(); }
+    if (version === 0) {
+      if (SH.kpiReviewEmpty(fields)) return bad(res, 'Write the review first.');
+      try { doc = await KpiFeedback.create({ ...key, ...fields, author: who(req.user), createdBy: who(req.user) }); } catch (err) { if (err.code !== 11000) throw err; return conflict(); }
     } else {
-      doc = await KpiFeedback.findOneAndUpdate({ ...key, version: value.version }, { $set: { coaching: value.coaching, feedback: value.feedback, author: who(req.user) }, $inc: { version: 1 } }, { returnDocument: 'after', runValidators: true });
+      const cur = await KpiFeedback.findOne({ ...key, version }).lean();
+      if (!cur) return conflict();
+      if (SH.kpiReviewEmpty({ ...cur, ...fields })) return bad(res, 'The review can\'t be left empty. Write something, or keep the earlier text.');
+      doc = await KpiFeedback.findOneAndUpdate({ ...key, version }, { $set: { ...fields, author: who(req.user) }, $inc: { version: 1 } }, { returnDocument: 'after', runValidators: true });
       if (!doc) return conflict();
     }
     res.json({ review: reviewOut(doc.toObject()) });
@@ -285,7 +292,8 @@ function kpiReviewRoutes(r, config, integ) {
       const ack = e.linked ? acks.find((a) => sameId(a.employeeId, e.employeeId)) : null;
       return { employeeId: e.employeeId, name: e.name, vaLabel: e.vaLabel, kpis: kpisFor(data, e.vaLabel, p),
         reviews: fb.filter((f) => sameId(f.employeeId, e.subject)).map((f) => ({ reviewerKey: f.reviewerKey, reviewerLabel: label[f.reviewerKey] || f.reviewerKey,
-          reviewer: { userId: f.author.userId, name: f.author.name, email: f.author.email }, coaching: f.coaching, feedback: f.feedback, updatedAt: f.updatedAt, version: f.version, discussedAt: f.discussedAt || null, discussedVersion: f.discussedVersion || 0 })),
+          reviewer: { userId: f.author.userId, name: f.author.name, email: f.author.email }, coaching: f.coaching, feedback: f.feedback,
+          achievements: f.achievements || '', actions: (f.actions || []).map((a) => ({ text: a.text, date: a.date || '' })), updatedAt: f.updatedAt, version: f.version, discussedAt: f.discussedAt || null, discussedVersion: f.discussedVersion || 0 })),
         ack: !e.linked ? { status: 'not_available', by: null, at: null } : ack ? { status: 'acknowledged', by: { userId: ack.by.userId, name: ack.by.name, email: ack.by.email }, at: ack.createdAt } : { status: 'not_acknowledged', by: null, at: null } };
     });
     await KpiSnapshot.init();   // the unique index stops two snapshots for one month, even from requests at the same moment
