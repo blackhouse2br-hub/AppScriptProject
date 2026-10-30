@@ -13,7 +13,46 @@
 const crypto = require('crypto');
 const express = require('express');
 const SH = require('../public/shared');
-const { Lead, LeadOverride, Project, UpsellCampaign, UpsellSend, UpsellOptOut } = require('./models');
+const { Lead, LeadOverride, Project, UpsellCampaign, UpsellSend, UpsellOptOut, UpsellLegacy } = require('./models');
+const { createMailer } = require('./mailer');
+
+// the Apps Script's mailer branding (Code.gs CONFIG.LOGO_URL / SITE_URL): the company's public logo and site
+const LOGO_URL = 'https://www.blackhouse.ph/wp-content/uploads/2026/07/Blackhouse-Logo-White-300x33.png', SITE_URL = 'https://www.blackhouse.ph';
+const e = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+/**
+ * Code.gs apiBuildMailer: an email-safe HTML mailer (logo, the offer, a button, unsubscribe) and its subject. Merge
+ * tags {{first_name}} / {{unsubscribe}} are turned into Brevo's or Mailchimp's on the page.
+ */
+function buildMailer(c, p, pageUrl) {
+  const wrap = (title, inner, cta) => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${e(title)}</title></head>
+<body style="margin:0;padding:0;background:#F6F4F0;font-family:Poppins,Helvetica,Arial,sans-serif;color:#16130E">
+<div style="display:none;max-height:0;overflow:hidden">${e(title)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F6F4F0"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff">
+<tr><td style="background:#0A0D12;padding:22px 28px"><a href="${e(SITE_URL)}" style="text-decoration:none;color:#ffffff"><img src="${e(LOGO_URL)}" alt="BLACKHOUSE" width="170" style="display:block;width:170px;height:auto;border:0;color:#ffffff;font-size:18px;letter-spacing:3px;text-decoration:none"></a></td></tr>
+${inner}
+${cta ? `<tr><td align="center" style="padding:8px 28px 34px"><a href="${e(cta.url)}" style="display:inline-block;background:#16130E;color:#ffffff;text-decoration:none;font-size:13px;letter-spacing:1px;text-transform:uppercase;padding:14px 28px;border-radius:2px">${e(cta.label)}</a></td></tr>` : ''}
+<tr><td style="background:#0A0D12;color:rgba(246,244,240,.7);font-size:12px;line-height:1.6;padding:22px 28px">Blackhouse Realty · High-end real estate in Metro Manila<br><a href="${e(SITE_URL)}" style="color:#ffffff">blackhouse.ph</a> · Reply to this email to talk to an advisor.<br><br>
+<span style="color:rgba(246,244,240,.5)">You are receiving this because you inquired with Blackhouse. <a href="{{unsubscribe}}" style="color:rgba(246,244,240,.7)">Unsubscribe</a></span></td></tr>
+</table></td></tr></table></body></html>`;
+  if (p) {
+    const url = pageUrl || SITE_URL + '/projects/', units = (p.units || []).filter((u) => u && u.type).slice(0, 4);
+    const facts = [['Developer', p.developer], ['Location', p.location], ['Turnover', p.turnover], ['Price from', p.priceFrom]].filter((f) => f[1]);
+    const inner = `<tr><td style="padding:30px 28px 6px"><div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;color:rgba(22,19,14,.6)">${e([p.developer, p.status].filter(Boolean).join(' · ') || 'New project')}</div>
+<h1 style="margin:8px 0 6px;font-size:30px;font-weight:500;letter-spacing:-.5px">${e(p.name)}</h1>${p.tagline ? `<p style="margin:0;font-size:15px;line-height:1.6;color:rgba(22,19,14,.75)">${e(p.tagline)}</p>` : ''}</td></tr>
+${facts.length ? `<tr><td style="padding:16px 28px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e6e2da;border-bottom:1px solid #e6e2da"><tr>${facts.map((f) => `<td style="padding:12px 6px;vertical-align:top"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:rgba(22,19,14,.55)">${e(f[0])}</div><div style="font-size:14px;margin-top:4px">${e(f[1])}</div></td>`).join('')}</tr></table></td></tr>` : ''}
+${p.description ? `<tr><td style="padding:6px 28px 10px;font-size:14px;line-height:1.7;color:rgba(22,19,14,.78)">${e(String(p.description).split(/\n{2,}/)[0])}</td></tr>` : ''}
+${units.length ? `<tr><td style="padding:10px 28px"><div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;color:rgba(22,19,14,.6);margin-bottom:10px">Units available</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+${units.map((u, i) => (i % 2 === 0 ? '<tr>' : '') + `<td width="50%" style="padding:6px;vertical-align:top"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e6e2da"><tr><td style="padding:12px"><div style="font-size:16px">${e(u.type)}</div><div style="font-size:12px;color:rgba(22,19,14,.6);margin-top:4px">${e([u.bedrooms && u.bedrooms + ' BR', u.sizeSqm && u.sizeSqm + ' sqm'].filter(Boolean).join(' · '))}</div>${u.priceFrom ? `<div style="font-size:13px;margin-top:6px">From ${e(u.priceFrom)}</div>` : ''}</td></tr></table></td>` + (i % 2 === 1 || i === units.length - 1 ? '</tr>' : '')).join('')}</table></td></tr>` : ''}`;
+    return { subject: p.name + (p.developer ? ' by ' + p.developer : '') + ' — units now available', html: wrap(p.name, inner, { label: 'View units & floor plans', url }), url };
+  }
+  const t = SH.upsellTemplates().find((x) => x.k === c.template) || { label: 'Blackhouse' };
+  const label = c.template === 'concierge' ? 'Blackhouse Concierge' : t.label;
+  const body = String(c.text || '').replace(/\{building\}/g, 'your unit').replace(/\{firstName\}/g, '{{first_name}}').replace(/\{va\}/g, 'the Blackhouse team');
+  const inner = `<tr><td style="padding:32px 28px 8px"><div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;color:rgba(22,19,14,.6)">Blackhouse services</div><h1 style="margin:8px 0 14px;font-size:28px;font-weight:500;letter-spacing:-.5px">${e(label)}</h1>
+<div style="font-size:15px;line-height:1.7;color:rgba(22,19,14,.8)">${e(body).replace(/\n/g, '<br>')}</div></td></tr>`;
+  return { subject: label + ' — Blackhouse', html: wrap(label, inner, { label: 'Reply to book', url: SITE_URL + '/services/' }), url: SITE_URL + '/services/' };
+}
 const { need, leadScope, scopeExternal } = require('./access');
 const media = require('./projectMedia');
 const { createRespondSender, SendError } = require('./integrations/respondio');
@@ -28,12 +67,22 @@ function upsellRoutes(r, config, integ) {
   const sender = rc.token && rc.sends ? createRespondSender(rc) : null;
   const view = need('upsell', 'view'), edit = need('upsell', 'edit');
   const official = /^https:\/\/api\.respond\.io\//.test(rc.apiUrl + '/');
+  const mailer = config.storage && config.storage.smtp ? createMailer(config.storage.smtp) : null;
+  // the workspace's respond.io channels for the picker (read only; cached 6 hours, as Code.gs respondChannels_)
+  let chans = { at: 0, list: [] };
+  async function channels() {
+    if (!integ.respond) return [];
+    if (Date.now() - chans.at < 6 * 3600e3) return chans.list;
+    try { chans = { at: Date.now(), list: await integ.respond.channels() }; } catch (err) { if (!err.integration) throw err; return chans.list; }
+    return chans.list;
+  }
 
   /** Every client this member may see, as audience rows (Monday when connected, else MongoDB), with offers and opt-outs. */
   // excludeCampaign: "last offer" leaves out that campaign's own sends (they are tracked per client by its records,
   // so its recipients stay on its list with their status instead of dropping out after the send)
   async function clientRows(user, excludeCampaign) {
     let source, leads, tenants = new Set(), tenantsNote = '';
+    const leaseEnd = {};
     if (integ.monday) {
       const all = await integ.monday.loadAll(false);
       if (all.errors.leads) { const e = new Error('The Monday leads board could not be read: ' + all.errors.leads); e.integration = 'monday'; throw e; }
@@ -44,6 +93,10 @@ function upsellRoutes(r, config, integ) {
       // reads Monday's status as two fields, Next Action and Client Status, so both are checked), unless failed
       leads.forEach((l) => { if (![l.nextAction, l.clientStatus].some((s) => /^(failed|lost|disqualif)/i.test(String(s || '').trim())) && [l.nextAction, l.clientStatus, l.group].some((s) => /^closed$/i.test(String(s || '').trim()))) tenants.add(String(l.id)); });
       if (all.errors.viewings || !all.calendarOk) tenantsNote = `The Monday Calendar board ${all.errors.viewings ? 'could not be read' : 'is not set up'}, so tenants are only the clients marked Closed on the leads board.`;
+      // the lease end (Index.html upRows r[9], CSV tenant_lease_end): the latest Contract Expiration Date of a live deal
+      (all.deals || []).forEach((d) => { if (d.leadId && d.exp && !SH.dealFailed(d) && (!leaseEnd[d.leadId] || d.exp > leaseEnd[d.leadId])) leaseEnd[d.leadId] = d.exp; });
+      // Client Status only, as the Apps Script (r[4]); the board's other status field doesn't count
+      leads = leads.map((l) => ({ ...l, clientStatus: l.clientStatus || '' }));
     } else {
       source = 'mongo';
       const ovs = new Set((await LeadOverride.find({ source: 'mongo', failed: { $ne: null } }, { leadId: 1 }).lean()).map((o) => o.leadId));
@@ -51,17 +104,21 @@ function upsellRoutes(r, config, integ) {
       leads.forEach((l) => { if (l.leaseEnd || /closed/i.test(l.clientStatus)) tenants.add(l.id); });
     }
     const ids = leads.map((l) => String(l.id));
-    const [sent, outs] = await Promise.all([
-      UpsellSend.aggregate([{ $match: { source, leadId: { $in: ids }, action: 'message', status: 'sent', ...(excludeCampaign ? { campaignId: { $ne: excludeCampaign } } : {}) } }, { $group: { _id: '$leadId', at: { $max: '$updatedAt' } } }]),
+    // last offer: messages and tags (the Apps Script counted both), plus the Apps Script's own history once imported
+    const [sent, outs, legacy] = await Promise.all([
+      UpsellSend.aggregate([{ $match: { source, leadId: { $in: ids }, action: { $in: ['message', 'tag'] }, status: 'sent', ...(excludeCampaign ? { campaignId: { $ne: excludeCampaign } } : {}) } }, { $group: { _id: '$leadId', at: { $max: '$updatedAt' } } }]),
       UpsellOptOut.find({ source, leadId: { $in: ids } }, { leadId: 1 }).lean(),
+      // (the Upselling history only, as the Apps Script's up_ log; renewal messages don't count here)
+      source === 'monday' ? UpsellLegacy.aggregate([{ $match: { source, leadId: { $in: ids }, action: { $in: ['message', 'tag'] } } }, { $group: { _id: '$leadId', at: { $max: '$at' } } }]) : [],
     ]);
     const last = new Map(sent.map((x) => [x._id, +x.at])), opted = new Set(outs.map((o) => o.leadId));
+    legacy.forEach((x) => { if (+x.at > (last.get(x._id) || 0)) last.set(x._id, +x.at); });
     const cidOf = (l) => String(l.contactId || '').replace(/\D/g, '');
     // an opt-out covers every lead with the same respond.io contact (a returning client can have two leads)
     const optedCids = new Set(leads.filter((l) => opted.has(String(l.id))).map(cidOf).filter(Boolean));
     return { source, tenantsNote, rows: leads.map((l) => ({ id: String(l.id), source, name: l.name || '', email: l.email || '', phone: l.phone || '', status: l.clientStatus || l.status || '',
       type: l.inquiry === 'Buy' ? 'Buy' : l.inquiry === 'Rent' ? 'Rent' : '', city: l.city || '', building: l.building || '', va: l.va || '',
-      contactId: cidOf(l), onRespond: !!cidOf(l), tenant: tenants.has(String(l.id)), lastOffer: last.get(String(l.id)) || 0,
+      contactId: cidOf(l), onRespond: !!cidOf(l), tenant: tenants.has(String(l.id)), leaseEnd: leaseEnd[String(l.id)] || l.leaseEnd || '', lastOffer: last.get(String(l.id)) || 0,
       optedSelf: opted.has(String(l.id)), optedOut: opted.has(String(l.id)) || (!!cidOf(l) && optedCids.has(cidOf(l))) })) };
   }
   /**
@@ -82,14 +139,15 @@ function upsellRoutes(r, config, integ) {
         const r = mine.get(x.id);
         if (retry ? !(r && r.status === 'failed') : !!r) continue;
         seen.add(x.contactId); out.push(x);
-        if (out.length >= UP.batchMax) break;
+        if (out.length >= (action === 'tag' ? UP.tagBatchMax : UP.batchMax)) break;
       }
-      const hash = crypto.createHash('sha256').update(JSON.stringify([source, action, !!retry, out.map((x) => x.id), c.text, c.image ? c.image.id : '', c.tag])).digest('hex').slice(0, 32);
+      // the fingerprint covers the recipients, the message, image, tag and channel the operator reviewed
+      const hash = crypto.createHash('sha256').update(JSON.stringify([source, action, !!retry, out.map((x) => x.id), c.text, c.image ? c.image.id : '', c.tag, c.channelId || ''])).digest('hex').slice(0, 32);
       return { list: out, hash };
     };
     return { source, rows, list, recs, tenantsNote, batches: { message: batch('message', false), tag: batch('tag', false), retry: batch('message', true) } };
   }
-  const recipientOut = (x) => ({ id: x.id, name: x.name, status: x.status, type: x.type, city: x.city, email: x.email, phone: x.phone, onRespond: x.onRespond, tenant: x.tenant, lastOffer: x.lastOffer || null });
+  const recipientOut = (x) => ({ id: x.id, name: x.name, status: x.status, type: x.type, city: x.city, email: x.email, phone: x.phone, onRespond: x.onRespond, tenant: x.tenant, leaseEnd: x.leaseEnd || '', lastOffer: x.lastOffer || null });
   const failed = (res, err) => { if (!err.integration) throw err; res.status(err.httpStatus || 502).json({ error: err.message }); };
   async function campaignFor(req, res) {
     const c = SH.isId24(req.params.id) ? await UpsellCampaign.findById(req.params.id) : null;
@@ -102,7 +160,7 @@ function upsellRoutes(r, config, integ) {
     // without Project Pages access, only published projects (their pages are public anyway)
     const projects = (await Project.find(SH.access(req.user, 'pages') !== 'none' ? {} : { published: true }, { name: 1, developer: 1, published: 1 }).sort({ developer: 1, name: 1 }).limit(500).lean())
       .map((p) => ({ id: String(p._id), name: p.name, developer: p.developer, published: p.published }));
-    res.json({ templates: SH.upsellTemplates(), projects, respond: !!rc.token, sends: !!sender,
+    res.json({ templates: SH.upsellTemplates(), projects, respond: !!rc.token, sends: !!sender, channels: await channels(), mailer: { testEmail: !!mailer },
       sendsNote: !rc.token ? 'respond.io is not connected (RESPOND_TOKEN).' : !rc.sends ? 'Sending is switched off on this server (RESPOND_SENDS is not "on"). Drafts, audiences, previews and the CSV work; nothing can be sent or tagged.' : '' });
   });
   r.get('/upsell/campaigns', view, async (req, res) => {
@@ -148,7 +206,7 @@ function upsellRoutes(r, config, integ) {
     res.json({ text: text.slice(0, UP.textMax), published: !!p.published });
   });
 
-  // ----- the offer's image (JPEG / PNG / WebP / GIF up to 5 MB; kept in the portal's database) -----
+  // ----- the offer's image (JPEG / PNG up to 5 MB; kept in the portal's database) -----
   const rawBody = express.raw({ type: () => true, limit: UP.imageMax + 1024 });
   const readFile = (req, res, next) => rawBody(req, res, (err) => (err ? res.status(err.type === 'entity.too.large' ? 413 : 400).json({ error: err.type === 'entity.too.large' ? 'Images can be 5 MB at most.' : 'The file could not be read.' }) : next()));
   r.post('/upsell/campaigns/:id/image', edit, readFile, async (req, res) => {
@@ -156,7 +214,8 @@ function upsellRoutes(r, config, integ) {
     if (await UpsellSend.exists({ campaignId: c._id, action: 'message' })) return res.status(409).json({ error: 'This offer has already been sent; its image can\'t change. Make a new offer.' });
     const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), chk = media.checkFile(buf);
     if (chk.error) return bad(res, chk.error);
-    if (!/^image\//.test(chk.type)) return bad(res, 'Only JPEG, PNG, WebP or GIF images.');
+    // WhatsApp image messages take JPEG and PNG only, so WebP / GIF would fail at send time
+    if (!/^image\/(jpeg|png)$/.test(chk.type)) return bad(res, 'Only JPEG or PNG images (WhatsApp accepts no other image type).');
     if (buf.length > UP.imageMax) return bad(res, 'Images can be 5 MB at most.');
     let name = ''; try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch (e) { /* default */ }
     const id = await media.save(buf, { name: name || 'offer.png', type: chk.type, projectId: 'upsell:' + c.id, by: req.user.name });
@@ -182,7 +241,8 @@ function upsellRoutes(r, config, integ) {
     try {
       const a = await audienceOf(req.user, c);
       const done = new Map(a.recs.map((s) => [s.action + ':' + s.leadId, s]));
-      const statuses = [...new Set(a.rows.map((x) => x.status).filter(Boolean))].sort();
+      // the Client Status chips, with "(blank)" for clients who have none (Index.html upRows)
+      const statuses = [...new Set(a.rows.map((x) => x.status || UP.blank))].sort();
       const bOut = (k) => ({ hash: a.batches[k].hash, ids: a.batches[k].list.map((x) => x.id), names: a.batches[k].list.map((x) => x.name) });
       res.json({ source: a.source, total: a.rows.length, tenantsNote: a.tenantsNote || '', optedOut: a.rows.filter((x) => x.optedOut).length, statuses,
         batches: { message: bOut('message'), tag: bOut('tag'), retry: bOut('retry') },
@@ -204,8 +264,9 @@ function upsellRoutes(r, config, integ) {
     const c = await campaignFor(req, res); if (!c) return;
     try {
       const a = await audienceOf(req.user, c), q = (s) => '"' + String(s == null ? '' : s).replace(/"/g, '""').replace(/^[=+\-@\t\r]/, "'$&") + '"';   // no spreadsheet formulas
-      const lines = [['email', 'first_name', 'full_name', 'phone', 'city', 'status', 'rent_or_sale', 'tenant'].join(',')]
-        .concat(a.list.filter((x) => x.email).map((x) => [x.email, x.name.split(/\s+/)[0], x.name, x.phone, x.city, x.status, x.type, x.tenant ? 'yes' : ''].map(q).join(',')));
+      // the Apps Script's columns (Index.html upCsv), so existing email-tool imports keep working
+      const lines = [['email', 'first_name', 'full_name', 'phone', 'city', 'status', 'rent_or_sale', 'tenant_lease_end'].join(',')]
+        .concat(a.list.filter((x) => x.email).map((x) => [x.email, x.name.split(/\s+/)[0], x.name, x.phone, x.city, x.status, x.type === 'Buy' ? 'Sale' : x.type === 'Rent' ? 'Rent' : '', x.leaseEnd || ''].map(q).join(',')));
       res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="blackhouse-upsell-${c.id}.csv"` }).send(lines.join('\r\n'));
     } catch (err) { failed(res, err); }
   });
@@ -220,6 +281,38 @@ function upsellRoutes(r, config, integ) {
       else await UpsellOptOut.deleteMany({ source, leadId: { $in: ids } });
       res.json({ ok: true, count: ids.length });
     } catch (err) { failed(res, err); }
+  });
+
+  // "Mark audience opted out…" (Index.html upOpt): every client in the offer's audience now, after the operator confirms
+  // the number they were shown (if the audience changed since, nothing is changed)
+  r.post('/upsell/campaigns/:id/optout-all', edit, async (req, res) => {
+    const b = req.body || {};
+    if (b.confirm !== true || !Number.isInteger(b.count) || b.count < 1) return bad(res, 'Confirm how many clients to opt out.');
+    const c = await campaignFor(req, res); if (!c) return;
+    let a; try { a = await audienceOf(req.user, c); } catch (err) { return failed(res, err); }
+    if (a.list.length !== b.count) return res.status(409).json({ stale: true, error: `The audience is now ${a.list.length} clients, not ${b.count}. Nothing was changed: refresh and confirm again.` });
+    const ids = a.list.map((x) => x.id);
+    for (let i = 0; i < ids.length; i += 500) {
+      await UpsellOptOut.bulkWrite(ids.slice(i, i + 500).map((leadId) => ({ updateOne: { filter: { source: a.source, leadId }, update: { $setOnInsert: { source: a.source, leadId, by: by(req) } }, upsert: true } })));
+    }
+    res.json({ ok: true, count: ids.length });
+  });
+
+  // ----- email mailer (Code.gs apiBuildMailer / apiMailerTest): an email-safe HTML version of the offer -----
+  r.get('/upsell/campaigns/:id/mailer', view, async (req, res) => {
+    const c = await campaignFor(req, res); if (!c) return;
+    const p = c.template === 'project' && SH.isId24(c.projectId) ? await Project.findById(c.projectId).lean() : null;
+    res.json({ ...buildMailer(c, p, p && p.published ? `${config.web.apiOrigin}/p/${p.slug}` : (p && p.pageUrl) || ''), testEmail: !!mailer });
+  });
+  r.post('/upsell/mailer-test', edit, async (req, res) => {
+    const b = req.body || {};
+    if (typeof b.subject !== 'string' || typeof b.html !== 'string' || b.html.length > 200000 || b.subject.length > 200) return bad(res, 'Invalid request.');
+    if (!mailer) return res.status(409).json({ error: 'Email is not set up on this server (SMTP_HOST, SMTP_FROM…). Download the HTML instead.' });
+    if (!SH.EMAIL_RE.test(String(req.user.email || ''))) return bad(res, 'Your account has no email address to send the test to.');
+    // to the member's own address only, as the Apps Script did
+    try { await mailer.send({ to: req.user.email, subject: '[TEST] ' + b.subject, text: 'Test of the mailer HTML (attached; open it in a browser).', attachment: { name: 'mailer.html', type: 'text/html', data: Buffer.from(b.html.replace(/\{\{first_name\}\}/g, 'there').replace(/\{\{unsubscribe\}\}/g, '#')) } }); }
+    catch (err) { if (!err.integration) throw err; return res.status(502).json({ error: err.message }); }
+    res.json({ ok: true, to: req.user.email });
   });
 
   // ----- sending (messages or tags), confirmed by the operator; results per client -----
@@ -263,8 +356,8 @@ function upsellRoutes(r, config, integ) {
         try {
           if (b.action === 'tag') await sender.tag(x.contactId, c.tag);
           else {
-            if (c.image && !steps.image) { await sender.image(x.contactId, imageUrl(c)); steps.image = true; await sleep(400); }
-            await sender.text(x.contactId, SH.upsellText(c.text, x, req.user.name)); steps.text = true;
+            if (c.image && !steps.image) { await sender.image(x.contactId, imageUrl(c), c.channelId); steps.image = true; await sleep(400); }
+            await sender.text(x.contactId, SH.upsellText(c.text, x, req.user.name), c.channelId); steps.text = true;
           }
           await UpsellSend.updateOne({ _id: rec._id }, { $set: { status: 'sent', steps, error: '' } });
           results.push({ id: x.id, name: x.name, status: 'sent' });
@@ -276,7 +369,7 @@ function upsellRoutes(r, config, integ) {
           results.push({ id: x.id, name: x.name, status: err.unknown ? 'unknown' : 'failed', error: err.message });
           if (err.stop) { stopped = err.message; retryAfter = err.retryAfter || 0; break; }
         }
-        await sleep(UP.gapMs);
+        await sleep(b.action === 'tag' ? UP.tagGapMs : UP.gapMs);
       }
     } finally { await UpsellCampaign.updateOne({ _id: c._id, sendLock: lockToken }, { $set: { sendingUntil: null, sendLock: '' } }); }
     if (retryAfter) res.set('Retry-After', String(retryAfter));

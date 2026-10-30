@@ -15,12 +15,16 @@ class DriveError extends Error {
   constructor(message, status) { super(message); this.integration = 'drive'; this.httpStatus = status || 502; }
 }
 
-/** cfg: { email, key, apiUrl, tokenUrl } (key = the service account's PEM private key) */
+/**
+ * cfg: { email, key, apiUrl, tokenUrl } (key = the service account's PEM private key). The writer (LOI signed copies,
+ * deal files) is a separate service account and client: cfg.scope = WRITE_SCOPE and cfg.uploadUrl.
+ */
 function createDrive(cfg) {
   let token = '', until = 0, pending = null;
+  const scope = cfg.scope || SCOPE;
   async function newToken() {
     const now = Math.floor(Date.now() / 1000);
-    const head = b64url({ alg: 'RS256', typ: 'JWT' }) + '.' + b64url({ iss: cfg.email, scope: SCOPE, aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
+    const head = b64url({ alg: 'RS256', typ: 'JWT' }) + '.' + b64url({ iss: cfg.email, scope, aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
     const jwt = head + '.' + crypto.sign('RSA-SHA256', Buffer.from(head), cfg.key).toString('base64url');
     let r;
     try {
@@ -92,7 +96,43 @@ function createDrive(cfg) {
   const download = (id, max) => call(`/files/${encodeURIComponent(id)}?${q({ alt: 'media' })}`, { max });
   /** A Google Docs / Sheets / Slides file as text (Drive's export limit is 10 MB). */
   const exportText = async (id, mimeType) => (await call(`/files/${encodeURIComponent(id)}/export?${new URLSearchParams({ mimeType })}`, { max: 10 * 1024 * 1024 })).toString('utf8');
-  return { info, walk, download, exportText, email: cfg.email, FOLDER };
-}
+  const out = { info, walk, download, exportText, email: cfg.email, FOLDER };
+  if (scope !== WRITE_SCOPE) return out;
 
-module.exports = { createDrive, DriveError, SCOPE };
+  // ---- writer only: upload into a folder shared with the service account, export a PDF, delete a temporary file ----
+  async function write(method, url, body, headers) {
+    for (let attempt = 0, refreshed = false; ; attempt++) {
+      let r;
+      try { r = await fetch(url, { method, headers: { Authorization: 'Bearer ' + await auth(false), ...(headers || {}) }, body, signal: AbortSignal.timeout(60000) }); }
+      catch (e) { if (e instanceof DriveError) throw e; throw new DriveError('Google Drive could not be reached. The file was not saved; try again.'); }
+      if (r.ok) return r;
+      const e = await r.json().catch(() => ({})), reason = (((e.error || {}).errors || [])[0] || {}).reason || '';
+      if (r.status === 401 && !refreshed) { refreshed = true; await auth(true); continue; }
+      if ((r.status === 429 || r.status >= 500) && attempt < 1 && method !== 'POST') { await new Promise((s) => setTimeout(s, 800)); continue; }
+      if (r.status === 404) throw new DriveError(`The Drive folder doesn't exist or isn't shared with ${cfg.email}. Share it (Content manager / Editor) and try again.`, 409);
+      if (reason === 'storageQuotaExceeded' || /quota/i.test(reason)) throw new DriveError('Google Drive refused the file: the service account has no storage. Use a folder in a Shared Drive and add the service account to it.', 409);
+      if (r.status === 403) throw new DriveError(`The portal can't write to that Drive folder. Share it with ${cfg.email} as Content manager / Editor.`, 409);
+      throw new DriveError('Google Drive returned an error (HTTP ' + r.status + '). The file was not saved.', 502);
+    }
+  }
+  /** Uploads one file into a folder → { id, name, webViewLink }. asGoogleDoc: converts a .docx to a Google Doc. */
+  async function upload(buf, { name, mimeType, parent, asGoogleDoc }) {
+    const boundary = 'bh' + crypto.randomBytes(12).toString('hex');
+    const meta = { name, parents: [parent], ...(asGoogleDoc ? { mimeType: 'application/vnd.google-apps.document' } : {}) };
+    const body = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`), buf, Buffer.from(`\r\n--${boundary}--`)]);
+    const r = await write('POST', `${cfg.uploadUrl}/files?${q({ uploadType: 'multipart', fields: 'id,name,webViewLink' })}`, body, { 'Content-Type': `multipart/related; boundary=${boundary}` });
+    return r.json();
+  }
+  /** A Google Doc exported as PDF (Drive's own converter, as the Apps Script's getAs('application/pdf')). */
+  async function exportPdf(id) {
+    const r = await write('GET', `${cfg.apiUrl}/files/${encodeURIComponent(id)}/export?${new URLSearchParams({ mimeType: 'application/pdf' })}`);
+    const b = Buffer.from(await r.arrayBuffer());
+    if (b.subarray(0, 5).toString() !== '%PDF-') throw new DriveError('Google Drive did not return a PDF.', 502);
+    return b;
+  }
+  const remove = async (id) => { await write('DELETE', `${cfg.apiUrl}/files/${encodeURIComponent(id)}?${q({})}`); };
+  return { ...out, upload, exportPdf, remove };
+}
+const WRITE_SCOPE = 'https://www.googleapis.com/auth/drive';
+
+module.exports = { createDrive, DriveError, SCOPE, WRITE_SCOPE };

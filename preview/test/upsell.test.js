@@ -10,7 +10,7 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 const { start } = require('../server');
 const { loadConfig } = require('../src/config');
 const { createApp } = require('../src/app');
-const { User, UpsellSend } = require('../src/models');
+const { User, UpsellSend, UpsellOptOut } = require('../src/models');
 const { hashPassword } = require('../src/auth');
 const SH = require('../public/shared');
 const fx = require('./fixtures/fake-integrations');
@@ -218,7 +218,7 @@ test('tagging for a respond.io broadcast; a VA only reaches their own clients; C
   assert.ok(tags.length >= 2 && tags.every((p) => /^\/contact\/id:\d+\/tag$/.test(p.path) && JSON.stringify(p.body) === '["Aircon Oct"]'), JSON.stringify(tags));
   assert.ok(tags.every((p) => ['555001', '555006', '555301'].includes(p.path.match(/id:(\d+)/)[1])), 'only Ana\'s clients');
   const csv = await call(base, 'GET', `/api/upsell/campaigns/${cid}/csv`, { cookie: await login('boss') });
-  assert.match(csv.headers.get('content-type'), /text\/csv/); assert.match(csv.text, /^email,first_name,full_name,phone,city,status,rent_or_sale,tenant/);
+  assert.match(csv.headers.get('content-type'), /text\/csv/); assert.match(csv.text, /^email,first_name,full_name,phone,city,status,rent_or_sale,tenant_lease_end/);
 });
 
 test('an unknown tag result can be settled too; resolve is checked', async () => {
@@ -227,4 +227,80 @@ test('an unknown tag result can be settled too; resolve is checked', async () =>
   assert.strictEqual((await call(base, 'POST', `/api/upsell/campaigns/${cid}/resolve`, { cookie: boss, body: { leadId: '9305', outcome: 'sent', action: 'other' } })).status, 400);
   await UpsellSend.create({ campaignId: cid, source: 'monday', leadId: '9305', contactId: '', action: 'tag', status: 'sending' });
   assert.strictEqual((await call(base, 'POST', `/api/upsell/campaigns/${cid}/resolve`, { cookie: boss, body: { leadId: '9305', outcome: 'failed', action: 'tag' } })).status, 200);
+});
+
+test('channel picker, JPEG/PNG only, the Apps Script CSV columns, "(blank)" status, tags count as offers, opt out the whole audience', async () => {
+  const boss = await login('boss');
+  // the workspace's channels (read from respond.io; GET only) and a channel on the offer, sent as channelId
+  const meta = (await call(base, 'GET', '/api/upsell/meta', { cookie: boss })).data;
+  assert.deepStrictEqual(meta.channels.map((c) => [c.id, c.kind]), [['7701', 'whatsapp'], ['7702', 'viber']]);
+  const c = await call(base, 'POST', '/api/upsell/campaigns', { cookie: boss, body: { name: 'Channel test', template: 'cleaners' } });
+  const id = c.data.campaign.id; let v = c.data.campaign.version;
+  const put = async (body) => { const r = await call(base, 'PUT', '/api/upsell/campaigns/' + id, { cookie: boss, body: { ...body, version: v } }); if (r.status === 200) v = r.data.campaign.version; return r; };
+  assert.strictEqual((await put({ channelId: 'abc' })).status, 400);
+  assert.strictEqual((await put({ channelId: '7702', audience: { preset: 'all', statuses: [], type: '', city: '', contact: 'respond', skipDays: 0 } })).status, 200);
+  for (const [buf, n] of [[Buffer.from('RIFF\0\0\0\0WEBPVP8 '), 'a.webp'], [Buffer.from('GIF89a\x01\0\x01\0\0\0\0;'), 'a.gif']]) assert.strictEqual((await call(base, 'POST', `/api/upsell/campaigns/${id}/image`, { cookie: boss, file: buf, name: n })).status, 400, n);
+  let a = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data;
+  const hashViber = a.batches.message.hash;
+  assert.strictEqual((await put({ channelId: '' })).status, 200);
+  a = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data;
+  assert.notStrictEqual(a.batches.message.hash, hashViber, 'changing the channel changes what must be confirmed');
+  assert.strictEqual((await put({ channelId: '7702' })).status, 200);
+  a = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data;
+  const n = sent.length;
+  const s = await call(base, 'POST', `/api/upsell/campaigns/${id}/send`, { cookie: boss, body: { confirm: true, hash: a.batches.message.hash, action: 'message' } });
+  assert.strictEqual(s.status, 200, JSON.stringify(s.data));
+  const bodies = sent.slice(n).filter((p) => /\/message$/.test(p.path)).map((p) => p.body);
+  assert.ok(bodies.length && bodies.every((b) => b.channelId === 7702 && b.message.type === 'text'), JSON.stringify(bodies).slice(0, 200));
+  // "(blank)" Client Status chip: clients with no status can be picked alone
+  const statuses = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data.statuses;
+  assert.ok(statuses.includes('(blank)'), statuses.join(', '));
+  assert.strictEqual((await put({ audience: { preset: 'all', statuses: ['(blank)'], type: '', city: '', contact: 'any', skipDays: 0 } })).status, 200);
+  const blanks = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data.recipients;
+  assert.ok(blanks.length && blanks.every((r) => !r.status), JSON.stringify(blanks.map((r) => r.status)));
+  // CSV: the Apps Script's columns (rent_or_sale Sale/Rent, tenant_lease_end)
+  assert.strictEqual((await put({ audience: { preset: 'all', statuses: [], type: '', city: '', contact: 'any', skipDays: 0 } })).status, 200);
+  const csv = await call(base, 'GET', `/api/upsell/campaigns/${id}/csv`, { cookie: boss });
+  assert.match(csv.text, /^email,first_name,full_name,phone,city,status,rent_or_sale,tenant_lease_end(\r\n|$)/);
+  assert.ok(!/,"Buy",/.test(csv.text), 'Sale, not Buy');
+  // tags count as an offer for "skip if offered in the last N days" (the tag test above tagged Ana's clients)
+  assert.strictEqual((await put({ audience: { preset: 'all', statuses: [], type: '', city: '', contact: 'respond', skipDays: 30 } })).status, 200);
+  const after = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data.recipients.map((r) => r.id);
+  assert.ok(!after.includes('9001'), 'tagged in the last 30 days: skipped');
+  // opt out the whole audience: only with the count the operator saw
+  const cnt = (await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data.counts.audience;
+  assert.strictEqual((await call(base, 'POST', `/api/upsell/campaigns/${id}/optout-all`, { cookie: boss, body: { confirm: true, count: cnt + 1 } })).status, 409);
+  assert.strictEqual((await call(base, 'POST', `/api/upsell/campaigns/${id}/optout-all`, { cookie: await login('viewer'), body: { confirm: true, count: cnt } })).status, 403);
+  const all = await call(base, 'POST', `/api/upsell/campaigns/${id}/optout-all`, { cookie: boss, body: { confirm: true, count: cnt } });
+  assert.deepStrictEqual([all.status, all.data.count], [200, cnt]);
+  assert.strictEqual((await call(base, 'GET', `/api/upsell/campaigns/${id}/audience`, { cookie: boss })).data.counts.audience, 0);
+  await UpsellOptOut.deleteMany({ 'by.name': 'Jonjo Boss', leadId: { $ne: '9003' } });
+});
+
+test('email mailer (Code.gs apiBuildMailer) and its test send; nothing sent without email set up', async () => {
+  const boss = await login('boss');
+  const m = (await call(base, 'GET', `/api/upsell/campaigns/${cid}/mailer`, { cookie: boss })).data;
+  assert.strictEqual(m.subject, 'Blackhouse Concierge — Blackhouse');
+  assert.match(m.html, /^<!doctype html>/); assert.match(m.html, /\{\{unsubscribe\}\}/); assert.match(m.html, /Blackhouse services/);
+  assert.ok(!/<script/i.test(m.html));
+  assert.strictEqual(m.testEmail, false);
+  const t = await call(base, 'POST', '/api/upsell/mailer-test', { cookie: boss, body: { subject: m.subject, html: m.html } });
+  assert.strictEqual(t.status, 409); assert.match(t.data.error, /SMTP/);
+});
+
+test('import of the Apps Script\'s opt-outs and offer history: dry-run parse, idempotent apply, honoured by the audience', async () => {
+  const { parseExport, apply } = require('../scripts/import-legacy-upsell');
+  const recent = Date.now() - 3 * 864e5;
+  const recs = parseExport({ upo_9302: '1', upo_9999: '0', up_9001: JSON.stringify([{ t: recent, k: 'concierge', ch: 'msg', by: 'Toby' }, { t: 'bad' }]), up_9006: '[not json', other_key: 'x' });
+  assert.deepStrictEqual([recs.optOuts, recs.offers.length, recs.skipped], [['9302'], 1, 3]);
+  assert.throws(() => parseExport([]), /JSON object/);
+  const models = require('../src/models');
+  assert.deepStrictEqual(await apply(models, recs), { optOuts: 1, offers: 1 });
+  assert.deepStrictEqual(await apply(models, recs), { optOuts: 0, offers: 0 }, 'running it again changes nothing');
+  const boss = await login('boss');
+  const c = await call(base, 'POST', '/api/upsell/campaigns', { cookie: boss, body: { name: 'Legacy check' } });
+  await call(base, 'PUT', '/api/upsell/campaigns/' + c.data.campaign.id, { cookie: boss, body: { version: 1, audience: { preset: 'all', statuses: [], type: '', city: '', contact: 'any', skipDays: 14 } } });
+  const ids = (await call(base, 'GET', `/api/upsell/campaigns/${c.data.campaign.id}/audience`, { cookie: boss })).data.recipients.map((r) => r.id);
+  assert.ok(!ids.includes('9302'), 'an imported opt-out is never offered');
+  assert.ok(!ids.includes('9001'), 'an imported offer 3 days ago is inside "skip 14 days"');
 });

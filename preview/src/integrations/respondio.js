@@ -4,7 +4,8 @@
 // contact creation and webhooks don't exist here.
 const { IntegrationError, tracked } = require('./status');
 
-const SAFE_PATH = /^\/contact\/id:\d{1,20}(\/message\/list\?limit=\d{1,3}(&cursorId=\d{1,30})?)?$/;
+// a contact, its message history, and the workspace's channel list (Upselling's channel picker, Code.gs respondChannels_)
+const SAFE_PATH = /^(\/contact\/id:\d{1,20}(\/message\/list\?limit=\d{1,3}(&cursorId=\d{1,30})?)?|\/space\/channel)$/;
 const MAX_PAGES = 3, PAGE = 100;
 
 /** Same shaping as Code.gs shapeMessage_: text, attachments, email, quick replies, WhatsApp templates. */
@@ -63,9 +64,11 @@ function createRespondSender(cfg) {
     throw new SendError(`respond.io couldn't send it (HTTP ${res.status}${raw ? ': ' + raw : ''}).`, { code: res.status });
   }
   const id = (cid) => String(cid).replace(/\D/g, '');
+  // channelId (digits) picks the respond.io channel, as the Apps Script's picker did; empty = respond.io's choice ("Auto")
+  const ch = (channelId) => (/^\d{1,20}$/.test(String(channelId || '')) ? { channelId: Number(channelId) } : {});
   return {
-    text: (cid, text) => post(`/contact/id:${id(cid)}/message`, { message: { type: 'text', text } }),
-    image: (cid, url) => post(`/contact/id:${id(cid)}/message`, { message: { type: 'attachment', attachment: { type: 'image', url } } }),
+    text: (cid, text, channelId) => post(`/contact/id:${id(cid)}/message`, { ...ch(channelId), message: { type: 'text', text } }),
+    image: (cid, url, channelId) => post(`/contact/id:${id(cid)}/message`, { ...ch(channelId), message: { type: 'attachment', attachment: { type: 'image', url } } }),
     tag: (cid, tag) => post(`/contact/id:${id(cid)}/tag`, [tag]),
   };
 }
@@ -167,7 +170,20 @@ function createRespond(cfg, status) {
   /** Stores the reply state worked out from a chat someone opened, so that lead shows it (no extra request). */
   const remember = (cid, st) => { const now = Date.now(); rsCache.set(cid, { until: now + ttlFor(st, now), st }); };
 
-  return { chat, replyStates, cachedState, remember };
+  /** One page of a contact's latest messages (Code.gs apiServiceScan reads limit=50), oldest first. */
+  const recent = (cid, limit = 50) => tracked(status, async () => {
+    const body = await get(`/contact/id:${String(cid).replace(/\D/g, '')}/message/list?limit=${Math.min(100, Math.max(1, limit | 0))}`);
+    return (body.items || []).map(shapeMessage).filter(Boolean).sort((a, b) => a.ts - b.ts);
+  });
+  /** The workspace's channels (Code.gs respondChannels_): [{ id, name, source }]. */
+  const channels = () => tracked(status, async () => {
+    const body = await get('/space/channel'), list = body.items || body.data || body;
+    return (Array.isArray(list) ? list : []).map((x) => { const raw = String(x.source || x.type || x.channelType || '') + ' ' + String(x.name || '');
+      return { id: String(x.id || x.channelId || ''), name: String(x.name || ''), kind: /viber/i.test(raw) ? 'viber' : /whatsapp/i.test(raw) ? 'whatsapp' : /mail/i.test(raw) ? 'email' : String(x.source || x.type || '').toLowerCase() }; })
+      .filter((c) => /^\d{1,20}$/.test(c.id));
+  });
+
+  return { chat, replyStates, cachedState, remember, recent, channels };
 }
 
 module.exports = { createRespond, createRespondSender, SendError, shapeMessage, SAFE_PATH, SEND_PATH };

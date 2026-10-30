@@ -49,7 +49,6 @@
   // screens that exist in the original but are not rebuilt in the portal yet: what each one needs first
   const LATER = {
     upsell: 'Concierge broadcasts to clients, with images, tagged and sent through respond.io. Needs sending through respond.io (switched off in the portal) and image hosting; the service messages themselves are already available under Renewals → Message.',
-    services: 'Service requests found in client replies (AI reading of respond.io chats), suppliers and sending jobs to them. Needs an AI service key and sending through respond.io, neither of which the portal has.',
     pages: 'Developer project pages built from Google Drive folders and web research, with a public inquiry form. Needs Google Drive access, an AI service key and a public form endpoint, which the portal does not have.',
   };
   const LATER_TAB = {
@@ -250,7 +249,9 @@
     const vis = visibleLeads();
     // Calendar: viewings waiting for broker feedback (the Pending Broker Feedback panel), once loaded
     const cnt = { leads: vis.length, vaportal: vaPending().length, calendar: S.pend && S.pend.at ? S.pend.rows.length : 0,
-      renewals: vis.filter((l) => l.ai === 'For Renewal').length, propreq: PR.sourcingLeads(vis).length, clientreq: CR.clients(vis).length };
+      renewals: vis.filter((l) => l.ai === 'For Renewal').length, propreq: PR.sourcingLeads(vis).length, clientreq: CR.clients(vis).length,
+      // Service Requests: interested / asking clients still at stage New (Index.html nav count), once loaded
+      services: svNewCount() };
     const hot = { vaportal: 1 };
     const by = (k) => { const m = {}; vis.forEach((l) => { m[l[k]] = (m[l[k]] || 0) + 1; }); return m; };
     const aiN = by('ai'), tempN = by('temp');
@@ -271,9 +272,117 @@
   }
   function viewHtml() {
     const fn = { leads: leadsView, vaportal: vaPortalView, monitor: monitorView, calendar: calendarView, invdash: invView, ldash: ldashView,
-      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView, pl: plView, kpireview: kpiReviewView, kpiack: kpiAckView, pages: DEMO ? null : pagesView, upsell: DEMO ? null : upsellView }[S.view];
+      brokers: brokersView, renewals: renewalsView, daily: dailyView, propreq: propReqView, clientreq: clientReqView, team: settingsView, pl: plView, kpireview: kpiReviewView, kpiack: kpiAckView, pages: DEMO ? null : pagesView, upsell: DEMO ? null : upsellView, services: DEMO ? null : servicesView }[S.view];
     return fn ? fn() : laterView(S.view);
   }
+  // ---------- Service Requests (Index.html svView / svSendModal / svSuppliersModal; server src/services.js) ----------
+  const SVI = { interested: ['Interested', '#2ea043'], asking: ['Asking', '#d29922'], 'not interested': ['Not interested', '#8b949e'], 'no reply': ['No reply', '#6e7681'] };
+  const sv = () => S.sv || (S.sv = { data: null, loading: false, err: '', tab: 'all', show: 'hot', scanning: '' });
+  async function svLoad() {
+    const st = sv(); if (st.loading) return; st.loading = true;
+    const token = S.srcToken;
+    try { const r = await API.get('/api/services?source=' + (viewSrc() === 'monday' ? 'monday' : 'mongo')); if (token === S.srcToken) { st.data = r; st.err = ''; } }
+    catch (e) { if (signedOut(e)) return; st.err = e.message; }
+    st.loading = false; if (S.view === 'services') renderView();
+  }
+  const svHot = (r) => (r.interest === 'interested' || r.interest === 'asking') && !/done|not proceeding/i.test(r.stage);
+  const svRows = (d, st) => d.rows.filter((r) => (st.tab === 'all' || r.svc === st.tab) && (st.show === 'all' || (st.show === 'hot' ? svHot(r) : st.show === 'done' ? /done|not proceeding/i.test(r.stage) : r.interest === st.show)));
+  const svAgo = (t) => (t ? ago(t) : '');
+  function servicesView() {
+    const st = sv(), d = st.data;
+    if (!d && !st.loading && !st.err) setTimeout(svLoad, 0);
+    const head = `<div class="panel"><h3>Service Requests <span class="muted">clients interested in movers, cleaning, AC cleaning, repairs, interiors, furniture or legal help · suppliers never get the client's name or number — Blackhouse coordinates, collects and pays</span></h3>`;
+    if (st.err) return head + `<div class="pad"><div class="src-err" role="alert">${esc(st.err)} <button class="linkbtn" data-act="svreload">Try again</button></div></div></div>`;
+    if (!d) return head + '<div class="pad empty" role="status">Loading service requests…</div></div>';
+    const set = d.setup, edit = d.canEdit;
+    const setupNotes = [!set.respondRead ? 'respond.io is not connected (RESPOND_TOKEN), so "Check replies" can\'t read client replies.' : '',
+      !set.ai ? 'The AI service is not set up (ANTHROPIC_API_KEY): "Check replies" finds the offers, but interest stays "No reply" until it is.' : '',
+      !set.supplierSends ? 'Sending to suppliers through respond.io is off (RESPOND_SENDS). Use the WhatsApp / Viber / email buttons, then "Mark as sent".' : ''].filter(Boolean);
+    const cnt = (k) => d.rows.filter((r) => (k === 'all' || r.svc === k) && svHot(r)).length;
+    const rows = svRows(d, st), sup = (svc) => d.suppliers.filter((s) => s.svc === svc), label = (k) => (d.services.find((x) => x.k === k) || { label: k }).label;
+    return head + `<div class="pad">
+        ${setupNotes.length ? `<div class="src-note" role="note"><b>Setup:</b><ul>${setupNotes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></div>` : ''}
+        <div class="toolbar">${edit ? `<button class="btn sm" data-act="svscan" ${st.scanning || !set.respondRead ? 'disabled' : ''}>${esc(st.scanning || 'Check replies (AI)')}</button>` : ''}
+          ${d.manager ? '<button class="btn sm ghost" data-act="svsup">Suppliers</button>' : ''}<button class="btn sm ghost" data-act="svreload">Refresh</button></div>
+        <div class="subtabs" role="tablist">${[['all', 'All']].concat(d.services.map((x) => [x.k, x.label])).map(([k, l]) => `<button class="btn sm ${st.tab === k ? 'on' : ''}" data-act="svtab" data-v="${k}">${esc(l)} (${cnt(k)})</button>`).join('')}</div>
+        <div class="subtabs">${[['hot', 'Interested & asking'], ['no reply', 'No reply yet'], ['not interested', 'Not interested'], ['done', 'Done'], ['all', 'Everything']].map(([k, l]) => `<button class="btn sm ${st.show === k ? 'on' : ''}" data-act="svshow" data-v="${k}">${l}</button>`).join('')}</div></div>
+      <div class="scroll-x"><table class="t sv-t"><thead><tr><th>Ref</th><th>Client (internal)</th><th>Service</th><th>Interest</th><th>What they need</th><th>Area</th><th>Stage</th><th>Supplier</th><th></th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td><b>${esc(r.ref)}</b><div class="sub">${r.lastReply ? 'replied ' + esc(svAgo(r.lastReply)) : r.offeredAt ? 'offered ' + esc(svAgo(r.offeredAt)) : ''}</div></td>
+        <td><button class="linkbtn" data-act="open" data-id="${esc(r.leadId)}">${esc(r.name || r.leadId)}</button><div class="sub">${esc(r.va || '')}</div></td><td>${esc(label(r.svc))}</td>
+        <td><span class="pill" style="--c:${(SVI[r.interest] || SVI['no reply'])[1]}">${esc((SVI[r.interest] || SVI['no reply'])[0])}</span></td>
+        <td class="wrap">${esc(r.summary || '—')}<div>${SH.SERVICES.detailKeys.filter((k) => r.details[k]).map((k) => `<span class="tag">${esc(k)}: ${esc(r.details[k])}</span>`).join(' ')}</div></td>
+        <td>${esc([r.area, r.city].filter(Boolean).join(', ') || '—')}</td>
+        <td>${edit ? `<select data-ch="svstage" data-id="${esc(r.id)}" aria-label="Stage of ${esc(r.ref)}">${d.stages.map((s) => `<option ${r.stage === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>` : esc(r.stage)}</td>
+        <td>${esc(r.supplier || '—')}${r.sentToSupplierAt ? `<div class="sub">sent ${esc(svAgo(r.sentToSupplierAt))}</div>` : ''}</td>
+        <td>${edit ? `<button class="btn sm" data-act="svsend" data-id="${esc(r.id)}" ${sup(r.svc).length ? '' : 'disabled title="Add a supplier for this service first"'}>Send to supplier</button>` : ''}</td></tr>`).join('')
+        || '<tr><td colspan="9" class="muted">Nothing here yet — offer services from Renewals or Upselling, then press "Check replies".</td></tr>'}</tbody></table></div></div>`;
+  }
+  /** The send dialog: the anonymised text (editable), then respond.io (if on and the supplier has an ID) or the member's own app. */
+  function svSendModal(id, supplierId) {
+    const d = sv().data, r = d.rows.find((x) => x.id === id); if (!r) return;
+    const list = d.suppliers.filter((s) => s.svc === r.svc), sp = list.find((s) => s.id === supplierId) || list[0];
+    const prev = $('#svTxt'), txt = prev && S.modal && S.modal.svId === id ? prev.value : SH.serviceSupplierText(r), num = String(sp.contact || '').replace(/[^\d]/g, '');
+    const viaRio = sp.respondId && d.setup.supplierSends;
+    openModal(`<div class="m-head"><h2>Send ${esc(r.ref)} to a supplier</h2><button type="button" class="btn ghost" data-act="mclose" aria-label="Close">✕</button></div>
+      <div class="sub">No client name, number or email is included — the supplier replies to Blackhouse.</div>
+      <label>Supplier<select data-ch="svsp" data-id="${esc(id)}">${list.map((s) => `<option value="${esc(s.id)}" ${s.id === sp.id ? 'selected' : ''}>${esc(s.name)} · ${esc(s.channel)}</option>`).join('')}</select></label>
+      <label>Message<textarea id="svTxt" rows="10" maxlength="${SH.SERVICES.textMax}">${esc(txt)}</textarea></label>
+      <div class="sub">Check the text — remove anything that could identify the client before sending.</div>
+      ${sp.respondId && !d.setup.supplierSends ? '<div class="src-note">This supplier has a respond.io contact, but sending through respond.io is off on this server (RESPOND_SENDS).</div>' : ''}
+      <label class="tagck" ${viaRio ? '' : 'hidden'}><input type="checkbox" id="svOk"> I checked the text; send it to ${esc(sp.name)} now</label>
+      <div class="actions"><button type="button" class="btn ghost" data-act="svcopy">Copy</button>
+        ${viaRio ? `<button type="button" class="btn primary" data-act="svrio" data-id="${esc(id)}" data-sp="${esc(sp.id)}">Send via respond.io</button>`
+          : sp.channel === 'whatsapp' && num ? `<button type="button" class="btn" data-act="svopen" data-id="${esc(id)}" data-sp="${esc(sp.id)}" data-kind="whatsapp" data-num="${esc(num)}">Open WhatsApp</button>`
+          : sp.channel === 'email' && sp.contact ? `<button type="button" class="btn" data-act="svopen" data-id="${esc(id)}" data-sp="${esc(sp.id)}" data-kind="email" data-to="${esc(sp.contact)}">Open email</button>`
+          : sp.channel === 'viber' && num ? `<button type="button" class="btn" data-act="svopen" data-id="${esc(id)}" data-sp="${esc(sp.id)}" data-kind="viber" data-num="${esc(num)}">Open Viber (text copied)</button>` : ''}
+        <button type="button" class="btn ghost" data-act="svmark" data-id="${esc(id)}" data-sp="${esc(sp.id)}">Mark as sent</button></div>`);
+    S.modal = { kind: 'sv', svId: id };
+  }
+  function svSuppliersModal() {
+    const d = sv().data, L = S.modal && S.modal.supList ? S.modal.supList : JSON.parse(JSON.stringify(d.suppliers));
+    openModal(`<div class="m-head"><h2>Suppliers</h2><button type="button" class="btn ghost" data-act="mclose" aria-label="Close">✕</button></div>
+      <div class="sub">One or more per service. A respond.io contact ID lets you send from the portal (when sending is on); otherwise WhatsApp / Viber / email opens with the message ready.</div>
+      <div class="scroll-x"><table class="t sv-sup"><thead><tr><th>Service</th><th>Supplier</th><th>Channel</th><th>Number / email</th><th>respond.io ID</th><th>Notes (rates, terms)</th><th></th></tr></thead><tbody>
+      ${L.map((x, i) => `<tr><td><select data-sup="${i}|svc">${d.services.map((s) => `<option value="${s.k}" ${x.svc === s.k ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></td>
+        <td><input data-sup="${i}|name" value="${esc(x.name)}" maxlength="80" aria-label="Supplier name"></td><td><select data-sup="${i}|channel">${SH.SERVICES.channels.map((c) => `<option ${x.channel === c ? 'selected' : ''}>${c}</option>`).join('')}</select></td>
+        <td><input data-sup="${i}|contact" value="${esc(x.contact)}" maxlength="120" aria-label="Number or email"></td><td><input data-sup="${i}|respondId" value="${esc(x.respondId || '')}" inputmode="numeric" maxlength="20" aria-label="respond.io contact ID"></td>
+        <td><input data-sup="${i}|notes" value="${esc(x.notes || '')}" maxlength="300" aria-label="Notes"></td><td><button type="button" class="btn sm ghost" data-act="supdel" data-v="${i}" aria-label="Remove">✕</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">No suppliers yet.</td></tr>'}</tbody></table></div>
+      <button type="button" class="btn sm ghost" data-act="supadd">+ Add supplier</button>
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="button" class="btn primary" data-act="supsave">Save</button></div>`);
+    S.modal = { kind: 'sup', supList: L };
+  }
+  /** The sidebar count (loads the board once for members with Service Requests access). */
+  function svNewCount() {
+    if (DEMO || access('services') === 'none') return 0;
+    const st = sv(); if (!st.data && !st.loading && !st.err) setTimeout(svLoad, 0);
+    return st.data ? st.data.rows.filter((r) => svHot(r) && r.stage === 'New').length : 0;
+  }
+  /** Index.html svcPanel: the interested clients, on the Renewals and Upselling pages. */
+  function svcPanelHtml() {
+    if (DEMO || access('services') === 'none') return '';
+    const st = sv(), d = st.data; if (!d && !st.loading && !st.err) setTimeout(svLoad, 0);
+    const hot = d ? d.rows.filter(svHot) : [], label = (k) => SH.serviceLabel(k);
+    return `<div class="panel"><h3>Interested in services <span class="muted">AI reads replies to the services you offered</span><span class="spacer"></span>
+        ${d && d.canEdit ? `<button class="btn sm ghost" data-act="svscan" ${st.scanning || !d.setup.respondRead ? 'disabled' : ''}>${esc(st.scanning || 'Check replies now')}</button>` : ''}<button class="btn sm" data-act="nav" data-v="services">Open Service Requests</button></h3>
+      ${st.err ? `<div class="pad src-err" role="alert">${esc(st.err)}</div>` : !d ? '<div class="pad muted">Loading…</div>' : hot.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Ref</th><th>Client</th><th>Service</th><th>Interest</th><th>What they need</th><th>Stage</th></tr></thead><tbody>
+        ${hot.slice(0, 8).map((r) => `<tr><td>${esc(r.ref)}</td><td><button class="linkbtn" data-act="open" data-id="${esc(r.leadId)}">${esc(r.name || r.leadId)}</button></td><td>${esc(label(r.svc))}</td><td><span class="pill" style="--c:${(SVI[r.interest] || SVI['no reply'])[1]}">${esc((SVI[r.interest] || SVI['no reply'])[0])}</span></td><td class="wrap">${esc(r.summary)}</td><td>${esc(r.stage)}</td></tr>`).join('')}</tbody></table></div>
+        ${hot.length > 8 ? `<div class="sub pad">+${hot.length - 8} more in Service Requests</div>` : ''}` : '<div class="pad muted">No interested clients yet.</div>'}</div>`;
+  }
+  async function svRefreshRow(row) { const d = sv().data; const i = d.rows.findIndex((x) => x.id === row.id); if (i >= 0) d.rows[i] = { ...d.rows[i], ...row }; renderView(); }
+  async function svScan(force) {
+    const st = sv(); st.scanning = 'Reading replies…'; renderView();
+    try {
+      for (let n = 0; n < 8; n++) {
+        const r = await API.post('/api/services/scan', { source: viewSrc() === 'monday' ? 'monday' : 'mongo', force: !!force });
+        if (r.errors && r.errors.length) toast(r.errors[0], true);
+        if (!(r.remaining > 0) || !r.scanned) break;
+        st.scanning = 'Reading replies… ' + r.remaining + ' left'; renderView();
+      }
+      toast('Replies checked');
+    } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    st.scanning = ''; st.data = null; svLoad();
+  }
+
   const laterBox = (title, what) => `<div class="later-box"><b>${esc(title)} isn't in this portal yet.</b><br>In the original Apps Script portal: ${esc(what)}<br><span class="sub">It will be built in a later migration phase. Nothing on this screen reads or changes any data.</span></div>`;
   const laterView = (k) => `<div class="panel"><div class="pad">${laterBox(VIEW_LABEL[k], LATER[k] || '')}</div></div>`;
 
@@ -586,7 +695,7 @@
           <button class="btn ghost sm" data-act="prevlead" title="Previous lead ( [ )" aria-label="Previous lead">‹</button>
           <button class="btn ghost sm" data-act="nextlead" title="Next lead ( ] )" aria-label="Next lead">›</button>
           <button class="btn ghost" data-act="close" aria-label="Close (Esc)">${P('<path d="M18 6 6 18M6 6l12 12"/>')}</button></div></div>
-      <div class="tabs" role="tablist" aria-label="Lead sections">${tab('details', 'Details')}${tab('props', 'Properties')}${tab('asking', askTabLabel(l))}${tab('approval', 'For Client Approval', 1)}
+      <div class="tabs" role="tablist" aria-label="Lead sections">${tab('details', 'Details')}${tab('props', 'Properties')}${tab('asking', askTabLabel(l))}${tab('approval', 'For Client Approval')}
         ${tab('viewings', 'For Scheduling' + (nS ? ` (${nS})` : ''))}${tab('confirmed', 'Confirmed Schedule' + (nC ? ` (${nC})` : ''))}${tab('done', 'Done' + (nD ? ` (${nD})` : ''))}
         ${Object.entries(DEAL_TABS).map(([k, v]) => tab(k, v)).join('')}${tab('chat', 'Respond.io Chat')}</div>
       <div class="d-body" id="dbody" role="tabpanel"></div><div id="dfoot"></div>`;
@@ -603,8 +712,52 @@
     if (st.error) return { rows: null, note: st.error, error: true };
     return { rows: st.rows.filter((d) => d.leadId === l.id) };
   }
-  // e-signature, sending and the signed copy: not available (what they need is listed); `what` names the step
-  const setupBox = (what) => `<div class="later-box"><b>${esc(what)} isn't available in this portal yet.</b> The Apps Script portal did it with its own signing page. The portal still needs:<ul>${SH.LOI_SETUP.map((x) => `<li>${esc(x)}</li>`).join('')}</ul><span class="sub">Until these are set up, nothing here sends a message, shares a document or asks anyone to sign.</span></div>`;
+  // e-signature: what this server still needs (from the server's own check), when signing isn't fully set up
+  const setupBox = (what, sg) => (sg && sg.ready ? '' : `<div class="later-box"><b>${esc(what)} isn't set up on this server yet.</b> It needs:<ul>${((sg && sg.needs) || SH.LOI_SETUP).map((x) => `<li>${esc(x)}</li>`).join('')}</ul><span class="sub">Until then, nothing here sends a message, shares a document or asks anyone to sign.</span></div>`);
+  /** The unit an LOI / deal file is for: the Monday Calendar item, or the portal viewing's listing. */
+  function unitFor(l) {
+    const { deal, listing } = loiDraftFor(l);
+    if (viewSrc() === 'monday') return deal && deal.id ? { key: deal.id, name: [deal.building, deal.city].filter(Boolean).join(', ') || 'Calendar item ' + deal.id } : null;
+    return listing ? { key: listing.id, name: `${listing.building} · ${listing.code}` } : null;
+  }
+  // ---------- deal files (Code.gs DEAL_SLOTS_ / apiDealUpload; server src/deals.js) ----------
+  function dealFilesState(l) {
+    S.dealf = S.dealf || {};
+    const k = loiSrc() + ':' + l.id;
+    if (!S.dealf[k] && !DEMO) {
+      S.dealf[k] = { loading: true };
+      API.get(`/api/deals/${loiSrc()}/${encodeURIComponent(l.id)}`).then((r) => { S.dealf[k] = { records: r.records, setup: r.setup }; }, (e) => { if (!signedOut(e)) S.dealf[k] = { err: e.message }; })
+        .then(() => { if (S.open === l.id && DEAL_TABS[S.tab]) renderDrawerBody(); });
+    }
+    return S.dealf[k] || {};
+  }
+  function dealFilesHtml(l, tab) {
+    if (DEMO) return '';
+    const st = dealFilesState(l), u = unitFor(l), slots = SH.DEAL_TAB_SLOTS[tab] || [];
+    if (st.loading) return '<div class="empty">Loading the deal files…</div>';
+    if (st.err) return `<div class="src-err" role="alert">${esc(st.err)}</div>`;
+    const head = `<h4 class="kr-h">Files for this deal${u ? ` <span class="muted">${esc(u.name)}</span>` : ''}</h4>`;
+    if (!u) return head + '<div class="empty">No unit yet: files are kept per viewing / Calendar item, so this client needs one first.</div>';
+    const rec = (st.records || []).find((x) => x.unitKey === u.key) || { slots: {}, renewals: [] }, edit = access('leads') === 'edit', ready = st.setup && st.setup.ready;
+    // defaults as the Apps Script: months from the LOI's lease term; a renewal starts the day after the current term
+    const lt = ((loiState(l).lois || []).find((x) => x.fields && x.fields.LEASE_TERM) || { fields: {} }).fields.LEASE_TERM || '';
+    const ltm = /\(?(\d{1,3})\)?\s*(year|yr)/i.exec(lt) ? Number(/\(?(\d{1,3})\)?\s*(year|yr)/i.exec(lt)[1]) * 12 : /\(?(\d{1,3})\)?\s*month/i.exec(lt) ? Number(/\(?(\d{1,3})\)?\s*month/i.exec(lt)[1]) : 12;
+    const nextStart = rec.term && rec.term.end ? ymd(new Date(parseYmd(rec.term.end).getTime() + 864e5)) : '';
+    const termLine = rec.term ? `<div class="sub">Lease ${esc(fmtDate(rec.term.start))} – ${esc(fmtDate(rec.term.end))} (${rec.term.months} months) · renewal from ${esc(fmtDate(rec.term.renewFrom))}</div>
+      ${edit ? `<details class="df-term"><summary class="linkbtn">Edit the lease term</summary><div class="df-up"><label>Lease start <input type="date" id="dfTermStart" value="${esc(rec.term.start)}"></label><label>Months <input type="number" id="dfTermMonths" min="1" max="240" value="${esc(rec.term.months)}" style="width:70px"></label>
+        <button class="btn sm" data-act="dfterm">Save term</button></div></details>` : ''}` : '';
+    const row = (slot) => {
+      const f = rec.slots[slot], needTerm = slot === 'contract' || slot === 'renewal';
+      const up = edit && ready && (!f || slot === 'renewal') ? `<div class="df-up">${needTerm ? `<label>Lease start <input type="date" id="dfStart-${slot}" value="${slot === 'renewal' ? esc(nextStart) : ''}"></label><label>Months <input type="number" id="dfMonths-${slot}" min="1" max="240" value="${slot === 'renewal' && rec.term ? rec.term.months : ltm}" style="width:70px"></label>` : ''}
+          <label class="btn sm">Upload<input type="file" data-ch="dfup" data-slot="${slot}" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.docx" hidden></label></div>` : '';
+      const files = slot === 'renewal' ? rec.renewals.map((x, i) => `<div>✅ <button class="linkbtn" data-act="dfopen" data-slot="renewal" data-i="${i}">${esc(x.name)}</button> <span class="sub">${esc(x.by || '')} · ${esc(ago(x.at))}${x.term ? ' · ' + esc(fmtDate(x.term.start)) + ', ' + x.term.months + ' months' : ''}</span></div>`).join('')
+        : f ? `<div>✅ <button class="linkbtn" data-act="dfopen" data-slot="${slot}">${esc(f.name)}</button> <span class="sub">${f.src === 'esign' ? 'e-signed' : 'uploaded'} · ${esc(f.by || '')} · ${esc(ago(f.at))}</span>${edit ? ` <button class="btn sm ghost" data-act="dfrm" data-slot="${slot}">Remove</button>` : ''}</div>` : '';
+      return `<tr><th scope="row">${esc(SH.DEAL_SLOTS[slot])}</th><td>${files || '<span class="muted">Not on file</span>'}${up}</td></tr>`;
+    };
+    return head + (ready ? '' : `<div class="src-note">Uploads need Google Drive storage on this server: ${esc((st.setup && st.setup.needs || []).join('; '))}.</div>`)
+      + `<table class="t deal-t" aria-label="Deal files"><tbody>${slots.map(row).join('')}</tbody></table>${termLine}
+      ${rec.slots && Object.keys(rec.slots).length ? `<div class="sub">Stage from the files: <b>${esc({ loic: 'LOI (Client)', loio: 'LOI (Owner)', contract: 'Contract', collection: 'Collection', active: 'Active', renewal: 'For Renewal' }[SH.dealStageOf(rec, l.inquiry !== 'Buy', today())])}</b></div>` : ''}`;
+  }
   const warnList = (ws) => (ws.length ? `<div class="src-err" role="alert"><b>Check before preparing:</b><ul>${ws.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '');
   /** The LOI pre-fill for a lead (Code.gs apiLoiDefaults): its latest Calendar deal → listing, or its latest portal viewing. */
   function loiDraftFor(l) {
@@ -629,7 +782,7 @@
     return S.loi[k] || {};
   }
   async function loadLoi(l, k) {
-    try { const r = await API.get(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}`); S.loi[k] = { ...(S.loi[k] || {}), loading: false, err: '', lois: r.lois, templates: r.templates }; }
+    try { const r = await API.get(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}`); S.loi[k] = { ...(S.loi[k] || {}), loading: false, err: '', lois: r.lois, templates: r.templates, signing: r.signing }; }
     catch (e) { if (signedOut(e)) return; S.loi[k] = { ...(S.loi[k] || {}), loading: false, err: e.message }; }
     if (S.open === l.id && DEAL_TABS[S.tab]) renderDrawerBody();
   }
@@ -639,12 +792,20 @@
     const lois = st.lois || [], tpls = st.templates || [], hasTpl = (s) => tpls.some((t) => t.slot === s);
     const head = `${dl.note ? `<div class="${dl.error ? 'src-err' : 'empty'}" ${dl.error ? 'role="alert"' : ''}>${esc(dl.note)}</div>` : ''}
       <div class="panel-sub"><b>${esc(dr.kind)}</b>${deal && deal.loi ? ` · LOI date on Monday ${esc(fmtDate(deal.loi))}` : ''}${deal && deal.files ? ` · LOI file on the Calendar item: ${deal.files.loi ? 'yes' : 'no'}` : ''}</div>`;
+    // e-signature status and actions per LOI (client first, then the owner; src/loiSign.js)
+    const sg = st.signing, canSend = access('leads') === 'edit' && sg && sg.ready;
+    const STATUS = { draft: 'Draft', sent: 'Sent to the client', clientSigned: 'Signed by the client', ownerSent: 'Sent to the owner', signed: 'Signed by both' };
+    const signActs = (x) => [
+      x.status !== 'signed' && !(x.signed && x.signed.client) && side === 'client' ? `<button class="btn sm" data-act="loisend" data-id="${esc(x.id)}" data-role="client" ${canSend ? '' : 'disabled'}>${x.status === 'sent' ? 'Send again' : 'Send for e-signature'}</button>` : '',
+      x.signed && x.signed.client && !x.signed.owner ? `<button class="btn sm" data-act="loisend" data-id="${esc(x.id)}" data-role="owner" ${canSend ? '' : 'disabled'}>${x.status === 'ownerSent' ? 'Send to owner again' : 'Send to the owner'}</button>` : '',
+      x.hasSigned ? `<button class="btn sm ghost" data-act="loisigned" data-id="${esc(x.id)}" data-fmt="docx">Signed .docx</button>${x.signed && (x.signed.owner || x.signed.client || {}).pdf ? ` <button class="btn sm ghost" data-act="loisigned" data-id="${esc(x.id)}" data-fmt="pdf">Signed PDF</button>` : ''}` : ''].filter(Boolean).join(' ');
     const list = st.loading ? '<div class="empty">Loading this client\'s LOIs…</div>' : st.err ? `<div class="src-err" role="alert">${esc(st.err)}</div>`
-      : `<table class="t deal-t" aria-label="Prepared LOIs"><thead><tr><th>Prepared</th><th>Kind</th><th>Missing when made</th><th></th></tr></thead><tbody>${lois.map((x) => `<tr><td>${esc(manilaTime(x.createdAt))}<div class="sub">${esc(x.by || '')}</div></td><td>${esc(x.slotLabel)}</td>
-          <td>${x.missing.length ? `<span class="tag warn">${esc(x.missing.join(', '))}</span>` : '—'}</td><td><button class="btn sm" data-act="loidl" data-id="${esc(x.id)}">Download .docx</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted">No LOI prepared for this client yet.</td></tr>'}</tbody></table>`;
+      : `<table class="t deal-t" aria-label="Prepared LOIs"><thead><tr><th>Prepared</th><th>Kind</th><th>Status</th><th></th></tr></thead><tbody>${lois.map((x) => `<tr><td>${esc(manilaTime(x.createdAt))}<div class="sub">${esc(x.by || '')}${x.unitName ? ' · ' + esc(x.unitName) : ''}</div></td><td>${esc(x.slotLabel)}${x.missing.length ? `<div><span class="tag warn">missing: ${esc(x.missing.join(', '))}</span></div>` : ''}</td>
+          <td>${esc(STATUS[x.status] || x.status)}${x.signed && x.signed.client ? `<div class="sub">client: ${esc(x.signed.client.name)}, ${esc(manilaTime(x.signed.client.at))}</div>` : ''}${x.signed && x.signed.owner ? `<div class="sub">owner: ${esc(x.signed.owner.name)}, ${esc(manilaTime(x.signed.owner.at))}</div>` : ''}</td>
+          <td><button class="btn sm" data-act="loidl" data-id="${esc(x.id)}">Download .docx</button> ${signActs(x)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No LOI prepared for this client yet.</td></tr>'}</tbody></table>`;
     if (side === 'owner') {
       return `${head}<p class="sub">The owner signs the same LOI after the client (Code.gs apiSendLoiOwner). Owner on the listing: <b>${esc((listing && listing.contact) || 'unknown')}</b>${listing ? ` · owner phone on the listing: ${listing.contactPhone ? 'yes' : 'no'}` : ''}.</p>
-        <h4 class="kr-h">LOIs prepared for this client</h4>${list}${setupBox('Sending the LOI to the owner for signature')}`;
+        <h4 class="kr-h">LOIs prepared for this client</h4>${list}${setupBox('E-signature', sg)}${dealFilesHtml(l, 'loio')}`;
     }
     if (DEMO) return head + '<div class="empty">Preparing an LOI needs the portal\'s server (not in demo mode).</div>';
     // the form: defaults from the records (missing ones stay empty), the user's edits kept while the drawer is open
@@ -671,16 +832,15 @@
         ${chk.errors.length ? `<div class="src-err" role="alert">${esc(chk.errors[0])}</div>` : chk.missing.length ? `<div class="src-err" role="alert"><b>Still empty:</b> ${esc(chk.missing.join(', '))}. They stay as blank lines in the document.</div>` : ''}
         <div class="kr-actions">${canMake ? `<button class="btn primary" data-act="loimake" ${st.making || chk.errors.length || !hasTpl(f.slot) ? 'disabled' : ''}>${st.making ? 'Making…' : 'Make the LOI document for review'}</button>` : '<span class="sub">Making an LOI needs edit access to Leads.</span>'}
           <span class="sub">Makes a filled copy of the template to download and check. Nothing is sent.</span></div></div></div>
-      <h4 class="kr-h">LOIs prepared for this client</h4>${list}${setupBox('Sending the LOI for e-signature and returning the signed copy')}`;
+      <h4 class="kr-h">LOIs prepared for this client</h4>${list}${setupBox('E-signature', sg)}${dealFilesHtml(l, 'loic')}`;
   }
   function dealPanel(l, tab) {
     const dl = leadDeals(l), st = dl.rows ? SH.dealStages(dl.rows, today()) : null, d = st && st.deal;
     // the Apps Script portal never generated contracts: the signed contract, deposit slip and renewal contract were
     // uploaded files (Code.gs DEAL_SLOTS_ / apiDealUpload, to Google Drive)
-    const head = `<div class="later-box"><b>${tab === 'contract' ? 'The contract is not generated by the portal' : 'Uploads for this stage are not in the portal'}.</b>
-      In the Apps Script portal the signed contract${tab === 'contract' ? '' : ', deposit slip and renewal contract'} were uploaded files kept in Google Drive, with the lease start and months typed in; it had no contract template.
-      ${tab === 'contract' ? 'The team\'s Contract of Lease form also needs details the portal doesn\'t hold (both parties\' addresses and IDs, lease start and end dates, the agreed rent and deposits), so it is not filled from guesses. ' : ''}Uploading needs Google Drive write access (the portal can only read Drive), or a decision to keep these files in the portal.
-      <span class="sub">The dates and amounts below are read from the Monday Calendar board; nothing here changes them.</span></div>`;
+    const files = dealFilesHtml(l, tab);
+    const head = (tab === 'contract' ? `<div class="sub">The contract is not generated by the portal (the Apps Script didn't either): the signed contract is uploaded below, with the lease start and months. The team's Contract of Lease form needs details the portal doesn't hold (both parties' addresses and IDs, the agreed terms), so it is never filled from guesses.</div>` : '') + files
+      + '<h4 class="kr-h">From the Monday Calendar board <span class="muted">read only</span></h4>';
     if (!dl.rows) return head + `<div class="${dl.error ? 'src-err' : 'empty'}" ${dl.error ? 'role="alert"' : ''}>${esc(dl.note)}</div>`;
     if (!d) return head + (st ? warnList(st.warnings) : '<div class="empty">No Calendar-board item is linked to this client yet.</div>');
     const yn = (b) => (b ? 'yes' : 'no'), dt = (s) => (s ? esc(fmtDate(s)) : '<span class="muted">—</span>'), pz = (n) => (n ? esc(money(n)) : '<span class="muted">—</span>');
@@ -697,7 +857,7 @@
   /** Redraws only the open tab's content and footer (header and tabs stay, so focus is kept). */
   function renderDrawerBody() {
     const l = leadById(S.open), body = $('#dbody'); if (!l || !body) return;
-    const panel = { details: detailsPanel, props: propsPanel, asking: askingPanel, viewings: () => viewingsPanel(l, ['Proposed']), confirmed: () => viewingsPanel(l, ['Confirmed']), done: () => viewingsPanel(l, ['Done', 'Cancelled']), chat: chatPanel,
+    const panel = { details: detailsPanel, props: propsPanel, asking: askingPanel, approval: approvalPanel, viewings: () => interestedHtml(l) + viewingsPanel(l, ['Proposed']), confirmed: () => viewingsPanel(l, ['Confirmed']), done: () => viewingsPanel(l, ['Done', 'Cancelled']), chat: chatPanel,
       loic: (x) => loiPanel(x, 'client'), loio: (x) => loiPanel(x, 'owner'), contract: (x) => dealPanel(x, 'contract'), collection: (x) => dealPanel(x, 'collection'), active: (x) => dealPanel(x, 'active'), renewal: (x) => dealPanel(x, 'renewal') }[S.tab];
     body.innerHTML = panel ? panel(l) : laterBox(DEAL_TABS[S.tab] || 'For Client Approval', LATER_TAB[S.tab] || '');
     loadAsking(l);
@@ -899,6 +1059,37 @@
     if (S.open === l.id) { if (S.tab === 'asking') renderDrawerBody(); else if (S.tab === 'props') renderPropsResults(); updateAskTab(l); }
     return S.asking[k];
   }
+  /**
+   * For Client Approval (Index.html approvalPanel): units the owner confirmed, not yet moved to scheduling. Copy the
+   * message for the client (the Apps Script's text; the portal doesn't send it), mark it sent, then "For Scheduling →"
+   * when the client wants to view; "← Back to Asking" undoes the owner's answer.
+   */
+  function approvalPanel(l) {
+    const st = askState(l);
+    if (!st.list) { loadAsking(l); return st.error ? `<div class="src-err" role="alert">${esc(st.error)} <button class="linkbtn" data-act="askreload">Try again</button></div>` : '<div class="muted">Loading…</div>'; }
+    const list = st.list.filter((a) => a.status === 'available' && !a.interestedAt), edit = canAsk(), sel = S.apprSel = S.apprSel || new Set();
+    const notSent = list.filter((a) => !a.sentAt).length;
+    const intro = `<div class="sub" style="margin-bottom:10px">Units the owner confirmed are available. Copy the message to the client (the portal doesn't send it), then mark them sent. When the client wants to view a unit, move it to For Scheduling. Saved ${DEMO ? 'in this browser (demo)' : 'in the portal'}: nothing is written to Monday.com.</div>`;
+    if (!list.length) return intro + '<div class="empty">No owner-confirmed units waiting. In Asking for Availability, mark a unit "Owner confirmed available".</div>';
+    return intro + `<div class="toolbar"><label class="tagck"><input type="checkbox" data-ch="apprall" ${list.every((a) => sel.has(a.id)) ? 'checked' : ''}> Select all</label><span class="sub">${list.length} confirmed by the owner · ${notSent} not sent yet · ${list.filter((a) => sel.has(a.id)).length} selected</span>
+        ${edit && list.some((a) => sel.has(a.id) && a.sentAt) ? `<button class="btn sm primary" data-act="apprschedsel">For Scheduling (${list.filter((a) => sel.has(a.id) && a.sentAt).length}) →</button>` : ''}
+        ${edit ? `<button class="btn sm" data-act="apprcopy" data-v="sel">Copy message for selected</button><button class="btn sm" data-act="apprcopy" data-v="notsent" ${notSent ? '' : 'disabled'}>Copy message for all not sent (${notSent})</button>` : ''}</div>
+      <div class="asklist">${list.map((a) => { const x = listingById(a.listingId);
+        return `<div class="askcard"><label class="tagck"><input type="checkbox" data-ch="apprsel" data-id="${esc(a.id)}" ${sel.has(a.id) ? 'checked' : ''}> <b>${esc(a.listingName || (x && x.building) || a.listingId)}</b></label>
+          <div class="sub">${a.sentAt ? `Sent to the client ${esc(ago(a.sentAt))}${a.sentBy ? ' by ' + esc(a.sentBy) : ''}` : 'Not sent to the client yet'}${a.answeredAt ? ' · owner confirmed ' + esc(ago(a.answeredAt)) : ''}</div>
+          ${edit ? `<div class="kr-actions">${a.sentAt ? `<button class="btn sm primary" data-act="apprsched" data-id="${esc(a.id)}">For Scheduling →</button><button class="btn sm ghost" data-act="apprsent" data-id="${esc(a.id)}" data-v="0">Not sent after all</button>`
+            : `<button class="btn sm" data-act="apprsent" data-id="${esc(a.id)}" data-v="1">Mark as sent to the client</button>`}<button class="btn sm ghost" data-act="apprback" data-id="${esc(a.id)}">← Back to Asking</button></div>` : ''}</div>`; }).join('')}</div>`;
+  }
+  /** For Scheduling, first part: units the client wants to view (the Apps Script's 'interested'), to book. */
+  function interestedHtml(l) {
+    const st = askState(l); if (!st.list) { loadAsking(l); return ''; }
+    const list = st.list.filter((a) => a.status === 'available' && a.interestedAt); if (!list.length) return '';
+    const edit = canAsk(), book = canEdit('calendar');
+    return `<h4 class="kr-h">The client wants to view <span class="muted">set the time and broker, then book</span></h4><div class="asklist">${list.map((a) => `<div class="askcard"><b>${esc(a.listingName || a.listingId)}</b>
+      <div class="sub">Client interested ${esc(ago(a.interestedAt))}${a.interestedBy ? ' · ' + esc(a.interestedBy) : ''}</div>
+      ${edit ? `<div class="kr-actions">${book && listingById(a.listingId) ? `<button class="btn sm primary" data-act="book" data-id="${esc(a.listingId)}">📅 Book viewing</button>` : `<span class="sub">${DEMO || S.source !== 'monday' ? 'Booking needs Calendar edit access.' : 'Schedule it on the Monday Calendar board.'}</span>`}
+        <button class="btn sm ghost" data-act="apprunsched" data-id="${esc(a.id)}">← Back to For Client Approval</button></div>` : ''}</div>`).join('')}</div>`;
+  }
   function viewingsPanel(l, sts) {
     const list = leadViewings(l, sts), edit = canEdit('calendar');
     if (!list.length) return `<div class="empty">${sts[0] === 'Proposed' ? `Nothing to schedule yet.${canEdit('calendar') ? ' <button class="linkbtn" data-act="gobook">Book a viewing from Properties</button>' : ''}` : 'No viewings here yet.'}</div>`;
@@ -945,10 +1136,12 @@
   }
 
   // ---------- VA Portal / VA Management / Brokers / Renewals ----------
-  // VA Portal task groups. The Apps Script (apiGetVaPortal) had Asking → For Client Approval (new / sent) → For Scheduling
-  // (interested) → Proposed → Confirmed → Mark done → Record result. For Client Approval and the "interested" status are
-  // not in the portal (see README), so those groups are not shown; the portal adds Reply to client and Send more units.
-  const VA_GROUPS = ['Reply to client', 'Asking owner', 'Confirm schedule', 'Confirmed viewing', 'Mark as done', 'Record result', 'Send more units'];
+  // VA Portal task groups, as the Apps Script (apiGetVaPortal): Asking → For Client Approval (not sent / sent) → For
+  // Scheduling (client interested) → Proposed → Confirmed → Mark done → Record result; the portal adds Reply to client
+  // and Send more units.
+  const VA_GROUPS = ['Reply to client', 'Asking owner', 'Approval · not sent', 'Approval · sent', 'For Scheduling', 'Confirm schedule', 'Confirmed viewing', 'Mark as done', 'Record result', 'Send more units'];
+  // the Apps Script's hints for the approval and scheduling groups (Index.html 3228)
+  const VA_HINT = { 'Approval · not sent': 'Owner confirmed — send to the client', 'Approval · sent': 'Sent — move to For Scheduling when the client wants to view', 'For Scheduling': 'Set the time / broker and book' };
   /** The open Asking for Availability records of the visible clients (loaded for the VA Portal). */
   function vaAskState() {
     if (DEMO || access('vaportal') === 'none') return { rows: [], at: 1 };
@@ -967,7 +1160,11 @@
     const vis = visibleLeads().filter((l) => l.ai !== 'Failed' && !/fail|disqualif|unresponsive|closed/i.test(String(l.clientStatus || l.status || '')));
     const ok = new Set(vis.map((l) => l.id)), lead = (id) => (ok.has(id) ? leadById(id) : null);
     vis.filter((l) => l.onRespond && l.waiting === 'va').forEach((l) => out.push([l, 'Reply to client', 'Needs VA Reply']));
-    (vaAskState().rows || []).forEach((a) => { const l = lead(a.leadId); if (l) out.push([l, 'Asking owner', a.listingName || 'a unit']); });
+    // Asking → For Client Approval (not sent / sent) → For Scheduling; as the Apps Script, a unit that already has a
+    // live portal viewing is left out (Monday Calendar viewings aren't tied to a listing, so they can't be matched)
+    const liveUnit = new Set(vv.filter((v) => v.status !== 'Cancelled' && v.listingId).map((v) => v.leadId + '|' + v.listingId));
+    const GROUP = { asking: 'Asking owner', apprNew: 'Approval · not sent', apprSent: 'Approval · sent', sched: 'For Scheduling' };
+    (vaAskState().rows || []).forEach((a) => { const l = lead(a.leadId); if (l && GROUP[a.stage] && !liveUnit.has(a.leadId + '|' + a.listingId)) out.push([l, GROUP[a.stage], (a.listingName || 'a unit') + (VA_HINT[GROUP[a.stage]] ? ' · ' + VA_HINT[GROUP[a.stage]] : '')]); });
     const pendIds = new Set(S.pend && S.pend.at ? S.pend.rows.map((r) => String(r.id)) : []);
     vv.forEach((v) => {
       const l = lead(v.leadId); if (!l || pendIds.has(String(v.id))) return;   // listed once, under Record result
@@ -983,13 +1180,16 @@
   }
   function vaPortalView() {
     if (!(S.pend && S.pend.at) && canSee('calendar')) setTimeout(loadPending, 0);
-    const rows = vaPending(), ask = vaAskState();
+    // Managers pick a VA (Code.gs apiGetVaPortal va / byVa); everyone else sees their own clients (server scoping)
+    const all = vaPending(), ask = vaAskState(), vf = isManager() ? S.vapVa || '' : '';
+    const rows = vf ? all.filter(([l]) => (vf === '__none' ? !l.va : SH.sameVa(l.va, vf))) : all;
+    const byVa = isManager() ? SH.vaLabels(all.map(([l]) => l.va)).map((v) => [v, all.filter(([l]) => SH.sameVa(l.va, v)).length]) : [];
     return `<div class="cards">${VA_GROUPS.map((k) => `<div class="card"><div class="n">${rows.filter((r) => r[1] === k).length}</div><div class="l">${k}</div></div>`).join('')}</div>
       ${ask.error ? `<div class="src-err" role="alert">The Asking for Availability list could not be loaded (${esc(ask.error)}), so "Asking owner" may be incomplete.</div>` : ''}
-      <div class="panel"><h3>Pending actions <span class="muted">${rows.length} items · ${srcName()}</span></h3><div class="scroll-x"><table class="t"><thead><tr><th>Lead</th><th>Client</th><th>VA</th><th>Action</th><th>Detail</th><th>AI Status</th></tr></thead><tbody>
+      <div class="panel"><h3>Pending actions <span class="muted">${rows.length} items · ${srcName()}</span><span class="spacer"></span>
+        ${isManager() ? `<select data-ch="vapva" aria-label="VA"><option value="">All VAs</option><option value="__none" ${vf === '__none' ? 'selected' : ''}>Unassigned</option>${byVa.map(([v, n]) => `<option value="${esc(v)}" ${SH.sameVa(vf, v) ? 'selected' : ''}>${esc(v)} (${n})</option>`).join('')}</select>` : ''}</h3><div class="scroll-x"><table class="t"><thead><tr><th>Lead</th><th>Client</th><th>VA</th><th>Action</th><th>Detail</th><th>AI Status</th></tr></thead><tbody>
       ${rows.map(([l, a, d]) => `<tr class="click" data-act="open" data-id="${esc(l.id)}"><td>${esc(l.code)}</td><td>${esc(l.name)}</td><td>${esc(l.va || 'Unassigned')}</td><td><b>${esc(a)}</b></td><td>${esc(d)}</td><td>${aiPill(l)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing pending.</td></tr>'}
-      </tbody></table></div></div>
-      <div class="sub">Not in this portal yet: the Apps Script's “For Client Approval” groups (units the owner confirmed, new and sent to the client) and “For Scheduling” (client interested), because those stages aren't built here.</div>`;
+      </tbody></table></div></div>`;
   }
   // people on screen: the board's own labels for live Monday data; the preview's lists for MongoDB / demo records
   // (one entry per VA: "Ana" and "ana" on the board are the same VA, as the server's lead scoping treats them)
@@ -1154,7 +1354,8 @@
             <td class="sub">${last ? `${esc(tplLabel(last.kind))} · ${esc(ago(last.at))}${last.by ? ' · ' + esc(last.by) : ''}${lg.length > 1 ? ` · ${lg.length} sent` : ''}` : logOk ? '—' : 'unknown'}</td>
             <td>${edit ? `<button type="button" class="btn sm" data-act="rnmsg" data-id="${esc(x.leadId)}">Message</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="9" class="muted">No leases in this view.</td></tr>'}
         </tbody></table></div></div>
-        <div class="sub">The Renewal Status shown is Monday's; changing it from the portal is not connected yet. Sending messages from the portal is not connected: write the message here, copy it to respond.io, then press “I sent it from respond.io”.</div>`;
+        <div class="sub">The Renewal Status shown is Monday's; changing it from the portal is not connected yet. Sending messages from the portal is not connected: write the message here, copy it to respond.io, then press “I sent it from respond.io”.</div>
+        ${svcPanelHtml()}`;
     }
     const rows = visibleLeads().filter((l) => l.leaseEnd).sort((a, b) => a.leaseEnd.localeCompare(b.leaseEnd));
     return `<div class="cards"><div class="card"><div class="n">${rows.filter((l) => daysUntil(l.leaseEnd) <= 30).length}</div><div class="l">Due within 30 days (or overdue)</div></div><div class="card"><div class="n">${rows.length}</div><div class="l">Active leases</div></div></div>
@@ -1804,9 +2005,11 @@
   }
   async function upResults() { const st = up(); try { st.results = (await API.get(`/api/upsell/campaigns/${st.sel}/results`)).results; } catch (e) { if (signedOut(e)) return; } if (S.view === 'upsell') renderView(); }
   /** Saves the draft; the audience is worked out again on the server afterwards (nothing is sent). */
+  /** The mailer's merge tags for the chosen email service (Index.html espTags). */
+  const upEspTags = (h, esp) => (esp === 'mailchimp' ? h.replace(/\{\{first_name\}\}/g, '*|FNAME|*').replace(/\{\{unsubscribe\}\}/g, '*|UNSUB|*') : h.replace(/\{\{first_name\}\}/g, '{{ contact.FIRSTNAME }}').replace(/\{\{unsubscribe\}\}/g, '{{ unsubscribe }}'));
   async function upSave() {
     const st = up(), d = st.draft;
-    const body = { version: st.camp.version, name: d.name, template: d.template, projectId: d.projectId || '', text: d.text, tag: d.tag, audience: d.audience };
+    const body = { version: st.camp.version, name: d.name, template: d.template, projectId: d.projectId || '', text: d.text, tag: d.tag, channelId: d.channelId || '', audience: d.audience };
     const { errors } = SH.validateCampaign(body, { projectIds: (st.meta.projects || []).map((p) => p.id) });
     if (errors.length) { st.saveErr = errors[0]; return renderView(); }
     st.saving = true; st.saveErr = ''; renderView();
@@ -1846,9 +2049,11 @@
           ${d.template === 'project' ? `<label>Project<select data-up="projectId" ${dis}><option value="">Pick a project</option>${(m.projects || []).map((p) => `<option value="${esc(p.id)}" ${d.projectId === p.id ? 'selected' : ''}>${esc(p.name + (p.developer ? ' · ' + p.developer : '') + (p.published ? '' : ' (not published)'))}</option>`).join('')}</select></label>
             <div>${edit ? '<button class="btn sm" data-act="upprojtext">Use the project\'s details</button>' : ''}</div>` : ''}
           <label class="full">Message <span class="muted">{firstName} = client's first name · {va} = your first name · add "Reply STOP to opt out"</span><textarea data-up="text" rows="9" maxlength="${UPS.textMax}" ${dis}>${esc(d.text)}</textarea></label>
-          <label>respond.io tag (for a broadcast)<input data-up="tag" value="${esc(d.tag)}" maxlength="40" ${dis}></label></div>
+          <label>respond.io tag (for a broadcast)<input data-up="tag" value="${esc(d.tag)}" maxlength="40" ${dis}></label>
+          <label>respond.io channel (1:1 sends)<select data-up="channelId" ${dis}><option value="">Auto — the channel the client last used</option>${(m.channels || []).concat(d.channelId && !(m.channels || []).some((c) => c.id === d.channelId) ? [{ id: d.channelId, name: 'Channel ' + d.channelId, kind: '' }] : [])
+            .map((c) => `<option value="${esc(c.id)}" ${d.channelId === c.id ? 'selected' : ''}>${esc({ whatsapp: 'WhatsApp', viber: 'Viber', email: 'Email', messenger: 'Messenger' }[c.kind] || c.kind || 'Channel')}${c.name ? ' · ' + esc(c.name) : ''}</option>`).join('')}</select></label></div>
         <div class="up-img">${st.camp.image ? `<img src="${esc(API.url('/api/upsell/campaigns/' + st.sel + '/image'))}" alt="Offer image"><span class="sub">${esc(st.camp.image.name)} · sent before the text</span>${edit ? '<button class="btn sm danger" data-act="upimgdel">Remove image</button>' : ''}`
-          : edit ? `<label class="btn sm">Add an image<input type="file" data-ch="upimg" accept="image/jpeg,image/png,image/webp,image/gif" hidden></label><span class="sub">JPEG, PNG, WebP or GIF, 5 MB at most. Sent first, then the text.</span>` : ''}</div></div></div>`;
+          : edit ? `<label class="btn sm">Add an image<input type="file" data-ch="upimg" accept="image/jpeg,image/png" hidden></label><span class="sub">JPEG or PNG (what WhatsApp accepts), 5 MB at most. Sent first, then the text.</span>` : ''}</div></div></div>`;
     // the next batches as the server works them out (one respond.io contact once; opted-out clients never)
     const bn = (k) => (aud && aud.batches ? aud.batches[k].ids.length : 0);
     const send = `<div class="panel"><h3>3 · Send</h3><div class="pad up-send">
@@ -1856,6 +2061,13 @@
           <button class="btn" data-act="upreview" data-v="tag" ${m.sends && !st.dirty && bn('tag') && d.tag ? '' : 'disabled'}>Review &amp; tag ${bn('tag')} in respond.io</button>
           ${bn('retry') ? `<button class="btn" data-act="upreview" data-v="retry" ${m.sends && !st.dirty ? '' : 'disabled'}>Review &amp; retry ${bn('retry')} failed</button>` : ''}` : ''}
         <button class="btn" data-act="upcsv">Export for email (CSV)</button>
+        <button class="btn" data-act="upmailer">Email version (HTML mailer)</button>
+        ${edit && aud && aud.counts.audience ? `<button class="btn ghost" data-act="upoptall" ${st.dirty ? 'disabled' : ''}>Mark the whole audience opted out (${aud.counts.audience})…</button>` : ''}
+        ${st.mailer ? `<div class="full up-mail"><div class="toolbar"><b>Email mailer</b> <span class="sub">Subject: ${esc(st.mailer.subject)} · logo on top · unsubscribe link included</span><span class="spacer"></span>
+          <select data-ch="upesp" aria-label="Email service"><option value="brevo" ${st.esp !== 'mailchimp' ? 'selected' : ''}>For Brevo</option><option value="mailchimp" ${st.esp === 'mailchimp' ? 'selected' : ''}>For Mailchimp</option></select>
+          <button class="btn sm ghost" data-act="upmcopy">Copy HTML</button><button class="btn sm ghost" data-act="upmdl">Download</button>
+          ${edit ? `<button class="btn sm ghost" data-act="upmtest" ${st.mailer.testEmail ? '' : 'disabled title="Email (SMTP) is not set up on this server"'}>Send test to me</button>` : ''}<button class="btn sm ghost" data-act="upmx" aria-label="Close the mailer">✕</button></div>
+          <iframe class="up-mframe" title="Mailer preview" sandbox="" srcdoc="${esc(st.mailer.html.replace(/\{\{first_name\}\}/g, 'there').replace(/\{\{unsubscribe\}\}/g, '#'))}"></iframe></div>` : ''}
         ${edit && st.picked.size ? `<button class="btn" data-act="upoptout" data-v="1">Mark ${st.picked.size} opted out</button>` : ''}
         <div class="sub full">1:1 sends go only to clients on respond.io who haven't had this offer, at most ${UPS.batchMax} per batch, ${UPS.gapMs} ms apart. WhatsApp only allows free text within 24 hours of the client's last message; for the rest, tag them and send an approved template broadcast from respond.io.</div></div></div>`;
     const res = (st.results || []), resById = new Map(res.filter((x) => x.action === 'message').map((x) => [x.id, x]));
@@ -1863,8 +2075,8 @@
     const table = `<div class="panel"><h3>Recipients <span class="muted">${aud ? aud.recipients.length : 0}</span></h3>
       ${st.audErr ? `<div class="pad"><div class="src-err" role="alert">${esc(st.audErr)}</div></div>` : st.audLoading && !aud ? '<div class="empty" role="status">Working out the audience…</div>' : !aud || !aud.recipients.length ? '<div class="empty">No clients match this audience.</div>'
         : `<div class="scroll-x"><table class="t up-t"><thead><tr>${edit ? '<th><span class="sr">Pick</span></th>' : ''}<th>Client</th><th>Status</th><th>Rent/Sale</th><th>City</th><th>Email</th><th>Phone</th><th>respond.io</th><th>Tenant</th><th>Last offer</th><th>This offer</th></tr></thead><tbody>
-        ${aud.recipients.slice(0, 300).map((x) => { const r = resById.get(x.id); return `<tr>${edit ? `<td><input type="checkbox" data-ch="uppick" value="${esc(x.id)}" ${st.picked.has(x.id) ? 'checked' : ''} aria-label="Pick ${esc(x.name)}"></td>` : ''}<td><b>${esc(x.name)}</b></td><td>${esc(x.status)}</td><td>${esc(x.type === 'Buy' ? 'Sale' : x.type)}</td><td>${esc(x.city)}</td>
-          <td>${esc(x.email)}</td><td>${esc(x.phone)}</td><td>${x.onRespond ? '✓' : '<span class="muted">—</span>'}</td><td>${x.tenant ? '✓' : ''}</td><td>${x.lastOffer ? esc(fmtDate(x.lastOffer)) : '—'}</td>
+        ${aud.recipients.slice(0, 300).map((x) => { const r = resById.get(x.id); return `<tr>${edit ? `<td><input type="checkbox" data-ch="uppick" value="${esc(x.id)}" ${st.picked.has(x.id) ? 'checked' : ''} aria-label="Pick ${esc(x.name)}"></td>` : ''}<td><button class="linkbtn" data-act="open" data-id="${esc(x.id)}"><b>${esc(x.name)}</b></button></td><td>${esc(x.status || '—')}</td><td>${esc(x.type === 'Buy' ? 'Sale' : x.type)}</td><td>${esc(x.city)}</td>
+          <td>${esc(x.email)}</td><td>${esc(x.phone)}</td><td>${x.onRespond ? '✓' : '<span class="muted">—</span>'}</td><td>${x.leaseEnd ? 'lease ends ' + esc(fmtDate(x.leaseEnd)) : x.tenant ? 'closed' : ''}</td><td>${x.lastOffer ? esc(fmtDate(x.lastOffer)) : 'never'}</td>
           <td>${pill2(x.message)}${x.tag === 'sent' ? ' ' + pill('Tagged', 'var(--accent)') : ''}${r && r.error ? `<div class="sub">${esc(r.error)}</div>` : ''}</td></tr>`; }).join('')}</tbody></table></div>${aud.recipients.length > 300 ? '<div class="sub pad">Showing the first 300.</div>' : ''}`}</div>`;
     // every send attempt of this offer, newest first (also clients no longer in the audience)
     const resPanel = res.length ? `<div class="panel"><h3>Results <span class="muted">${res.filter((x) => x.status === 'sent').length} sent · ${res.filter((x) => x.status === 'failed').length} failed${res.some((x) => x.status === 'sending') ? ' · ' + res.filter((x) => x.status === 'sending').length + ' unknown' : ''}</span></h3>
@@ -1873,7 +2085,13 @@
         <td>${esc(fmtDate(x.at))}</td><td>${esc(x.by || '')}</td><td class="num">${esc(x.attempts || 1)}</td></tr>`).join('')}</tbody></table></div>
       ${res.some((x) => x.status === 'sending') ? '<div class="sub pad">"Unknown": respond.io may or may not have delivered it (a timeout, network or server error, or the server stopped). Check the client\'s chat in respond.io and mark it; these are never retried automatically.</div>' : ''}</div>` : '';
     const optPanel = aud && aud.opted && aud.opted.length ? `<div class="panel"><h3>Opted out <span class="muted">${aud.opted.length} · never contacted</span></h3><div class="pad up-list">${aud.opted.map((x) => `<span>${esc(x.name)}${x.self && edit ? ` <button class="btn sm ghost" data-act="upundoopt" data-id="${esc(x.id)}" aria-label="Undo opt-out for ${esc(x.name)}">Undo</button>` : x.self ? '' : ' <span class="muted">(same respond.io contact)</span>'}</span>`).join('')}</div></div>` : '';
-    return head + audPanel + offer + send + table + resPanel + optPanel;
+    // the Apps Script's advice before a blast (Index.html "Before you blast")
+    const tips = `<div class="panel"><h3>Before you blast — keeping it out of spam</h3><ul class="pad up-tips">
+      <li><b>Email:</b> don't blast from Gmail or the portal. Use an email service (Brevo or Mailchimp — import the CSV) on a sub-domain with SPF, DKIM and DMARC set up. Warm up: 50–100 the first days, then double every few days. Add a one-click unsubscribe, a real sender name, plain text with one link, no ALL CAPS / "FREE" / "!!!".</li>
+      <li><b>WhatsApp:</b> outside 24 h after the client's last message, WhatsApp only allows approved templates. Get a marketing template approved in respond.io, tag the audience here, then run a respond.io Broadcast to that tag. Keep blasts to one a month per client.</li>
+      <li><b>Viber:</b> only clients who already chat with your Viber account can be reached, and Viber may charge for business messages outside an active chat — check your plan first.</li>
+      <li><b>Always:</b> personalise ({firstName}), start with tenants and recent clients, honour STOP / unsubscribe (mark them opted out here), and leave at least 14 days between offers.</li></ul></div>`;
+    return head + audPanel + offer + send + table + resPanel + optPanel + svcPanelHtml() + tips;
   }
   /** The review before a real send: the batch, a rendered example, the image; sends only after the tick and the button. */
   async function upReview(kind) {
@@ -1941,11 +2159,74 @@
       const chk = SH.validateLoi({ slot: f.slot, fields: f.fields }); if (chk.errors.length) return toast(chk.errors[0], true);
       if (chk.missing.length && !confirm(`These are still empty and will be blank lines in the document: ${chk.missing.join(', ')}. Make it anyway?`)) return;
       st.making = true; renderDrawerBody();
-      try { const r = await API.post(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}`, { slot: f.slot, fields: f.fields }); st.lois = [r.loi].concat(st.lois || []); toast('LOI made. Download it and check it; nothing was sent.'); }
+      const u = unitFor(l);
+      try { const r = await API.post(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}`, { slot: f.slot, fields: f.fields, ...(u ? { unitKey: u.key, unitName: u.name } : {}) }); st.lois = [r.loi].concat(st.lois || []); toast('LOI made. Download it and check it; nothing was sent.'); }
       catch (e) { if (!signedOut(e)) toast('Not made: ' + e.message, true); }
       st.making = false; renderDrawerBody();
     },
     loitplretry: () => { S.loiTpl = null; renderView(); },
+    // LOI e-signature: review the text and the channel, confirm, then the link is made (and sent, or shown to copy)
+    loisend: (el) => {
+      const l = leadById(S.open); if (!l) return; const st = loiState(l), x = (st.lois || []).find((y) => y.id === el.dataset.id); if (!x) return;
+      const role = el.dataset.role, sg = st.signing || { channels: { link: true } }, unit = x.unitName || x.fields.TO_2 || 'the unit';
+      const first = (n) => String(n || '').trim().split(/\s+/)[0] || '';
+      const text = role === 'client' ? `Hi ${first(x.fields.CLIENT)}! Here is your Letter of Intent for ${unit}. Please review it and sign it online here:\n{link}\n\nMessage us if anything needs to change. — Blackhouse`
+        : `Hi ${first(x.fields.TO_1)}! Good news — our client has signed a Letter of Intent for ${unit}. Please review and sign it here:\n\n{link}\n\n— Blackhouse`;
+      const opts = [['link', 'Copy the link (I send it myself)', true], ['respond', 'respond.io message to the client', role === 'client' && sg.channels.respond && l.onRespond], ['email', 'Email', sg.channels.email]];
+      openModal(`<div class="m-head"><h2>${role === 'client' ? 'Send the LOI to the client for e-signature' : 'Send the LOI to the owner for e-signature'}</h2><button type="button" class="btn ghost" data-act="mclose" aria-label="Close">✕</button></div>
+        <div class="sub">A new signing link is made. It works once and expires in ${sg.ttlDays || 14} days; an earlier link for ${role === 'client' ? 'the client' : 'the owner'} stops working.</div>
+        ${x.missing.length ? `<div class="src-err" role="alert">This LOI still has empty fields: ${esc(x.missing.join(', '))}.</div>` : ''}
+        <label>How<select id="lsCh">${opts.map(([v, lab, ok]) => `<option value="${v}" ${ok ? '' : 'disabled'}>${esc(lab)}${ok ? '' : ' (not set up)'}</option>`).join('')}</select></label>
+        <label>Email to <input id="lsTo" type="email" value="${esc(role === 'client' ? l.email || '' : '')}" placeholder="name@example.com"></label>
+        <label>Message <span class="muted">{link} is replaced by the signing link</span><textarea id="lsTxt" rows="7" maxlength="2000">${esc(text)}</textarea></label>
+        <label class="tagck"><input type="checkbox" id="lsOk"> I checked the LOI and the message${x.missing.length ? ', and want to send it with the empty fields' : ''}</label>
+        <div id="lsOut"></div>
+        <div class="actions"><button type="button" class="btn" data-act="mclose">Close</button><button type="button" class="btn primary" data-act="loisendgo" data-id="${esc(x.id)}" data-role="${role}" data-missing="${x.missing.length ? 1 : 0}">Make the link</button></div>`);
+    },
+    loisendgo: async (el) => {
+      const l = leadById(S.open); if (!l) return;
+      if (!$('#lsOk').checked) return toast('Tick the box to confirm.', true);
+      const body = { role: el.dataset.role, channel: $('#lsCh').value, to: $('#lsTo').value.trim(), text: $('#lsTxt').value, confirm: true, ...(el.dataset.missing === '1' ? { allowMissing: true } : {}) };
+      el.disabled = true;
+      try {
+        const r = await API.post(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}/${el.dataset.id}/send`, body);
+        // the owner (Code.gs apiSendLoiOwner WhatsApp / Viber): opened on this device with the message, to the listing's number
+        const ow = body.role === 'owner' && body.channel === 'link' ? SH.contactLinks((loiDraftFor(l).listing || {}).contactPhone) : null;
+        $('#lsOut').innerHTML = `<div class="src-note" role="status"><b>${body.channel === 'link' ? 'Link ready — copy it to the ' + (body.role === 'client' ? 'client' : 'owner') : 'Sent.'}</b>
+          <textarea readonly rows="5" id="lsDone">${esc(r.text)}</textarea><button type="button" class="btn sm" data-act="lscopy">Copy message</button>
+          ${ow ? `<a class="btn sm" href="${esc(ow.whatsapp + '?text=' + encodeURIComponent(r.text))}" target="_blank" rel="noopener">Open WhatsApp to the owner</a> <a class="btn sm" data-act="lscopy" href="${esc(ow.viber)}">Open Viber (message copied)</a>` : ''}
+          <span class="sub">Valid until ${esc(manilaTime(r.expiresAt))}. The link is shown only now.</span></div>`;
+        el.hidden = true;
+        const st = loiState(l), i = (st.lois || []).findIndex((y) => y.id === r.loi.id); if (i >= 0) st.lois[i] = r.loi;
+      } catch (e) { el.disabled = false; if (!signedOut(e)) toast(e.message, true); }
+    },
+    lscopy: () => { const t = $('#lsDone'); try { navigator.clipboard.writeText(t.value); toast('Copied'); } catch (e) { t.select(); toast('Select and copy the text', true); } },
+    loisigned: async (el) => {
+      const l = leadById(S.open); if (!l) return;
+      try {
+        const blob = await API.getBlob(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}/${el.dataset.id}/signed?fmt=${el.dataset.fmt}`);
+        const a = document.createElement('a'), href = URL.createObjectURL(blob); a.href = href; a.download = `LOI-signed-${l.code || l.id}.${el.dataset.fmt}`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(href), 1000);
+      } catch (e) { if (!signedOut(e)) toast('Download failed: ' + e.message, true); }
+    },
+    dfopen: async (el) => {
+      const l = leadById(S.open), u = l && unitFor(l); if (!u) return;
+      try {
+        const blob = await API.getBlob(`/api/deals/${loiSrc()}/${encodeURIComponent(l.id)}/${encodeURIComponent(u.key)}/${el.dataset.slot}/file${el.dataset.i ? '?i=' + el.dataset.i : ''}`);
+        const a = document.createElement('a'), href = URL.createObjectURL(blob); a.href = href; a.download = el.textContent.trim(); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(href), 1000);
+      } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    dfterm: async () => {
+      const l = leadById(S.open), u = l && unitFor(l); if (!u) return;
+      const t = SH.dealTerm($('#dfTermStart').value, $('#dfTermMonths').value); if (t.errors.length) return toast(t.errors[0], true);
+      try { await API.put(`/api/deals/${loiSrc()}/${encodeURIComponent(l.id)}/${encodeURIComponent(u.key)}/term`, { start: t.value.start, months: t.value.months }); S.dealf = null; renderDrawerBody(); toast('Lease term saved.'); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    dfrm: async (el) => {
+      const l = leadById(S.open), u = l && unitFor(l); if (!u) return;
+      if (!confirm(`Remove "${SH.DEAL_SLOTS[el.dataset.slot]}" from this deal? The copy in Google Drive is kept.`)) return;
+      try { await API.del(`/api/deals/${loiSrc()}/${encodeURIComponent(l.id)}/${encodeURIComponent(u.key)}/${el.dataset.slot}`); S.dealf = null; renderDrawerBody(); toast('Removed (kept in Drive).'); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
     loitpldel: async (el) => {
       if (!confirm(`Remove the ${SH.LOI_SLOTS[el.dataset.slot]} template? LOIs already made are kept.`)) return;
       try { await API.del('/api/loi/templates/' + el.dataset.slot); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
@@ -1983,6 +2264,21 @@
       try { await API.post(`/api/upsell/campaigns/${up().sel}/resolve`, { leadId: el.dataset.id, outcome: el.dataset.v, action: el.dataset.a === 'tag' ? 'tag' : 'message' }); toast('Updated.'); upResults(); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
     },
     upundoopt: async (el) => { try { await API.post('/api/upsell/optout', { ids: [el.dataset.id], on: false }); toast('Opt-out removed.'); upAudience(); } catch (e) { if (!signedOut(e)) toast(e.message, true); } },
+    // "Mark audience opted out…" (Index.html upOpt): the whole audience, with the count the operator saw
+    upoptall: async () => {
+      const st = up(), n = st.aud && st.aud.counts.audience; if (!n) return;
+      if (!confirm(`Mark all ${n} client${n === 1 ? '' : 's'} in this audience as opted out? They are left out of every offer from now on (it can be undone per client).`)) return;
+      try { const r = await API.post(`/api/upsell/campaigns/${st.sel}/optout-all`, { confirm: true, count: n }); toast(`${r.count} clients opted out.`); upAudience(); }
+      catch (e) { if (!signedOut(e)) { toast(e.message, true); upAudience(); } }
+    },
+    upmailer: async () => {
+      const st = up(); if (st.dirty) return toast('Save the offer first: the mailer uses the saved text.', true);
+      try { st.mailer = await API.get(`/api/upsell/campaigns/${st.sel}/mailer`); renderView(); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    upmx: () => { up().mailer = null; renderView(); },
+    upmcopy: () => { const st = up(); try { navigator.clipboard.writeText(upEspTags(st.mailer.html, st.esp)); toast('Mailer HTML copied — paste it into the ' + (st.esp === 'mailchimp' ? 'Mailchimp' : 'Brevo') + ' code editor'); } catch (e) { toast('Use Download instead', true); } },
+    upmdl: () => { const st = up(), a = document.createElement('a'), href = URL.createObjectURL(new Blob([upEspTags(st.mailer.html, st.esp)], { type: 'text/html' })); a.href = href; a.download = 'blackhouse-mailer.html'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(href), 1000); },
+    upmtest: async () => { const st = up(); try { const r = await API.post('/api/upsell/mailer-test', { subject: st.mailer.subject, html: st.mailer.html }); toast('Test sent to ' + r.to); } catch (e) { if (!signedOut(e)) toast(e.message, true); } },
     upoptout: async (el) => {
       const st = up(), on = el.dataset.v === '1', ids = [...st.picked];
       if (on && !confirm(`Mark ${ids.length} client${ids.length === 1 ? '' : 's'} as opted out? They are left out of every offer.`)) return;
@@ -2644,7 +2940,10 @@
     },
     async askPatch(a, value) {
       if (value.contacted) a.contacts = (a.contacts || []).concat([{ via: value.contacted, at: nowIso(), by: me().name }]).slice(-SH.ASK.logMax);
-      else a.status = value.status;
+      else if (value.status) { if (value.status === 'asking') Object.assign(a, { answeredAt: null, sentAt: null, interestedAt: null }); else if (a.status !== value.status) a.answeredAt = nowIso(); a.status = value.status; }
+      else if (a.status !== 'available') throw new Error('The owner hasn\'t confirmed this unit is available yet.');
+      else if ('sent' in value) Object.assign(a, value.sent ? { sentAt: nowIso(), sentBy: me().name } : { sentAt: null });
+      else Object.assign(a, value.interested ? { interestedAt: nowIso(), interestedBy: me().name } : { interestedAt: null });
       persist(); return a;
     },
     async askDel(a) { D.asking = (D.asking || []).filter((x) => x !== a); persist(); },
@@ -2702,7 +3001,7 @@
   function resetLeadFilters() { Object.assign(S, { q: '', va: '', ai: [], temp: [], wait: '', type: '', from: '', list: null, pp: null, up: null }); }
   function signedOut(e) {
     if (DEMO || !e || e.status !== 401) return false;
-    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null; S.loi = null; S.loiTpl = null; S.teamLabels = null; S.integ = null; S.mTest = null; S.vaAsk = null;
+    S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null; S.loi = null; S.loiTpl = null; S.teamLabels = null; S.integ = null; S.mTest = null; S.vaAsk = null; S.sv = null; S.dealf = null; S.vapVa = '';
     resetLeadFilters();
     $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
     renderLogin('Your session ended. Please sign in again.');
@@ -2944,6 +3243,30 @@
       renderDrawerBody(); rerenderMain(); toast('Note saved ' + where() + ', not to Monday.');
     },
     book: (el) => bookModal(el.dataset.id),
+    // For Client Approval / For Scheduling (Code.gs apiMarkSent / apiMarkAvailable / apiSetCheck 'reset')
+    apprsent: (el) => { const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.id); if (a) askDo(l, () => backend.askPatch(a, { sent: el.dataset.v === '1' }), el.dataset.v === '1' ? 'Marked as sent to the client. Nothing was sent by the portal.' : 'Updated.').then(() => renderDrawerBody()); },
+    apprsched: (el) => { const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.id); if (a) askDo(l, () => backend.askPatch(a, { interested: true }), 'Moved to For Scheduling.').then(() => renderDrawerBody()); },
+    // Index.html "For Scheduling (n)": the selected units that were sent to the client
+    apprschedsel: async () => {
+      const l = leadById(S.open); if (!l) return; const sel = S.apprSel || new Set();
+      const list = (askState(l).list || []).filter((a) => sel.has(a.id) && a.status === 'available' && a.sentAt && !a.interestedAt);
+      for (const a of list) { try { await backend.askPatch(a, { interested: true }); } catch (e) { if (!signedOut(e)) toast(e.message, true); break; } }
+      list.forEach((a) => sel.delete(a.id)); toast(`${list.length} moved to For Scheduling.`); renderDrawerBody();
+    },
+    apprunsched: (el) => { const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.id); if (a) askDo(l, () => backend.askPatch(a, { interested: false }), 'Moved back to For Client Approval.').then(() => renderDrawerBody()); },
+    apprback: (el) => {
+      const l = leadById(S.open), a = l && (askState(l).list || []).find((x) => x.id === el.dataset.id); if (!a) return;
+      if (!confirm('Move this unit back to Asking for Availability? The owner\'s answer is cleared.')) return;
+      askDo(l, () => backend.askPatch(a, { status: 'asking' }), 'Moved back to Asking for Availability.').then(() => renderDrawerBody());
+    },
+    apprcopy: (el) => {
+      const l = leadById(S.open); if (!l) return;
+      const list = (askState(l).list || []).filter((a) => a.status === 'available' && !a.interestedAt && (el.dataset.v === 'sel' ? (S.apprSel || new Set()).has(a.id) : !a.sentAt));
+      if (!list.length) return toast(el.dataset.v === 'sel' ? 'Select the units first.' : 'Every unit has been sent.', true);
+      const units = list.map((a) => { const x = listingById(a.listingId) || {}; return { ...x, name: a.listingName || x.building }; });
+      const text = SH.approvalText(units);
+      try { navigator.clipboard.writeText(text); toast(`Message for ${list.length} unit${list.length > 1 ? 's' : ''} copied. Send it to the client, then "Mark as sent".`); } catch (e) { toast('Copy failed; select the text and copy it.', true); }
+    },
     qdate: (el) => { $('#bDate').value = el.dataset.v; $$('.qd .btn').forEach((b) => b.classList.toggle('on', b === el)); },
     vstatus: (el) => setViewing(el.dataset.id, el.dataset.v),
     viewing: (el) => viewingModal(el.dataset.id),
@@ -2953,6 +3276,40 @@
     vconfirm: () => saveViewing(true),
     vback: () => { $('#vConfirm').innerHTML = ''; const s = $('#vSave'); if (s) { s.hidden = false; s.focus(); } },
     mclose: closeModal,
+    // Service Requests
+    svreload: () => { const st = sv(); st.data = null; st.err = ''; svLoad(); renderView(); },
+    svscan: () => svScan(false),
+    svtab: (el) => { sv().tab = el.dataset.v; renderView(); },
+    svshow: (el) => { sv().show = el.dataset.v; renderView(); },
+    svsend: (el) => svSendModal(el.dataset.id),
+    svcopy: () => { const t = $('#svTxt'); try { navigator.clipboard.writeText(t.value); toast('Copied'); } catch (e) { t.select(); toast('Select and copy the text', true); } },
+    svmark: async (el) => {
+      try { const r = await API.post(`/api/services/${el.dataset.id}/mark-sent`, { supplierId: el.dataset.sp }); closeModal(); svRefreshRow(r.row); toast('Marked as sent to ' + r.row.supplier); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    // the supplier's own app opens with the text (nothing is sent by the portal); then it is marked as sent
+    svopen: (el) => {
+      const t = $('#svTxt').value, r = sv().data.rows.find((x) => x.id === el.dataset.id), links = SH.contactLinks('+' + el.dataset.num);
+      if (el.dataset.kind !== 'email' && !links) return toast('This supplier\'s number doesn\'t look valid. Check it in Suppliers.', true);
+      const href = el.dataset.kind === 'whatsapp' ? links.whatsapp + '?text=' + encodeURIComponent(t)
+        : el.dataset.kind === 'email' ? 'mailto:' + el.dataset.to + '?subject=' + encodeURIComponent('Blackhouse request ' + (r ? r.ref : '')) + '&body=' + encodeURIComponent(t) : links.viber;
+      if (el.dataset.kind === 'viber') { try { navigator.clipboard.writeText(t); toast('Text copied — paste it in Viber'); } catch (e) { /* ignore */ } }
+      window.open(href, '_blank', 'noopener');
+      setTimeout(() => ACT.svmark(el), 300);
+    },
+    svrio: async (el) => {
+      if (!$('#svOk') || !$('#svOk').checked) return toast('Tick the box to confirm you checked the text.', true);
+      try { const r = await API.post(`/api/services/${el.dataset.id}/send`, { supplierId: el.dataset.sp, text: $('#svTxt').value, confirm: true }); closeModal(); svRefreshRow(r.row); toast('Sent to ' + r.row.supplier); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
+    svsup: () => svSuppliersModal(),
+    supadd: () => { const L = S.modal.supList; L.push({ svc: sv().tab !== 'all' ? sv().tab : 'movers', name: '', channel: 'whatsapp', contact: '', respondId: '', notes: '' }); svSuppliersModal(); },
+    supdel: (el) => { S.modal.supList.splice(Number(el.dataset.v), 1); svSuppliersModal(); },
+    supsave: async () => {
+      const { errors } = SH.validateSuppliers(S.modal.supList); if (errors.length) return toast(errors[0], true);
+      try { const r = await API.put('/api/services/suppliers', { suppliers: S.modal.supList }); sv().data.suppliers = r.suppliers; closeModal(); renderView(); toast('Suppliers saved'); }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
     calmove: (el) => { const d = +el.dataset.v, m = S.calMonth; S.calMonth = d === 0 ? null : new Date(m.getFullYear(), m.getMonth() + d, 1); renderView(); },
     invmore: () => { S.inv.limit = (S.inv.limit || 120) + 120; renderInventory(); },
     invcity: (el) => { S.inv.city = el.dataset.v; S.inv.limit = 120; renderView(); const g = $('#invGrid'); if (g) g.scrollIntoView({ behavior: 'smooth' }); },
@@ -2992,7 +3349,7 @@
     source: async (el) => {
       const v = el.dataset.v; if (v === S.source || (S.srcBusy && v === 'monday')) return;
       if (S.open) { closeDrawer(); if (S.open) return; }
-      prefs.source = v; S.source = v; S.pend = null; S.deals = null; S.rnLog = null; S.vaAsk = null; S.loi = null; S.calBroker = ''; savePrefs();
+      prefs.source = v; S.source = v; S.pend = null; S.deals = null; S.rnLog = null; S.vaAsk = null; S.loi = null; S.calBroker = ''; S.sv = null; S.dealf = null; savePrefs();
       if (v === 'monday') { await openMondaySource(false); toast(S.srcNoAccess ? 'No Monday.com data for your account: it needs Leads access.' : mondayWritesOn() ? 'Showing live Monday.com data.' : 'Showing live Monday.com data (read-only).'); return; }
       S.srcBusy = false;
       if (!(await attempt(loadAll))) return;
@@ -3041,7 +3398,7 @@
     logout: async () => {
       try { await API.post('/api/auth/logout'); } catch (e) { /* the session is gone either way */ }
       S.user = null; D = EMPTY(); S.open = null; S.draft = {}; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.source = SH.defaultSource(prefs.source); S.mongoRecords = null; S.srcFetchedAt = ''; S.srcErrors = {}; S.srcBoards = {}; S.srcLive = null; S.watch = (S.watch || 0) + 1;
-      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null; S.loi = null; S.loiTpl = null; S.teamLabels = null; S.integ = null; S.mTest = null; S.vaAsk = null;
+      S.integ = null; S.chat = {}; S.teamLabels = null; S.srcToken++; S.rsInfo = null; S.mw = null; S.pend = null; S.deals = null; S.rnLog = null; S.plCells = null; S.dr = null; S.kr = null; S.loi = null; S.loiTpl = null; S.teamLabels = null; S.integ = null; S.mTest = null; S.vaAsk = null; S.sv = null; S.dealf = null; S.vapVa = '';
       resetLeadFilters();
       $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); closeModal();
       renderLogin('Signed out.');
@@ -3119,6 +3476,26 @@
     from: (el) => { S.from = el.value; filtersChanged(); },
     sort: (el) => { if (!el.value) return; S.sort = el.value; S.sortCol = ''; refreshLeads(true); },
     calbroker: (el) => { S.calBroker = el.value; renderView(); },
+    svstage: async (el) => {
+      const d = sv().data, r = d.rows.find((x) => x.id === el.dataset.id); if (!r) return;
+      try { const x = await API.patch('/api/services/' + r.id, { stage: el.value, version: r.version }); svRefreshRow(x.row); toast('Stage updated'); }
+      catch (e) { if (!signedOut(e)) { toast(e.message, true); renderView(); } }
+    },
+    svsp: (el) => svSendModal(el.dataset.id, el.value),
+    upesp: (el) => { up().esp = el.value; },
+    apprall: (el) => { const l = leadById(S.open); const s = S.apprSel = S.apprSel || new Set(); ((l && askState(l).list) || []).filter((a) => a.status === 'available' && !a.interestedAt).forEach((a) => (el.checked ? s.add(a.id) : s.delete(a.id))); renderDrawerBody(); },
+    vapva: (el) => { S.vapVa = el.value; renderView(); },
+    apprsel: (el) => { const s = S.apprSel = S.apprSel || new Set(); if (el.checked) s.add(el.dataset.id); else s.delete(el.dataset.id); renderDrawerBody(); },
+    dfup: async (el) => {
+      const file = el.files && el.files[0], l = leadById(S.open), u = l && unitFor(l); if (!file || !u) return;
+      if (file.size > SH.DEAL_FILE_MAX) { el.value = ''; return toast('Files can be 15 MB at most.', true); }
+      const slot = el.dataset.slot, s = $('#dfStart-' + slot), m = $('#dfMonths-' + slot);
+      let q = '';
+      if (s && (s.value || slot === 'renewal')) { const t = SH.dealTerm(s.value, m.value); if (t.errors.length) { el.value = ''; return toast(t.errors[0], true); } q = `?start=${s.value}&months=${m.value}`; }
+      try { await API.upload(`/api/deals/${loiSrc()}/${encodeURIComponent(l.id)}/${encodeURIComponent(u.key)}/${slot}${q}`, file); S.dealf = null; renderDrawerBody(); toast('Saved to Google Drive.'); }
+      catch (e) { if (!signedOut(e)) toast('Not saved: ' + e.message, true); }
+      el.value = '';
+    },
     loitpl: async (el) => {
       const file = el.files && el.files[0]; if (!file) return;
       try { await API.upload('/api/loi/templates/' + el.dataset.slot, file); toast('Template saved.'); } catch (e) { if (!signedOut(e)) toast('Not saved: ' + e.message, true); }
@@ -3214,6 +3591,7 @@
     else if (el.dataset.pp || el.dataset.ppu != null || el.dataset.ppm) ppField(el);
     else if (el.dataset.up && el.tagName !== 'SELECT') upField(el);
     else if (el.dataset.in === 'krtext') { const st = kr(); st.draft = { ...(st.draft || {}), [el.dataset.k]: el.value }; }
+    else if (el.dataset.sup) { const [i, k] = el.dataset.sup.split('|'); if (S.modal && S.modal.supList && S.modal.supList[i]) S.modal.supList[i][k] = el.value; }
     else if (el.dataset.in === 'loif') {
       // typing only updates the form (no redraw, so focus stays); "Still empty" is checked again when the LOI is made
       const l = leadById(S.open), st = l && loiState(l); if (st && st.form) { st.form.fields[el.dataset.k] = el.value; st.form.touched = true; }

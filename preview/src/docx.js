@@ -147,9 +147,54 @@ function fillLoi(buf, fields) {
   const parts = unzip(buf);
   return zip(parts.map((e) => (e.name === 'word/document.xml' ? { name: e.name, data: Buffer.from(fillLoiXml(e.data.toString('utf8'), fields), 'utf8') } : e)));
 }
+/**
+ * Puts a signature image into a filled LOI (Code.gs apiSubmitLoiSignature / loiOwnerSigned_): on the signature line
+ * just above "Print Name & Signature" (client) or above LESSOR / SELLER (owner) — or at the end if the template has
+ * neither — then adds the stamp line (9 pt italic) at the end. png: the signature PNG (checked by the caller).
+ */
+function addSignature(buf, { png, role, stamp, width = 600, height = 180 }) {
+  const parts = unzip(buf), doc = parts.find((e) => e.name === 'word/document.xml');
+  if (!doc) throw new Error('The .docx file is damaged.');
+  const relsPart = parts.find((e) => e.name === 'word/_rels/document.xml.rels'), types = parts.find((e) => e.name === '[Content_Types].xml');
+  let rels = relsPart ? relsPart.data.toString('utf8') : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  // a relationship id and media name not used yet (the owner signs a copy the client already signed)
+  let n = 1; while (rels.includes(`Id="rIdBhSig${n}"`) || parts.some((e) => e.name === `word/media/bhsig${n}.png`)) n++;
+  const rid = `rIdBhSig${n}`, media = `bhsig${n}.png`;
+  rels = rels.replace('</Relationships>', `<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${media}"/></Relationships>`);
+  let ct = types ? types.data.toString('utf8') : '';
+  if (ct && !/Extension="png"/i.test(ct)) ct = ct.replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>');
+  // 200 px wide (as the Apps Script), in EMU; height keeps the canvas ratio
+  const cx = 1905000, cy = Math.round(cx * height / width);
+  const pic = `<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${9000 + n}" name="Signature ${n}"/>`
+    + `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">`
+    + `<pic:nvPicPr><pic:cNvPr id="0" name="${media}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`
+    + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+  let xml = doc.data.toString('utf8');
+  // the root must declare the drawing (wp) and relationship (r) prefixes
+  xml = xml.replace(/<w:document\b([^>]*)>/, (m, attrs) => '<w:document' + attrs
+    + (/xmlns:wp=/.test(attrs) ? '' : ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"')
+    + (/xmlns:r=/.test(attrs) ? '' : ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"') + '>');
+  const anchor = role === 'owner' ? /(LESSOR|SELLER)\s*$/ : /Print Name & Signature\s*$/;
+  const paras = [...xml.matchAll(P_RE())];
+  const at = paras.findIndex((m) => anchor.test(textOf(m[0])));
+  if (at >= 0) {
+    // the line above the caption (an underline "____" or empty paragraph) becomes the signature; else it goes above it
+    const prev = at > 0 ? paras[at - 1] : null, target = prev && /^[\s_]*$/.test(textOf(prev[0])) ? prev : null;
+    if (target) xml = xml.slice(0, target.index) + pic + xml.slice(target.index + target[0].length);
+    else xml = xml.slice(0, paras[at].index) + pic + xml.slice(paras[at].index);
+  }
+  const stampP = `<w:p><w:r><w:rPr><w:i/><w:sz w:val="18"/></w:rPr><w:t xml:space="preserve">${xmlEsc(stamp)}</w:t></w:r></w:p>`;
+  const tail = (at >= 0 ? '' : pic) + stampP, sect = xml.lastIndexOf('<w:sectPr');
+  xml = sect >= 0 && sect > xml.lastIndexOf('</w:p>') ? xml.slice(0, sect) + tail + xml.slice(sect) : xml.replace('</w:body>', tail + '</w:body>');
+  const out = parts.filter((e) => e.name !== `word/media/${media}`).map((e) => (e === doc ? { name: e.name, data: Buffer.from(xml, 'utf8') } : e === relsPart ? { name: e.name, data: Buffer.from(rels, 'utf8') } : e === types && ct ? { name: e.name, data: Buffer.from(ct, 'utf8') } : e));
+  if (!relsPart) out.push({ name: 'word/_rels/document.xml.rels', data: Buffer.from(rels, 'utf8') });
+  out.push({ name: `word/media/${media}`, data: png });
+  return zip(out);
+}
+
 /** A message for the user: this file's own checks as written, anything else (zlib, memory) as a plain sentence. */
 const userMessage = (e) => (/^The \.docx file|^Not a \.docx|^This (isn't|doesn't)/.test(String(e && e.message)) ? e.message : 'The .docx file could not be read.');
 /** The document's visible text, paragraph by paragraph (tests, and the on-screen review). */
 const docText = (buf) => { const d = unzip(buf).find((e) => e.name === 'word/document.xml'); return d ? (d.data.toString('utf8').match(P_RE()) || []).map(textOf) : []; };
 
-module.exports = { unzip, zip, fillLoi, fillLoiXml, checkTemplate, docText, userMessage };
+module.exports = { unzip, zip, fillLoi, fillLoiXml, checkTemplate, docText, userMessage, addSignature };

@@ -242,7 +242,25 @@
     if (!isPlainObject(b) || Object.keys(b).length !== 1) return { errors: ['Invalid request.'] };
     if ('status' in b) return ASK.statuses.includes(b.status) ? { value: { status: b.status }, errors: [] } : { errors: ['Unknown status.'] };
     if ('contacted' in b) return ASK.vias.includes(b.contacted) ? { value: { contacted: b.contacted }, errors: [] } : { errors: ['Unknown contact method.'] };
+    // For Client Approval (Code.gs apiMarkSent / apiMarkAvailable): sent to the client; the client wants to view it
+    if ('sent' in b) return typeof b.sent === 'boolean' ? { value: { sent: b.sent }, errors: [] } : { errors: ['Invalid request.'] };
+    if ('interested' in b) return typeof b.interested === 'boolean' ? { value: { interested: b.interested }, errors: [] } : { errors: ['Invalid request.'] };
     return { errors: ['Invalid request.'] };
+  }
+  /**
+   * Code.gs apiGetVaPortal: where an Asking for Availability record stands. asking → (owner says available) apprNew →
+   * (units sent to the client) apprSent → (client wants to view) sched. Unavailable records are in none of them.
+   */
+  const askStage = (a) => (a.status === 'asking' ? 'asking' : a.status !== 'available' ? '' : a.interestedAt ? 'sched' : a.sentAt ? 'apprSent' : 'apprNew');
+  /** Index.html sendListingsToChat / listingMessage: the text that goes to the client with the confirmed units. */
+  function approvalText(units) {
+    const peso = (n) => (Number(n) > 0 ? '₱' + Math.round(Number(n)).toLocaleString('en-US') : '');
+    const one = (L) => [`🏠 ${L.name || L.building || 'Unit'}`, [L.building, L.city].filter(Boolean).length ? `📍 ${[L.building, L.city].filter(Boolean).join(', ')}` : '',
+      L.price ? `💰 ${peso(L.price)}${L.type === 'For Rent' ? ' / month' : ''}` : '',
+      [L.bedrooms ? `🛏 ${L.bedrooms} BR` : '', L.bathrooms ? `🛁 ${L.bathrooms}` : '', L.sizeSqm ? `📐 ${L.sizeSqm} sqm` : '', L.parking ? '🚗 parking' : ''].filter(Boolean).join(' · '),
+      [L.furnishing ? `🛋 ${L.furnishing}` : '', L.petFriendly ? '🐾 pets allowed' : ''].filter(Boolean).join(' · ')].filter(Boolean).join('\n');
+    return (units.length > 1 ? 'Hi! Good news — these units are available and match what you\'re looking for:' : 'Hi! Good news — this unit is available and matches what you\'re looking for:')
+      + '\n\n' + units.map(one).join('\n\n');
   }
   /** Call / WhatsApp / Viber links for an owner's number (PH numbers normalised to +63). null when it isn't a usable number. */
   function contactLinks(phone) {
@@ -766,6 +784,10 @@
     presetLabels: { tenants: 'Tenants (closed / renewing)', active: 'Active leads', past: 'Past leads (failed / unresponsive)', all: 'Everyone' },
     contacts: ['any', 'respond', 'email', 'phone'], contactLabels: { any: 'Any', respond: 'On respond.io', email: 'Has email', phone: 'Has phone' },
     textMax: 1500, batchMax: 40, imageMax: 5 * 1024 * 1024, gapMs: 700,
+    // tagging is a light request: bigger batches, shorter gaps (the Apps Script tagged up to 3000 per click)
+    tagBatchMax: 200, tagGapMs: 150,
+    // the Client Status chip for clients with no status (Index.html upRows '(blank)')
+    blank: '(blank)',
     // the original's default offer text (Index.html UP_CONCIERGE), unchanged
     concierge: 'Hi {firstName},\n\nJust wanted to check up on you. How are things with the unit?\n\nAlso, we want to remind you of our Blackhouse Concierge service — we can help with the following services:\n\nMovers, Cleaners, AC Cleaning, Furniture, Repairs, Legal Assistance\n\nWe also have partnerships with Ayala Land, SM Prime, Shangri-La, Arthaland, Federal Land and Rockwell if you are interested in pre-selling investments for property.\n\nJust message us if you need any help!\n\nBlackhouse Concierge Team',
   };
@@ -783,8 +805,10 @@
   /** A campaign draft from the page → { value, errors } (only these fields; the audience is validated as a whole). */
   function validateCampaign(b, { projectIds = [] } = {}) {
     if (!isPlainObject(b)) return { errors: ['Invalid request.'] };
-    if (Object.keys(b).some((k) => !['name', 'template', 'projectId', 'text', 'tag', 'audience', 'version'].includes(k))) return { errors: ['Invalid request.'] };
+    if (Object.keys(b).some((k) => !['name', 'template', 'projectId', 'text', 'tag', 'audience', 'channelId', 'version'].includes(k))) return { errors: ['Invalid request.'] };
     const value = {};
+    // the respond.io channel for 1:1 sends ('' = Auto, the channel the client last used; Index.html upChan)
+    if (b.channelId !== undefined) { if (typeof b.channelId !== 'string' || !/^\d{0,20}$/.test(b.channelId)) return { errors: ['Pick a respond.io channel.'] }; value.channelId = b.channelId; }
     if (b.name !== undefined) { if (typeof b.name !== 'string' || !b.name.trim() || b.name.length > 80) return { errors: ['Give the offer a name (80 characters max).'] }; value.name = b.name.trim(); }
     if (b.template !== undefined) { if (!['project'].concat(upsellTemplates().map((t) => t.k)).includes(b.template)) return { errors: ['Unknown message template.'] }; value.template = b.template; }
     if (b.projectId !== undefined) { if (b.projectId !== '' && !projectIds.includes(b.projectId)) return { errors: ['Pick a project from Project Pages.'] }; value.projectId = b.projectId; }
@@ -810,13 +834,137 @@
   function upsellAudience(rows, a, now) {
     const preset = { tenants: (r) => r.tenant, active: (r) => /active|qualif|late/i.test(r.status), past: (r) => /fail|unresp|disqual/i.test(r.status), all: () => true }[a.preset] || (() => true);
     const city = String(a.city || '').toLowerCase(), gap = (Number(a.skipDays) || 0) * 864e5;
-    return rows.filter((r) => !r.optedOut && preset(r) && (!a.statuses.length || a.statuses.includes(r.status)) && (!a.type || r.type === a.type)
+    return rows.filter((r) => !r.optedOut && preset(r) && (!a.statuses.length || a.statuses.includes(r.status || UPSELL.blank)) && (!a.type || r.type === a.type)
       && (!city || String(r.city || '').toLowerCase().includes(city))
       && (a.contact === 'any' || (a.contact === 'respond' ? r.onRespond : a.contact === 'email' ? !!r.email : !!r.phone))
       && (!gap || !r.lastOffer || now - r.lastOffer >= gap));
   }
 
+  // ---------- Deal files (Code.gs DEAL_SLOTS_ / dealTerm_ / apiDealUpload; Index.html deal tabs) ----------
+  const DEAL_SLOTS = { clientLoi: 'LOI signed by the client', ownerLoi: 'LOI signed by the owner', contract: 'Signed contract (both parties)', deposit: 'Deposit slip', renewal: 'Renewal contract' };
+  // which slots each lead tab shows (Index.html 6186)
+  const DEAL_TAB_SLOTS = { loic: ['clientLoi'], loio: ['clientLoi', 'ownerLoi'], contract: ['clientLoi', 'ownerLoi', 'contract'], collection: ['contract', 'deposit'],
+    active: ['clientLoi', 'ownerLoi', 'contract', 'deposit'], renewal: ['clientLoi', 'ownerLoi', 'contract', 'deposit', 'renewal'] };
+  const DEAL_FILE_MAX = 15 * 1024 * 1024;
+  const ymdAdd = (s, months, days) => { const [y, m, d] = s.split('-').map(Number), t = new Date(Date.UTC(y, m - 1 + months, d + days)); return t.toISOString().slice(0, 10); };
+  /** Code.gs dealTerm_: start + months → { start, months, end (the day before the anniversary), renewFrom (2 months before it) }. */
+  function dealTerm(start, months) {
+    const n = Number(months);
+    if (!isYmd(start)) return { errors: ['Enter the lease start date.'] };
+    if (!Number.isInteger(n) || n < 1 || n > 240) return { errors: ['Lease months must be a whole number from 1 to 240.'] };
+    return { value: { start, months: n, end: ymdAdd(start, n, -1), renewFrom: ymdAdd(start, n - 2, 0) }, errors: [] };
+  }
+  /** Index.html 6143: the deal tab a lead belongs in, from its files (renewal once a lease's renewal date has come). */
+  function dealStageOf(rec, lease, today) {
+    const s = (rec && rec.slots) || {};
+    if (!s.clientLoi) return 'loic';
+    if (!s.ownerLoi) return 'loio';
+    if (!s.contract) return 'contract';
+    if (!s.deposit) return 'collection';
+    return lease && rec.term && rec.term.renewFrom && today >= rec.term.renewFrom ? 'renewal' : 'active';
+  }
+
+  // ---------- Service Requests (Code.gs apiServiceScan / apiGetServiceBoard / apiServiceUpdate / apiSaveSuppliers / apiSupplierSend) ----------
+  const SERVICES = {
+    keys: ['movers', 'cleaners', 'aircon', 'repairs', 'interiors', 'furniture', 'legal'],
+    stages: ['New', 'Sent to supplier', 'Quoted', 'Client confirmed', 'Booked', 'Collected', 'Supplier paid', 'Done', 'Not proceeding'],
+    interests: ['interested', 'asking', 'not interested', 'no reply'],
+    detailKeys: ['date', 'area', 'from', 'to', 'unit', 'items', 'issue', 'budget', 'notes'],
+    channels: ['whatsapp', 'viber', 'email', 'respond'],
+    maxSuppliers: 60, offerDays: 120, rescanHours: 3, textMax: 4000,
+  };
+  const serviceLabel = (k) => (RENEWAL_TEMPLATES.find((t) => t.k === k) || { label: k }).label;
+  /** Code.gs apiGetServiceBoard ref: SR-<last 5 of the lead>-<SVC>. */
+  const serviceRef = (leadId, svc) => 'SR-' + String(leadId).slice(-5) + '-' + String(svc).slice(0, 3).toUpperCase();
+  /** Index.html svSupplierText: the request a supplier gets — no client name, number or email. */
+  function serviceSupplierText(r) {
+    const det = SERVICES.detailKeys.filter((k) => r.details && r.details[k]).map((k) => '• ' + k.charAt(0).toUpperCase() + k.slice(1) + ': ' + r.details[k]).join('\n');
+    const loc = [r.area, r.city].filter(Boolean).join(', ');
+    return `Hi! New ${serviceLabel(r.svc)} request from Blackhouse — ref ${r.ref}\n` + (loc ? `Location: ${loc}\n` : '') + (r.summary ? `Request: ${r.summary}\n` : '') + (det ? det + '\n' : '')
+      + '\nPlease send your quote and earliest schedule to us. Blackhouse handles coordination with the client, collection and payment.';
+  }
+  /** The service offers a client was sent: [{ kind, at }] → { svc: first sent ms } (the Concierge text offers every service). */
+  function serviceOffers(sends) {
+    const out = {};
+    (sends || []).forEach((x) => (x.kind === 'concierge' ? SERVICES.keys : [x.kind]).forEach((k) => { if (SERVICES.keys.includes(k) && (!out[k] || x.at < out[k])) out[k] = x.at; }));
+    return out;
+  }
+  /** Code.gs apiSaveSuppliers: the cleaned list (blank names dropped, at most 60). */
+  function validateSuppliers(list) {
+    if (!Array.isArray(list) || list.length > 200) return { errors: ['Invalid supplier list.'] };
+    const out = [];
+    for (const x of list) {
+      if (!isPlainObject(x)) return { errors: ['Invalid supplier list.'] };
+      const name = typeof x.name === 'string' ? x.name.trim() : '';
+      if (!name) continue;
+      const contact = typeof x.contact === 'string' ? x.contact.trim() : '', channel = SERVICES.channels.includes(x.channel) ? x.channel : 'whatsapp';
+      if (!SERVICES.keys.includes(x.svc)) return { errors: [`Pick a service for ${name}.`] };
+      if (name.length > 80 || contact.length > 120 || String(x.notes || '').length > 300) return { errors: [`${name}: a field is too long.`] };
+      if (channel === 'email' && contact && !EMAIL_RE.test(contact)) return { errors: [`${name}: the email doesn't look valid.`] };
+      if ((channel === 'whatsapp' || channel === 'viber') && contact && !/^[+\d\s()-]{7,20}$/.test(contact)) return { errors: [`${name}: the number can only contain digits, spaces, + ( ) -.`] };
+      const respondId = String(x.respondId || '').replace(/\D/g, '').slice(0, 20);
+      if (channel === 'respond' && !respondId) return { errors: [`${name}: a respond.io supplier needs its respond.io contact ID.`] };
+      out.push({ id: /^[a-f0-9]{24}$/.test(String(x.id || '')) ? String(x.id) : '', svc: x.svc, name, channel, contact, respondId, notes: String(x.notes || '').trim().slice(0, 300) });
+    }
+    if (out.length > SERVICES.maxSuppliers) return { errors: [`At most ${SERVICES.maxSuppliers} suppliers.`] };
+    return { value: out, errors: [] };
+  }
+  function validateServicePatch(b) {
+    if (!isPlainObject(b) || Object.keys(b).some((k) => !['stage', 'interest', 'notes', 'version'].includes(k))) return { errors: ['Invalid request.'] };
+    if (!Number.isInteger(b.version) || b.version < 1) return { errors: ['Reload and try again.'] };
+    const v = { version: b.version };
+    if (b.stage !== undefined) { if (!SERVICES.stages.includes(b.stage)) return { errors: ['Unknown stage.'] }; v.stage = b.stage; }
+    if (b.interest !== undefined) { if (!SERVICES.interests.includes(b.interest)) return { errors: ['Unknown interest.'] }; v.interest = b.interest; }
+    if (b.notes !== undefined) { if (typeof b.notes !== 'string' || b.notes.length > 500) return { errors: ['Notes: 500 characters at most.'] }; v.notes = b.notes.trim(); }
+    if (Object.keys(v).length === 1) return { errors: ['Nothing to save.'] };
+    return { value: v, errors: [] };
+  }
+  /** Removes anything that looks like a phone number, email or link from AI text that goes to a supplier. */
+  const stripContacts = (s) => String(s || '').replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[removed]').replace(/https?:\/\/\S+/g, '[removed]').replace(/\+?\d[\d\s().-]{6,}\d/g, '[removed]');
+  const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // a name part as a pattern that matches it with or without accents ("María" ↔ "Maria")
+  const ACC = { a: 'aàáâãäåā', e: 'eèéêëē', i: 'iìíîïī', o: 'oòóôõöō', u: 'uùúûüū', n: 'nñ', c: 'cç', y: 'yýÿ' };
+  const namePattern = (w) => w.normalize('NFD').replace(/[̀-ͯ]/g, '').split('').map((ch) => (ACC[ch.toLowerCase()] ? '[' + ACC[ch.toLowerCase()] + ']' : reEsc(ch))).join('');
+  const nameRe = (w, g) => new RegExp('(^|[^\\p{L}])' + namePattern(w) + '(?=$|[^\\p{L}])', g ? 'giu' : 'iu');
+  const UNIT_RE = /\b(unit|rm|room|apt|apartment|suite|condo|flr|floor)\.?\s*(no\.?|number|#)?\s*([A-Za-z]?\d[\w-]*)/gi;
+  /** The unit numbers a text mentions ("Unit 12B" → "12B", "#1203" → "1203"), to remove them wherever they reappear. */
+  const unitsIn = (text) => [...String(text || '').matchAll(UNIT_RE)].map((m) => m[3]).concat([...String(text || '').matchAll(/#\s?(\d{1,5}[A-Za-z]?)\b/g)].map((m) => m[1]));
+  /**
+   * Client chat text made safe to send to the AI service (Service Requests "Check replies"): the client's name (whole
+   * and each part), their email, phone and respond.io ID, any other email, phone number or link, and unit numbers
+   * ("Unit 12B", "#1203", "Rm 5") are replaced, so none of it leaves the portal. client: { name, email, phone, contactId }.
+   */
+  function redactForAi(text, client) {
+    const c = client || {};
+    let s = String(text || '');
+    // exact known identifiers first (before the generic patterns change their shape)
+    [c.email, c.phone, c.contactId].filter((x) => String(x || '').trim().length >= 4).forEach((x) => { s = s.split(String(x).trim()).join('[id]'); });
+    const digits = String(c.phone || '').replace(/\D/g, '');
+    if (digits.length >= 7) s = s.replace(new RegExp(digits.slice(-7).split('').join('[\\s().-]*'), 'g'), '[phone]');
+    s = s.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]').replace(/(https?:\/\/|www\.)\S+/gi, '[link]').replace(/\+?\d[\d\s().-]{6,}\d/g, '[phone]');
+    // unit numbers: "Unit 12B", "#1203", and any the client mentioned before (c.units), even written bare ("12B")
+    s = s.replace(UNIT_RE, '[unit]').replace(/#\s?\d{1,5}[A-Za-z]?\b/g, '[unit]');
+    (c.units || []).filter((u) => String(u).length >= 2).forEach((u) => { s = s.replace(new RegExp('(^|[^\\w])' + reEsc(u) + '(?=$|[^\\w])', 'gi'), '$1[unit]'); });
+    const name = String(c.name || '').trim();
+    if (name) {
+      const parts = [name].concat(name.split(/[\s,.]+/)).filter((w) => w.replace(/[^A-Za-zÀ-ɏ]/g, '').length >= 2);
+      parts.sort((a, b) => b.length - a.length).forEach((w) => { s = s.replace(nameRe(w, true), '$1[client]'); });
+    }
+    return s;
+  }
+  /** True when text still holds one of the client's identifiers (for a last check of what the AI returned). */
+  function leaksClient(text, client) {
+    const c = client || {}, s = String(text || '');
+    if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(s) || /\+?\d[\d\s().-]{6,}\d/.test(s)) return true;
+    const digits = String(c.phone || '').replace(/\D/g, '');
+    if (digits.length >= 7 && s.replace(/\D/g, '').includes(digits.slice(-7))) return true;
+    if (c.contactId && String(c.contactId).length >= 4 && s.includes(String(c.contactId))) return true;
+    if ((c.units || []).some((u) => String(u).length >= 2 && new RegExp('(^|[^\\w])' + reEsc(u) + '(?=$|[^\\w])', 'i').test(s))) return true;
+    return String(c.name || '').split(/[\s,.]+/).filter((w) => w.replace(/[^A-Za-zÀ-ɏ]/g, '').length >= 3).some((w) => nameRe(w, false).test(s));
+  }
+
   return { defaultSource, LISTS, AI_STAGES, TEMPS, MODULES, ROLES, EMAIL_RE, MIN_PASSWORD, LEAD_FIELDS, isYmd, access,
+    askStage, approvalText, DEAL_SLOTS, DEAL_TAB_SLOTS, DEAL_FILE_MAX, dealTerm, dealStageOf, SERVICES, serviceLabel, serviceRef, serviceSupplierText, serviceOffers, validateSuppliers, validateServicePatch, stripContacts, redactForAi, leaksClient, unitsIn,
     UPSELL, upsellTemplates, upsellTag, upsellText, validateCampaign, upsellAudience, LOI_SETUP, LOI_SLOTS, LOI_FIELDS, numberWords, validateLoi, loiListing, loiDraft, dealStages,
     PROJECT, parseDriveLink, youtubeId, isHttpsUrl, validHook, toList, validateProject, mediaKind, driveProposal, isId24,
     vaKey, sameVa, vaLabels, LEAD_PLUS, dealFailed, vaWorkload, vaPerformance, KPI_REVIEW, manilaMonth, manilaDay, validPeriod, periodDays, kpiReviewValues, validateKpiFeedback, kpiReviewEmpty,

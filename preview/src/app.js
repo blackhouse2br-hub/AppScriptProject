@@ -56,10 +56,12 @@ function createApp(config) {
   if (config.mode === 'mongo') {
     const api = require('./api').apiRouter(config); app.locals.integ = api.integ; app.use('/api', api);
     // published project pages (no sign-in): /p/<slug> and its media; unpublished projects are not found
-    app.use((req, res, next) => (dbReady() ? next() : /^\/(p|upsell-media)\//.test(req.path) ? res.status(503).type('text/plain').send('Temporarily unavailable') : next()));
+    app.use((req, res, next) => (dbReady() ? next() : /^\/(p|upsell-media|sign)\//.test(req.path) ? res.status(503).type('text/plain').send('Temporarily unavailable') : next()));
     app.use(require('./projects').projectPublicRoutes());
     // an Upselling offer's image, for respond.io to fetch (unguessable link per image)
     app.use(require('./upsell').upsellPublicRoutes());
+    // LOI signing links (/sign/<token>): no sign-in; each link expires and works once (src/loiSign.js)
+    app.use(api.loiSign.publicRoutes());
   }
   else app.use('/api', (req, res) => res.status(404).json({ error: 'The API is switched off in demo mode. Demo data stays in your browser.' }));
 

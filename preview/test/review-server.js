@@ -10,7 +10,7 @@ const { User } = require('../src/models');
 const { hashPassword } = require('../src/auth');
 const SH = require('../public/shared');
 const fx = require('./fixtures/fake-integrations');
-const { fakeServiceAccount, createFakeGoogle, createFakeAi } = require('./fixtures/fake-google-ai');
+const { fakeServiceAccount, createFakeGoogle, createFakeAi, demoDrive } = require('./fixtures/fake-google-ai');
 
 const PORT = Number(process.argv[2]) || 4180, PW = 'local-review-only-pw', TODAY = SH.manilaDay();
 const ACCOUNTS = [
@@ -28,7 +28,14 @@ L.items.push({ id: '9101', name: 'BH-L1', group: 'ALL CLIENTS', v: { cn: 'Lara C
   { id: '9102', name: 'BH-L2', group: 'ALL CLIENTS', v: { cn: 'Lara Client Two', va1: 'Lara', inq: 'Rent', cs: 'Failed', dq: TODAY } },
   { id: '9201', name: 'BH-V1', group: 'ALL CLIENTS', v: { cn: 'Lower Case Ana Client', va1: 'ana', inq: 'Rent', dq: '2026-10-20' } },
   { id: '9203', name: 'BH-V3', group: 'ALL CLIENTS', v: { cn: 'Nobody Assigned', inq: 'Rent', dq: '2026-10-22' } },
-  { id: '9302', name: 'BH-U2', group: 'ALL CLIENTS', v: { cn: 'Window Wendy', va1: 'Bea', inq: 'Rent', cs: 'Qualified', city: 'Taguig', rid: '555302' } });
+  { id: '9302', name: 'BH-U2', group: 'ALL CLIENTS', v: { cn: 'Window Wendy', va1: 'Bea', inq: 'Rent', cs: 'Qualified', city: 'Taguig', rid: '555302' } },
+  // Service Requests: a client who replied to a movers offer (fake chat 555007, with made-up personal details)
+  { id: '9401', name: 'BH-S1', group: 'ALL CLIENTS', v: { cn: 'Sofia Reyes', va1: 'Ana', inq: 'Rent', cs: 'Qualified', city: 'Makati', rid: '555007', ph: '+63 917 555 0199' } });
+// a made-up LOI template (never the team's real ones)
+const P = (t) => `<w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r></w:p>`, ROW = (a) => `<w:tr><w:tc>${P(a)}</w:tc><w:tc><w:p/></w:tc></w:tr>`;
+const TEMPLATE = require('../src/docx').zip([{ name: '[Content_Types].xml', data: Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>') },
+  { name: 'word/document.xml', data: Buffer.from(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${P('Date: _______________')}${P('To:      _______________________________')}${P('RE:     LETTER OF INTENT TO LEASE (MADE-UP TEMPLATE)')}${P('Dear _______________:')}`
+    + `<w:tbl>${ROW('Lessor')}${ROW('Lessee')}${ROW('Property')}${ROW('Lease Term')}${ROW('Monthly Rental')}${ROW('Advance Rental')}${ROW('Security Deposit')}</w:tbl>${P('_______________________________')}${P('Print Name &amp; Signature')}${P('_______________________________')}${P('LESSOR')}<w:sectPr/></w:body></w:document>`) }]);
 fx.BOARDS['3333333'].items.push({ id: '6101', name: 'Viewing L', group: 'Viewings', created: TODAY, v: { fs: TODAY, cl: { linked: ['9101'] }, b: 'Fake Tower', c: 'Makati', tm: '10:00', sp: 'Ely Santos', st: 'Done' } });
 
 (async () => {
@@ -49,18 +56,31 @@ fx.BOARDS['3333333'].items.push({ id: '6101', name: 'Viewing L', group: 'Viewing
     });
   });
   await new Promise((r) => front.listen(0, '127.0.0.1', r)); const f = `http://127.0.0.1:${front.address().port}`;
-  const sa = fakeServiceAccount(), g = createFakeGoogle(sa), ai = createFakeAi();
+  // the fake Drive also has the LOI and deal folders (signed copies, PDFs and deal files go there, in memory)
+  const sa = fakeServiceAccount(), g = createFakeGoogle(sa, { ...demoDrive(), LoiFolderAAAAAAAAAAA: { name: 'Blackhouse LOIs (fake)', mimeType: 'application/vnd.google-apps.folder' },
+    DealsFolderAAAAAAAAA: { name: 'Deal files (fake)', mimeType: 'application/vnd.google-apps.folder' } }), ai = createFakeAi();
   await new Promise((r) => g.listen(0, '127.0.0.1', r)); await new Promise((r) => ai.listen(0, '127.0.0.1', r));
   const gb = `http://127.0.0.1:${g.address().port}`;
   const mem = await MongoMemoryServer.create();
   await start({ APP_MODE: 'mongo', MONGODB_URI: mem.getUri('bh_review'), PORT: String(PORT), HOST: '127.0.0.1',
     MONDAY_TOKEN: 'mtest', MONDAY_LEADS_BOARD_ID: '1111111', MONDAY_LISTINGS_BOARD_ID: '2222222', MONDAY_CALENDAR_BOARD_ID: '3333333', MONDAY_API_URL: f + '/monday',
-    RESPOND_TOKEN: 'rtest', RESPOND_API_URL: f + '/respond', RESPOND_SENDS: 'on',
+    // RESPOND_SENDS stays off here as on the live server (Upselling / supplier send buttons show "switched off")
+    RESPOND_TOKEN: 'rtest', RESPOND_API_URL: f + '/respond',
     KPI_REVIEWER_TOBY_EMAIL: ACCOUNTS[0][0], KPI_REVIEWER_JONJO_EMAIL: ACCOUNTS[1][0],
     GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: sa.json, GOOGLE_DRIVE_TOKEN_URL: gb + '/token', GOOGLE_DRIVE_API_URL: gb + '/drive/v3',
+    // LOI signing and deal files against the fake Drive (writer account = the same fake key; nothing leaves this computer)
+    GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON: sa.json, GOOGLE_DRIVE_UPLOAD_URL: gb + '/upload/drive/v3',
+    GOOGLE_DRIVE_LOI_FOLDER_ID: 'LoiFolderAAAAAAAAAAA', GOOGLE_DRIVE_DEALS_FOLDER_ID: 'DealsFolderAAAAAAAAA', LOI_SIGNING: 'on', LOI_PDF_CONVERTER: 'drive',
+    // the fake AI service (local): never the real key in preview/.env
     ANTHROPIC_API_KEY: 'sk-ant-fake-local', ANTHROPIC_BASE_URL: `http://127.0.0.1:${ai.address().port}` }, ['node', 'server.js']);
   const passwordHash = await hashPassword(PW);
   await User.create(ACCOUNTS.map(([email, name, role, vaLabel, modules]) => ({ email, name, role, vaLabel, modules, passwordHash })));
+  // synthetic records to review the new features with: the made-up LOI template, a movers offer to Sofia (so
+  // "Check replies" finds her reply), and an Asking for Availability unit for Test Client One
+  const { LoiTemplate, RenewalLog, AvailabilityRequest } = require('../src/models');
+  await LoiTemplate.create({ slot: 'lease', name: 'Made-up lease LOI.docx', size: TEMPLATE.length, data: TEMPLATE, uploadedBy: { userId: (await User.findOne({ email: ACCOUNTS[1][0] }))._id, name: 'Jonjo (test reviewer)' } });
+  await RenewalLog.create({ source: 'monday', leadId: '9401', kind: 'movers', by: { name: 'Ana (test VA)' } });
+  await AvailabilityRequest.create({ source: 'monday', leadId: '9001', listingId: '7001', listingName: 'Fake Tower', createdBy: { name: 'Ana (test VA)' }, updatedBy: { name: 'Ana (test VA)' } });
   console.log(`\nLocal review portal (TEST DATA ONLY): http://127.0.0.1:${PORT}/`);
   console.log(`Password for every fictional account: ${PW}`);
   ACCOUNTS.forEach(([e, n, role]) => console.log(`  ${e.padEnd(30)} ${n} · ${role}`));

@@ -105,9 +105,22 @@ const CHATS = () => ({
   '555001': [msg(2, 'outgoing', 'Hi, how can we help?', 48, 'user'), msg(1, 'incoming', 'Hello, is the unit available?', 80)],
   // VA replied 5 h ago, client sent two messages since, then an automated workflow message → still Needs VA Reply, Hot
   '555006': [msg(14, 'outgoing', 'Auto-reply: we will get back to you', 0.5, 'workflow'), msg(13, 'incoming', 'Can I view tomorrow?', 1), msg(12, 'incoming', 'Hello again', 2), msg(11, 'outgoing', 'Sure, sending options', 5, 'user')],
+  // a reply to a services offer (Service Requests "Check replies"): the offer is logged by the test just before this
+  // (the reply carries the client's own name, number, email, unit and a link: the portal must never pass these to the AI)
+  '555007': [msg(21, 'outgoing', 'Hi Sofia! Moving soon? Blackhouse can arrange trusted movers for you.', 0.02, 'api'),
+    msg(22, 'incoming', 'Yes please, this is Sofia Reyes. I move out next Saturday from Unit 12B, 2 bedrooms of furniture. Call me on +63 917 555 0199 or sofia.reyes@example.com, photos at https://photos.example.com/sofia', 0.01)],
 });
-function fakeRespond(path, auth) {
+// respond.io channels of the fake workspace (the Upselling channel picker)
+const CHANNELS = [{ id: 7701, name: 'Blackhouse WhatsApp (fake)', source: 'whatsapp_cloud' }, { id: 7702, name: 'Blackhouse Viber (fake)', source: 'viber' }];
+function fakeRespond(path, auth, method) {
   if (auth === 'Bearer bad-token') return [401, { message: 'Unauthorized' }];
+  if (path === '/space/channel') return method === 'GET' ? [200, { items: CHANNELS }] : [405, {}];
+  // sends (only reached when a test switches sending on): accepted, and recorded with their bodies by the server below
+  if (method === 'POST') {
+    if (!/^\/contact\/id:\d+\/(message|tag)$/.test(path)) return [405, {}];
+    if (/^\/contact\/id:555003\//.test(path)) return [404, { message: 'Contact not found' }];   // a Respond ID with no contact
+    return [200, { contactId: Number(path.match(/\d+/)[0]), messageId: 1 }];
+  }
   const m = path.match(/^\/contact\/id:(\d+)(\/message\/list)?/);
   if (!m) return [404, {}];
   if (m[1] === '555003') return [404, { message: 'not found' }];
@@ -140,7 +153,8 @@ function createFakeServer() {
       }
       let out;
       if (req.url === '/monday') { calls.monday.push({ method: req.method, auth: req.headers.authorization, body: JSON.parse(data || '{}') }); out = fakeMonday(JSON.parse(data || '{}'), req.headers.authorization, req.headers.host); }
-      else if (req.url.startsWith('/respond')) { const p = req.url.slice('/respond'.length); calls.respond.push({ method: req.method, auth: req.headers.authorization, path: p }); out = fakeRespond(p, req.headers.authorization); }
+      else if (req.url.startsWith('/respond')) { const p = req.url.slice('/respond'.length); let b = null; try { b = data ? JSON.parse(data) : null; } catch (e) { /* not JSON */ }
+        calls.respond.push({ method: req.method, auth: req.headers.authorization, path: p, body: b }); out = fakeRespond(p, req.headers.authorization, req.method); }
       else out = [404, {}];
       res.writeHead(out[0], { 'content-type': 'application/json' }); res.end(JSON.stringify(out[1]));
     });

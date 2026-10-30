@@ -49,6 +49,7 @@ function loadConfig(env = process.env, argv = process.argv) {
     kpiReview: mode === 'mongo' ? loadKpiReviewers(env) : null,
     // Project Pages: optional read-only Google Drive (service account) and the AI reader for "Build from Google Drive"
     projects: mode === 'mongo' ? loadProjectPages(env, isLoopback(host)) : null,
+    storage: mode === 'mongo' ? loadStorage(env, isLoopback(host)) : null,
     ignoredIntegrationVars: mode === 'demo' ? ['MONDAY_TOKEN', 'RESPOND_TOKEN'].filter((k) => String(env[k] || '').trim()) : [],
   };
 }
@@ -144,6 +145,55 @@ function loadProjectPages(env, local) {
   const apiKey = String(env.ANTHROPIC_API_KEY || '').trim();
   const ai = apiKey ? { apiKey, baseURL: apiBase(env, 'ANTHROPIC_BASE_URL', 'https://api.anthropic.com') } : null;
   return { drive, ai };
+}
+
+/** A service account JSON key (as downloaded, or base64 of it) → { email, key }; `name` is the variable, for the error. */
+function serviceAccount(raw, name) {
+  let j = null;
+  try { j = JSON.parse(raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8')); } catch (e) { /* below */ }
+  if (!j || typeof j.client_email !== 'string' || typeof j.private_key !== 'string' || !/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/.test(j.client_email) || !/-----BEGIN PRIVATE KEY-----/.test(j.private_key)) {
+    throw new Error(`${name} must be a Google Cloud service account JSON key (with client_email and private_key), or base64 of it.`);
+  }
+  try { require('crypto').createPrivateKey(j.private_key); } catch (e) { throw new Error(`${name} has a private_key that can't be read.`); }
+  return { email: j.client_email, key: j.private_key };
+}
+
+/**
+ * Files the portal writes to Google Drive (LOI signed copies, deal files) and LOI e-signature. All optional; each part
+ * that isn't set shows a setup state instead. Values are never printed.
+ *   GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON  a service account (separate from the read-only Project Pages one) that is
+ *     a Content manager / Editor of the folders below, in a Shared Drive (service accounts have no storage of their own)
+ *   GOOGLE_DRIVE_LOI_FOLDER_ID / GOOGLE_DRIVE_DEALS_FOLDER_ID  the folders' IDs (from their Drive links)
+ *   LOI_SIGNING=on  signing links can be created; LOI_SIGN_TTL_DAYS (default 14) is how long a link stays valid
+ *   LOI_PDF_CONVERTER  drive (Google's own converter, as the Apps Script) | gotenberg (GOTENBERG_URL) | none
+ *   SMTP_HOST, SMTP_PORT (465), SMTP_USER, SMTP_PASS, SMTP_FROM  email delivery of signing links
+ */
+function loadStorage(env, local) {
+  const v = (k) => String(env[k] || '').trim();
+  if (!local) ['GOOGLE_DRIVE_UPLOAD_URL', 'GOTENBERG_TEST_URL'].forEach((k) => { if (v(k)) throw new Error(`${k} is for local tests only; remove it from this server's variables.`); });
+  const folder = (k) => { const s = v(k); if (s && !/^[\w-]{10,100}$/.test(s)) throw new Error(`${k} must be a Google Drive folder ID (the part after /folders/ in its link).`); return s; };
+  let drive = null;
+  if (v('GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON')) {
+    drive = { ...serviceAccount(v('GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON'), 'GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON'), scope: 'https://www.googleapis.com/auth/drive',
+      apiUrl: apiBase(env, 'GOOGLE_DRIVE_API_URL', 'https://www.googleapis.com/drive/v3'), uploadUrl: apiBase(env, 'GOOGLE_DRIVE_UPLOAD_URL', 'https://www.googleapis.com/upload/drive/v3'),
+      tokenUrl: apiBase(env, 'GOOGLE_DRIVE_TOKEN_URL', 'https://oauth2.googleapis.com/token') };
+  }
+  const ttl = v('LOI_SIGN_TTL_DAYS') ? Number(v('LOI_SIGN_TTL_DAYS')) : 14;
+  if (!(Number.isInteger(ttl) && ttl >= 1 && ttl <= 60)) throw new Error('LOI_SIGN_TTL_DAYS must be a whole number of days from 1 to 60.');
+  const conv = (v('LOI_PDF_CONVERTER') || 'none').toLowerCase();
+  if (!['none', 'drive', 'gotenberg'].includes(conv)) throw new Error('LOI_PDF_CONVERTER must be drive, gotenberg or none.');
+  if (conv === 'gotenberg' && !v('GOTENBERG_URL') && !v('GOTENBERG_TEST_URL')) throw new Error('LOI_PDF_CONVERTER=gotenberg needs GOTENBERG_URL.');
+  const gotUrl = v('GOTENBERG_TEST_URL') || v('GOTENBERG_URL');
+  if (gotUrl && !/^https:\/\/[^\s/]+/.test(gotUrl) && !(local && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(gotUrl.replace(/\/$/, '')))) throw new Error('GOTENBERG_URL must be an https address.');
+  let smtp = null;
+  if (v('SMTP_HOST')) {
+    const port = Number(v('SMTP_PORT') || 465), secure = v('SMTP_SECURE').toLowerCase() !== 'off';
+    if (!secure && !(local && /^(127\.0\.0\.1|localhost)$/.test(v('SMTP_HOST')))) throw new Error('SMTP_SECURE=off is for local tests only.');
+    if (!v('SMTP_FROM') || !/^[^@\s]+@[^@\s]+$/.test(v('SMTP_FROM').replace(/^.*<|>$/g, ''))) throw new Error('SMTP_FROM must be the sender address (e.g. Blackhouse <loi@example.com>).');
+    smtp = { host: v('SMTP_HOST'), port, secure, user: v('SMTP_USER'), pass: v('SMTP_PASS'), from: v('SMTP_FROM') };
+  }
+  return { drive, loiFolder: folder('GOOGLE_DRIVE_LOI_FOLDER_ID'), dealsFolder: folder('GOOGLE_DRIVE_DEALS_FOLDER_ID'),
+    signing: v('LOI_SIGNING').toLowerCase() === 'on', signTtlDays: ttl, pdf: conv, gotenbergUrl: gotUrl.replace(/\/$/, ''), smtp };
 }
 
 /** Hides credentials if a connection string ever ends up in a message. */

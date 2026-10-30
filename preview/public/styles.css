@@ -538,6 +538,15 @@ button.card.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--
 /* Asking for Availability */
 .asklist { display: grid; gap: 12px; }
 .askcard { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px 14px; display: grid; gap: 8px; }
+/* Service Requests, deal files, Upselling mailer */
+table.sv-t td.wrap { white-space: normal; min-width: 220px; max-width: 360px; }
+table.sv-t .tag { margin: 2px 2px 0 0; }
+table.sv-sup input, table.sv-sup select { min-width: 90px; width: 100%; box-sizing: border-box; }
+.df-up { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 6px; }
+.df-up label { font-size: 12px; }
+.up-mail { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-top: 8px; }
+.up-mframe { width: 100%; height: 520px; border: 1px solid var(--line); background: #F6F4F0; margin-top: 6px; }
+@media (max-width: 520px) { .up-mframe { height: 420px; } }
 .ask-h { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
 .ask-owner { display: grid; gap: 6px; }
 .ask-links, .ask-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

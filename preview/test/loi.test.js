@@ -187,14 +187,16 @@ test('routes: templates by Settings editors only; an LOI is made for a visible l
   assert.strictEqual(made.status, 201, JSON.stringify(made.data));
   assert.deepStrictEqual([made.data.loi.status, made.data.loi.missing, made.data.loi.by], ['draft', ['Monthly rent'], 'Ana Agent']);
   const mine = await call('GET', url, { cookie: viewer });
-  assert.deepStrictEqual([mine.data.lois.length, mine.data.sending], [1, false]);
+  assert.deepStrictEqual([mine.data.lois.length, mine.data.signing.enabled, mine.data.signing.ready], [1, false, false]);
   const dl = await call('GET', `${url}/${made.data.loi.id}/docx`, { cookie: viewer });
-  assert.strictEqual(dl.status, 200); assert.match(dl.headers.get('content-disposition'), /attachment/);
+  assert.strictEqual(dl.status, 200, dl.buf.toString().slice(0, 200)); assert.match(dl.headers.get('content-disposition'), /attachment/);
   assert.ok(docx.docText(dl.buf).some((x) => x.includes('Test Client One')));
   assert.strictEqual((await call('GET', `/api/loi/monday/9003/${made.data.loi.id}/docx`, { cookie: boss })).status, 404, 'only under its own lead');
   assert.strictEqual(await Loi.countDocuments(), 1);
-  // there is no route that sends or signs
-  for (const p of [`${url}/${made.data.loi.id}/send`, `${url}/${made.data.loi.id}/sign`]) assert.strictEqual((await call('POST', p, { cookie: boss, body: {} })).status, 404, p);
+  // with signing switched off (this server has no LOI_SIGNING), sending is refused and says what's needed
+  const off = await call('POST', `${url}/${made.data.loi.id}/send`, { cookie: boss, body: { role: 'client', channel: 'link', confirm: true } });
+  assert.strictEqual(off.status, 409); assert.ok(off.data.needs.some((n) => /LOI_SIGNING/.test(n)));
+  assert.strictEqual(await require('../src/models').LoiSignLink.countDocuments(), 0);
   // Settings editors without Leads access can see and manage the templates; members with neither can't list them
   const settings = await login('settings'), nobody = await login('nobody');
   assert.strictEqual((await call('GET', '/api/loi/templates', { cookie: settings })).status, 200);

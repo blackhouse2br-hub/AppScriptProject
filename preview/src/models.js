@@ -146,6 +146,9 @@ const AvailabilityRequest = mongoose.model('AvailabilityRequest', new Schema({
   listingId: { type: String, required: true, maxlength: 40 },
   listingName: { type: String, default: '', maxlength: 160 },
   status: { type: String, enum: ['asking', 'available', 'unavailable'], default: 'asking', index: true },
+  // For Client Approval → For Scheduling (Code.gs chk_ answeredAt, sent_ (apiMarkSent), 'interested' viewing (apiMarkAvailable))
+  answeredAt: { type: Date, default: null }, sentAt: { type: Date, default: null }, sentBy: { type: String, default: '' },
+  interestedAt: { type: Date, default: null }, interestedBy: { type: String, default: '' },
   contacts: { type: [contactSchema], default: [] },   // owner taps (call / WhatsApp / Viber), newest 20 kept
   createdBy: by, updatedBy: by,
 }, opts).index({ source: 1, leadId: 1, listingId: 1 }, { unique: true }));
@@ -303,6 +306,7 @@ const UpsellCampaign = mongoose.model('UpsellCampaign', new Schema({
   text: { type: String, default: '', maxlength: UP.textMax },
   image: { type: new Schema({ id: String, token: String, name: String, size: Number }, { _id: false }), default: null },   // token: the image's public link
   tag: { type: String, default: '', maxlength: 40 },
+  channelId: { type: String, default: '', match: /^\d{0,20}$/ },   // respond.io channel for 1:1 sends ('' = Auto)
   audience: { type: new Schema({ preset: { type: String, enum: UP.presets, default: 'tenants' }, statuses: { type: [String], default: [] },
     type: { type: String, enum: ['', 'Rent', 'Buy'], default: '' }, city: str(60), contact: { type: String, enum: UP.contacts, default: 'respond' },
     skipDays: { type: Number, min: 0, max: 365, default: 14 } }, { _id: false }), default: () => ({}) },
@@ -324,6 +328,57 @@ const UpsellSend = mongoose.model('UpsellSend', new Schema({
 // "never contact": set by staff (e.g. the client replied STOP); excluded from every audience and checked again on send
 const UpsellOptOut = mongoose.model('UpsellOptOut', new Schema({ ...leadRef, by }, opts).index({ source: 1, leadId: 1 }, { unique: true }));
 
+// ---- Upselling history from the Apps Script (scripts/import-legacy-upsell.js): its up_<lead> offers, so "skip if
+// offered in the last N days" counts them. Its upo_<lead> opt-outs go to UpsellOptOut. ----
+const UpsellLegacy = mongoose.model('UpsellLegacy', new Schema({
+  source: { type: String, enum: ['monday'], default: 'monday' }, leadId: { type: String, required: true, index: true },
+  at: { type: Date, required: true }, kind: { type: String, default: '', maxlength: 40 }, action: { type: String, default: 'message', maxlength: 20 },
+}, opts).index({ source: 1, leadId: 1, at: 1, kind: 1, action: 1 }, { unique: true }));
+
+// ---- Service Requests (src/services.js; Code.gs si_<lead> and the suppliers property) ----
+const SVC = require('../public/shared').SERVICES;
+const ServiceRequest = mongoose.model('ServiceRequest', new Schema({
+  source: { type: String, enum: ['mongo', 'monday'], required: true }, leadId: { type: String, required: true, maxlength: 40 },
+  svc: { type: String, enum: SVC.keys, required: true },
+  interest: { type: String, enum: SVC.interests, default: 'no reply' },
+  summary: { type: String, default: '', maxlength: 200 },
+  details: { type: new Schema(Object.fromEntries(SVC.detailKeys.map((k) => [k, { type: String, default: '', maxlength: 200 }])), { _id: false }), default: () => ({}) },
+  stage: { type: String, enum: SVC.stages, default: 'New' },
+  supplierId: { type: String, default: '' }, supplierName: { type: String, default: '', maxlength: 80 },
+  notes: { type: String, default: '', maxlength: 500 },
+  offeredAt: { type: Date, default: null }, lastReply: { type: Date, default: null }, sentToSupplierAt: { type: Date, default: null }, scannedAt: { type: Date, default: null },
+  history: { type: [new Schema({ at: Date, by: String, stage: String, what: String }, { _id: false })], default: [] },   // the last 20 kept
+  version: { type: Number, default: 1 },
+}, opts).index({ source: 1, leadId: 1, svc: 1 }, { unique: true }));
+const Supplier = mongoose.model('Supplier', new Schema({
+  svc: { type: String, enum: SVC.keys, required: true }, name: { type: String, required: true, maxlength: 80 },
+  channel: { type: String, enum: SVC.channels, default: 'whatsapp' }, contact: { type: String, default: '', maxlength: 120 },
+  respondId: { type: String, default: '', match: /^\d{0,20}$/ }, notes: { type: String, default: '', maxlength: 300 },
+  updatedBy: { type: String, default: '' },
+}, opts));
+// a request sent to a supplier through respond.io: written before the send, then marked sent / failed / unknown
+const ServiceSend = mongoose.model('ServiceSend', new Schema({
+  requestId: { type: ObjectId, ref: 'ServiceRequest', required: true, index: true }, supplierId: { type: String, required: true },
+  supplierName: { type: String, default: '' }, text: { type: String, default: '', maxlength: 4000 },
+  status: { type: String, enum: ['sending', 'sent', 'failed', 'unknown'], default: 'sending' }, error: { type: String, default: '' },
+  by: { type: String, default: '' },
+}, opts));
+
+// ---- Deal files (src/deals.js; Code.gs vw_<lead>[listing].deal / .loi.clientSigned / .ownerSigned): per lead and unit ----
+const dealFile = new Schema({ storage: { type: String, enum: ['drive'], default: 'drive' }, fileId: { type: String, required: true }, url: { type: String, default: '' },
+  name: { type: String, default: '' }, type: { type: String, default: '' }, size: { type: Number, default: 0 }, src: { type: String, enum: ['upload', 'esign'], default: 'upload' },
+  at: { type: Date, default: Date.now }, by: { type: String, default: '' } }, { _id: false });
+const dealTermSchema = new Schema({ start: String, months: Number, end: String, renewFrom: String }, { _id: false });
+const DealFile = mongoose.model('DealFile', new Schema({
+  source: { type: String, enum: ['mongo', 'monday'], required: true }, leadId: { type: String, required: true, maxlength: 40 },
+  unitKey: { type: String, required: true, maxlength: 40 },   // the portal viewing's listing, or the Monday Calendar item
+  unitName: { type: String, default: '', maxlength: 160 },
+  slots: { clientLoi: { type: dealFile, default: null }, ownerLoi: { type: dealFile, default: null }, contract: { type: dealFile, default: null }, deposit: { type: dealFile, default: null } },
+  renewals: { type: [new Schema({ file: dealFile, term: dealTermSchema }, { _id: false })], default: [] },
+  term: { type: dealTermSchema, default: null },
+  history: { type: [new Schema({ at: Date, by: String, what: String }, { _id: false })], default: [] },
+}, { ...opts, minimize: false }).index({ source: 1, leadId: 1, unitKey: 1 }, { unique: true }));
+
 // ---- LOI (src/loi.js): the team's Word templates and the LOIs made from them for review (nothing is sent or signed) ----
 const LOI_SLOT_KEYS = Object.keys(require('../public/shared').LOI_SLOTS);
 const LoiTemplate = mongoose.model('LoiTemplate', new Schema({
@@ -337,8 +392,22 @@ const Loi = mongoose.model('Loi', new Schema({
   slot: { type: String, enum: LOI_SLOT_KEYS, required: true }, templateName: { type: String, default: '' }, templateAt: { type: Date, default: null },
   fields: { type: Schema.Types.Mixed, default: {} }, missing: { type: [String], default: [] },
   data: { type: Buffer, required: true },   // the filled .docx, for the team's review
-  status: { type: String, enum: ['draft'], default: 'draft' },   // sending and signing are not available in the portal
+  // the unit it's for (a Monday Calendar item, or the portal viewing's listing): signed copies go to its deal files
+  unitKey: { type: String, default: '', maxlength: 40 }, unitName: { type: String, default: '', maxlength: 160 },
+  // draft → sent (client link) → clientSigned → ownerSent → signed (both). Signing needs LOI_SIGNING=on (src/loiSign.js)
+  status: { type: String, enum: ['draft', 'sent', 'clientSigned', 'ownerSent', 'signed'], default: 'draft' },
+  signed: { type: new Schema({ client: { type: Schema.Types.Mixed, default: null }, owner: { type: Schema.Types.Mixed, default: null } }, { _id: false }), default: () => ({}) },
+  signedData: { type: Buffer, default: null },   // the latest signed .docx
+  pdf: { type: Buffer, default: null },          // the PDF the next signer reads (unsigned for the client, client-signed for the owner)
   createdBy: { type: new Schema(person, { _id: false }), required: true },
 }, { ...opts, minimize: false }));
+// a signing link: only the sha256 of its token is stored; it expires, works once, and a new link replaces the old one
+const LoiSignLink = mongoose.model('LoiSignLink', new Schema({
+  tokenHash: { type: String, required: true, unique: true }, loiId: { type: ObjectId, ref: 'Loi', required: true, index: true },
+  role: { type: String, enum: ['client', 'owner'], required: true }, signerName: { type: String, default: '', maxlength: 120 },
+  expiresAt: { type: Date, required: true }, usedAt: { type: Date, default: null }, revokedAt: { type: Date, default: null },
+  delivery: { channel: { type: String, enum: ['link', 'respond', 'email'], default: 'link' }, to: { type: String, default: '' }, status: { type: String, default: '' } },
+  createdBy: { type: String, default: '' }, failedAttempts: { type: Number, default: 0 },
+}, opts));
 
-module.exports = { LoiTemplate, Loi, Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };
+module.exports = { UpsellLegacy, LoiSignLink, DealFile, ServiceRequest, Supplier, ServiceSend, LoiTemplate, Loi, Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };

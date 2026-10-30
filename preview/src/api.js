@@ -13,6 +13,8 @@ const { kpiReviewRoutes } = require('./kpiReview');
 const { projectRoutes } = require('./projects');
 const { upsellRoutes } = require('./upsell');
 const { loiRoutes } = require('./loi');
+const { serviceRoutes } = require('./services');
+const { dealRoutes } = require('./deals');
 
 const bad = (res, errors) => res.status(400).json({ error: errors[0], errors });
 const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'propreq', 'brokers'];
@@ -35,7 +37,7 @@ function apiRouter(config) {
       if (host !== req.headers.host) return res.status(403).json({ error: 'Cross-site request blocked.' });
     }
     // JSON only; the exceptions are file uploads (the file itself, checked by projects.js / projectMedia.js / docx.js)
-    const upload = req.method === 'POST' && /^\/(projects\/[a-f0-9]{24}\/media|upsell\/campaigns\/[a-f0-9]{24}\/image|loi\/templates\/(lease|absolute|conditional))$/.test(req.path);
+    const upload = req.method === 'POST' && /^\/(projects\/[a-f0-9]{24}\/media|upsell\/campaigns\/[a-f0-9]{24}\/image|loi\/templates\/(lease|absolute|conditional)|deals\/(mongo|monday)\/[\w-]{1,40}\/[\w-]{1,40}\/(clientLoi|ownerLoi|contract|deposit|renewal))$/.test(req.path);
     if (!upload && !req.is('application/json') && req.headers['content-length'] !== '0' && req.method !== 'DELETE') return res.status(415).json({ error: 'Send JSON.' });
     next();
   });
@@ -114,9 +116,16 @@ function apiRouter(config) {
     if (errors.length) return bad(res, errors);
     const a = await askFor(req, res); if (!a) return;
     // contact taps are logged only (the link itself opens on the user's device); the newest SH.ASK.logMax are kept
-    const update = value.contacted
-      ? { $push: { contacts: { $each: [{ via: value.contacted, by: req.user.name }], $slice: -SH.ASK.logMax } }, $set: { updatedBy: who(req) } }
-      : { $set: { status: value.status, updatedBy: who(req) } };
+    let update;
+    if (value.contacted) update = { $push: { contacts: { $each: [{ via: value.contacted, by: req.user.name }], $slice: -SH.ASK.logMax } }, $set: { updatedBy: who(req) } };
+    // the owner's answer (answeredAt); "← Back to Asking" (status asking) clears sent / interested, as Code.gs apiSetCheck 'reset'
+    else if (value.status) update = { $set: { status: value.status, updatedBy: who(req), ...(value.status === 'asking' ? { answeredAt: null, sentAt: null, sentBy: '', interestedAt: null, interestedBy: '' } : a.status !== value.status ? { answeredAt: new Date() } : {}) } };
+    else {
+      // sent to the client / client interested: only for a unit the owner confirmed (Code.gs apiMarkSent / apiMarkAvailable)
+      if (a.status !== 'available') return res.status(409).json({ error: 'The owner hasn\'t confirmed this unit is available yet.' });
+      update = 'sent' in value ? { $set: value.sent ? { sentAt: new Date(), sentBy: req.user.name, updatedBy: who(req) } : { sentAt: null, sentBy: '', updatedBy: who(req) } }
+        : { $set: value.interested ? { interestedAt: new Date(), interestedBy: req.user.name, updatedBy: who(req) } : { interestedAt: null, interestedBy: '', updatedBy: who(req) } };
+    }
     res.json({ request: await AvailabilityRequest.findByIdAndUpdate(a._id, update, { returnDocument: 'after', runValidators: true }) });
   });
   r.delete('/asking/:rid', need('leads', 'edit'), async (req, res) => {
@@ -246,8 +255,9 @@ function apiRouter(config) {
       let all; try { all = await integ.monday.loadAll(false); } catch (err) { if (!err.integration) throw err; return res.status(502).json({ error: err.message }); }
       ids = scopeExternal(req.user, { leads: all.leads, viewings: all.viewings, listings: [] }).leads.map((l) => l.id);
     }
-    const rows = await AvailabilityRequest.find({ source, status: 'asking', leadId: { $in: ids } }, { leadId: 1, listingName: 1, createdAt: 1 }).sort({ createdAt: 1 }).limit(5000).lean();
-    res.json({ rows: rows.map((x) => ({ leadId: x.leadId, listingName: x.listingName, at: x.createdAt })) });
+    // asking, and confirmed by the owner (For Client Approval / For Scheduling, Code.gs apiGetVaPortal)
+    const rows = await AvailabilityRequest.find({ source, status: { $in: ['asking', 'available'] }, leadId: { $in: ids } }, { leadId: 1, listingId: 1, listingName: 1, status: 1, createdAt: 1, answeredAt: 1, sentAt: 1, interestedAt: 1 }).sort({ createdAt: 1 }).limit(5000).lean();
+    res.json({ rows: rows.map((x) => ({ leadId: x.leadId, listingId: x.listingId, listingName: x.listingName, stage: SH.askStage(x), at: x.interestedAt || x.sentAt || x.answeredAt || x.createdAt })) });
   });
   /** The renewal log of the clients this user can see: { leadId: [{ kind, at, by }] } (newest first, 12 each). */
   r.get('/renewals/log', need('renewals', 'view'), async (req, res) => {
@@ -383,8 +393,12 @@ function apiRouter(config) {
   projectRoutes(r, config);
   // Upselling: offers to clients, sent 1:1 or tagged through respond.io (sending off unless RESPOND_SENDS=on)
   upsellRoutes(r, config, integ);
-  // LOI: the team's Word templates and LOIs filled from them for review (no sending or e-signature)
-  loiRoutes(r, config, integ);
+  // deal files (signed LOIs, contract, deposit slip, renewals) in Google Drive, and LOI e-signature
+  const deals = dealRoutes(r, config, integ);
+  // LOI: the team's Word templates, LOIs filled from them, and signing links (src/loiSign.js)
+  r.loiSign = loiRoutes(r, config, integ, deals);
+  // Service Requests: interest read from replies to services offers (AI), suppliers, anonymised requests to them
+  serviceRoutes(r, config, integ);
 
   // Monday.com / respond.io (status, live reads); nothing is written to either service except the allowlisted,
   // confirmed Monday updates (POST /monday/write, mondayWrite.js; off unless MONDAY_WRITES=on)

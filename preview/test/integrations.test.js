@@ -246,6 +246,34 @@ test('VA Portal "Asking owner": the open Asking records of the clients this memb
   assert.deepStrictEqual((await call(base, 'GET', '/api/asking/open?source=mongo', ana)).data.rows, [], 'per source');
 });
 
+test('For Client Approval → For Scheduling (Code.gs apiMarkSent / apiMarkAvailable): stages, rules and the VA Portal groups', async () => {
+  const boss = await login(base, 'boss@example.com');
+  const send = (method, url, body) => fetch(base + url, { method, headers: { 'content-type': 'application/json', cookie: boss }, body: JSON.stringify(body) }).then(async (x) => ({ status: x.status, data: await x.json() }));
+  const reqs = (await call(base, 'GET', '/api/leads/monday/9001/asking', boss)).data.requests, a = reqs[0];
+  const stage = async () => (await call(base, 'GET', '/api/asking/open?source=monday', boss)).data.rows.find((r) => r.leadId === '9001').stage;
+  assert.strictEqual(await stage(), 'asking');
+  assert.strictEqual((await send('PATCH', '/api/asking/' + a.id, { sent: true })).status, 409, 'only units the owner confirmed');
+  const av = await send('PATCH', '/api/asking/' + a.id, { status: 'available' });
+  assert.ok(av.data.request.answeredAt);
+  assert.strictEqual(await stage(), 'apprNew');
+  const sent = await send('PATCH', '/api/asking/' + a.id, { sent: true });
+  assert.deepStrictEqual([!!sent.data.request.sentAt, sent.data.request.sentBy], [true, 'Test Manager']);
+  assert.strictEqual(await stage(), 'apprSent');
+  assert.strictEqual((await send('PATCH', '/api/asking/' + a.id, { interested: true })).status, 200);
+  assert.strictEqual(await stage(), 'sched');
+  assert.strictEqual((await send('PATCH', '/api/asking/' + a.id, { interested: 'yes' })).status, 400);
+  assert.strictEqual((await send('PATCH', '/api/asking/' + a.id, { sent: true, interested: true })).status, 400, 'one change at a time');
+  // "← Back to Asking" clears the owner's answer and both markers
+  const back = (await send('PATCH', '/api/asking/' + a.id, { status: 'asking' })).data.request;
+  assert.deepStrictEqual([back.sentAt, back.interestedAt, back.answeredAt], [null, null, null]);
+  assert.strictEqual(await stage(), 'asking');
+  // the shared rules and the Apps Script's message text
+  const SH = require('../public/shared');
+  assert.deepStrictEqual(['asking', 'unavailable', 'available', 'available', 'available'].map((s, i) => SH.askStage({ status: s, sentAt: i === 3 ? 1 : i === 4 ? 1 : null, interestedAt: i === 4 ? 1 : null })), ['asking', '', 'apprNew', 'apprSent', 'sched']);
+  assert.match(SH.approvalText([{ name: 'Fake Tower', building: 'Fake Tower', city: 'Makati', price: 180000, type: 'For Rent', bedrooms: '2' }]), /^Hi! Good news — this unit is available and matches what you're looking for:\n\n🏠 Fake Tower\n📍 Fake Tower, Makati\n💰 ₱180,000 \/ month\n🛏 2 BR/);
+  assert.match(SH.approvalText([{ name: 'A' }, { name: 'B' }]), /^Hi! Good news — these units are available/);
+});
+
 test('listing photos: proxied, image types only, Monday token never sent to the file host', async () => {
   const boss = await login(base, 'boss@example.com');
   const listings = (await call(base, 'GET', '/api/monday/bootstrap', boss)).data.listings;

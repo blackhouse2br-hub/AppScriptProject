@@ -68,7 +68,13 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 | `KPI_REVIEWER_JONJO_EMAIL` | for KPI Review | Jonjo's own Google account email, as in Team & Access. Must differ from Toby's. `blackhouse2br@gmail.com` is refused. |
 | `RESPOND_SENDS` | optional | leave **unset** (off). `on` lets Upselling send 1:1 messages and tag contacts through respond.io, each batch reviewed and confirmed by the operator. `RESPOND_TOKEN` must be allowed to send and tag. |
 | `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` | optional 🔒 | Project Pages "Add from Drive" / "Build from Google Drive": a service account's JSON key (or base64 of it). See "Google Drive for Project Pages" below. Unset: projects, uploads and pages still work. |
-| `ANTHROPIC_API_KEY` | optional 🔒 | lets "Build from Google Drive" fill empty fields from the folder's documents (Claude Opus 5.5; results are reviewed before saving). Unset: Build only adds the folder's media. |
+| `ANTHROPIC_API_KEY` | optional 🔒 | lets "Build from Google Drive" fill empty fields from the folder's documents (Claude Opus 5.5; results are reviewed before saving), and Service Requests "Check replies" mark interest per service (Claude Haiku 5.5). Unset: Build only adds the folder's media; Check replies only finds the offers. |
+| `GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON` | optional 🔒 | LOI signed copies and deal files: a **second** service account (not the read-only one) that is a Content manager of the folders below, in a **Shared Drive**. Unset: those show a setup state. |
+| `GOOGLE_DRIVE_LOI_FOLDER_ID` / `GOOGLE_DRIVE_DEALS_FOLDER_ID` | optional | the folders' IDs (after `/folders/` in their links): signed LOIs and their PDFs; signed contracts, deposit slips, renewal contracts |
+| `LOI_SIGNING` | optional | leave **unset** (off) until the checks under "Before production" pass. `on` lets staff create LOI signing links. |
+| `LOI_SIGN_TTL_DAYS` / `LOI_SIGN_SECRET` | optional | days a signing link stays valid (default 14); a long random text so open signing pages survive a restart (🔒) |
+| `LOI_PDF_CONVERTER` / `GOTENBERG_URL` | optional | `drive` (Google's converter through the writer account, as the Apps Script), `gotenberg` (a LibreOffice service at `GOTENBERG_URL`, https), or `none` (no PDF; the signed copy is a .docx) |
+| `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 🔒 `SMTP_FROM` | optional | email for LOI signing links and Upselling "send test to me" (implicit TLS, port 465). Unset: links are copied instead. |
 
 **Google Drive for Project Pages (optional, read-only).** No callback URL, consent screen or user sign-in is involved:
 1. Google Cloud Console → a project → **APIs & Services → Library → Google Drive API → Enable**.
@@ -78,6 +84,12 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 3. Paste the JSON (or base64 of it) into `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`.
 4. In Drive, **share each project folder with the service account's email as Viewer** (for a shared drive, add it as
    a member). The portal reads only what is shared with it (scope `drive.readonly`) and never changes Drive.
+
+**Google Drive for LOI signing and deal files (optional, writes).** Same steps 1–2 as above for a second service
+account; then create a **Shared Drive** (service accounts have no storage of their own, so uploads into a person's My
+Drive fail), add the service account as **Content manager**, create the two folders in it and put their IDs in
+`GOOGLE_DRIVE_LOI_FOLDER_ID` and `GOOGLE_DRIVE_DEALS_FOLDER_ID`. The portal never shares files with "anyone with the
+link": signers open the PDF through their signing link, staff through the portal.
 
 **Upselling images** are sent to respond.io as links to `<PUBLIC_API_URL>/upsell-media/<random token>`; respond.io
 must be able to reach that address (it can on Railway). **Project inquiry form:** set the form endpoint in Project
@@ -95,6 +107,7 @@ email: that member ID is their employee ID, and it's how they acknowledge "We di
 * `PORT`: Railway sets it.
 * `PORTAL_URL`: leave it unset, because Railway serves the page itself. It's only for a page hosted on another domain you own.
 * `MONDAY_API_URL`, `RESPOND_API_URL`, `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL`, `GOOGLE_JWKS_URL`: these are for local test servers only. The server refuses them unless they point to 127.0.0.1.
+* `GOOGLE_DRIVE_UPLOAD_URL`, `GOTENBERG_TEST_URL`, `SMTP_SECURE`: local tests only; refused on a server others can reach.
 
 The app checks all of this at startup. If anything is missing or unsafe, it stops with a one-line message in the
 deploy log naming the variable, and never prints the values.
@@ -165,6 +178,12 @@ Production (`NODE_ENV=production`) stays blocked in `src/config.js` until all of
 - [ ] Upselling: with `RESPOND_SENDS` unset nothing can be sent; before turning it on, Team & Access `upsell: edit` grants are
       reviewed and one small batch to a test contact is sent and checked in respond.io.
 - [ ] Project Pages: a test project's brochure downloads and photos show on its published page, then it is unpublished.
+- [ ] Upselling history: the Apps Script's Script Properties are exported and `scripts/import-legacy-upsell.js` is run
+      (dry run first, then `--apply`), so its opt-outs (`upo_*`) and recent offers (`up_*`) are honoured.
+- [ ] LOI signing (before `LOI_SIGNING=on`): a test LOI is sent to a staff member's own email, signed on a phone, and
+      the signed .docx / PDF open correctly in Word and appear in the LOI folder and the deal's files.
+- [ ] Service Requests: suppliers entered by a Manager; with `ANTHROPIC_API_KEY`, "Check replies" on a test client
+      marks interest correctly and keeps no client name or number in the request text.
 
 After that, a small code change removes the block (the "Production start is still blocked" check in `src/config.js`),
 and `NODE_ENV` can be set to `production`.
