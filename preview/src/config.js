@@ -27,14 +27,10 @@ function loadConfig(env = process.env, argv = process.argv) {
   if (!(sessionHours > 0 && sessionHours <= 24 * 30)) throw new Error('SESSION_HOURS must be between 1 and 720.');
   const host = String(env.HOST || '127.0.0.1');
   if (mode === 'demo' && !isLoopback(host)) throw new Error('Demo mode has no sign-in, so it only listens on this computer (HOST=127.0.0.1).');
-  // sign-in method and page/API addresses (GitHub Pages + Railway); every check runs before the production block below
+  // sign-in method and page/API addresses (GitHub Pages + Railway); every check runs before the production checks below
   const { web, auth } = mode === 'mongo' ? loadDeploy(env, { host, port, production }) : { web: null, auth: null };
 
-  // Production stays blocked until Google sign-in and the Pages + Railway setup have been tested on a real deployment
-  // (DEPLOYMENT.md, "Before production"). The configuration above is already fully checked, so errors show first.
-  if (mode === 'mongo' && production) throw new Error('Production start is still blocked: Google sign-in is required before production, and it and the GitHub Pages + Railway setup must first be tested on a staging deployment (see DEPLOYMENT.md, "Before production").');
-
-  return {
+  const cfg = {
     mode,
     mongoUri: mode === 'mongo' ? uri : '',
     production,
@@ -52,6 +48,10 @@ function loadConfig(env = process.env, argv = process.argv) {
     storage: mode === 'mongo' ? loadStorage(env, isLoopback(host)) : null,
     ignoredIntegrationVars: mode === 'demo' ? ['MONDAY_TOKEN', 'RESPOND_TOKEN'].filter((k) => String(env[k] || '').trim()) : [],
   };
+  // Production starts only when Google sign-in, the public address, the database, the KPI reviewers and the owner's
+  // completed "Before production" checklist are all in place (src/production.js). Every other setting is checked first.
+  if (mode === 'mongo' && production) require('./production').assertProductionReady(env, cfg);
+  return cfg;
 }
 
 const boardId = (env, key) => {
@@ -72,6 +72,13 @@ function writeLimit(env) {
   if (!v) return 10;
   if (!/^\d{1,2}$/.test(v) || Number(v) < 1 || Number(v) > 60) throw new Error('MONDAY_WRITE_LIMIT must be a number from 1 to 60 (Monday updates per user per minute).');
   return Number(v);
+}
+function sendOnlyTo(env) {
+  const v = String(env.RESPOND_SEND_ONLY_TO || '').trim();
+  if (!v) return [];
+  const ids = v.split(/[\s,]+/).filter(Boolean);
+  if (ids.length > 10 || ids.some((x) => !/^\d{1,20}$/.test(x))) throw new Error('RESPOND_SEND_ONLY_TO must be up to 10 respond.io contact IDs (digits), separated by commas.');
+  return ids;
 }
 function columnId(env, key) {
   const v = String(env[key] || '').trim();
@@ -96,11 +103,16 @@ function loadIntegrations(env) {
       token: String(env.RESPOND_TOKEN || '').trim(),
       apiUrl: apiBase(env, 'RESPOND_API_URL', 'https://api.respond.io/v2'),
       spaceId: /^\d{1,20}$/.test(String(env.RESPOND_SPACE_ID || '').trim()) ? String(env.RESPOND_SPACE_ID).trim() : '',
+      // set but not a number (e.g. a pasted link): reported, so the missing inbox links are explained
+      spaceIdInvalid: !!String(env.RESPOND_SPACE_ID || '').trim() && !/^\d{1,20}$/.test(String(env.RESPOND_SPACE_ID).trim()),
       // list-wide reply-state checks (last 15 messages of every visible lead) are off unless switched on;
       // with them off, respond.io is read only when someone opens a lead's Chat tab
       listChecks: String(env.RESPOND_LIST_CHECKS || '').trim().toLowerCase() === 'on',
       // Upselling sends (messages and tags to clients, each one confirmed): off unless switched on explicitly
       sends: String(env.RESPOND_SENDS || '').trim().toLowerCase() === 'on',
+      // a controlled test: the only respond.io contact IDs anything may be sent to or tagged (comma-separated);
+      // every other contact is refused before a record is written. Unset = no restriction.
+      onlyTo: sendOnlyTo(env),
     },
   };
 }
@@ -125,7 +137,8 @@ function loadKpiReviewers(env) {
 /**
  * GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: the service account's JSON key (as downloaded, or base64 of it). Unset: Drive
  * features are off and Project Pages works without them. ANTHROPIC_API_KEY: reads Drive documents for "Build from
- * Google Drive"; unset: that only imports the folder's media. Values are never printed.
+ * Google Drive" (unset: that only imports the folder's media) and client replies for Service Requests "Check replies"
+ * (unset: only the offers are listed). Values are never printed.
  */
 function loadProjectPages(env, local) {
   // the test-only overrides for these services are refused outright on a server others can reach
@@ -164,6 +177,11 @@ function serviceAccount(raw, name) {
  *   GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON  a service account (separate from the read-only Project Pages one) that is
  *     a Content manager / Editor of the folders below, in a Shared Drive (service accounts have no storage of their own)
  *   GOOGLE_DRIVE_LOI_FOLDER_ID / GOOGLE_DRIVE_DEALS_FOLDER_ID  the folders' IDs (from their Drive links)
+ * or, for an account without Shared drives (src/driveStore.js):
+ *   GOOGLE_DRIVE_OAUTH=on  a Manager connects one Google account's My Drive in Settings (scope drive.file: the portal
+ *     sees only the folders and files it creates there). Uses the sign-in OAuth client (GOOGLE_CLIENT_ID /
+ *     GOOGLE_CLIENT_SECRET) unless GOOGLE_DRIVE_OAUTH_CLIENT_ID / GOOGLE_DRIVE_OAUTH_CLIENT_SECRET name another one.
+ *   GOOGLE_DRIVE_TOKEN_KEY  32 random bytes (base64 or hex) that encrypt the stored refresh token
  *   LOI_SIGNING=on  signing links can be created; LOI_SIGN_TTL_DAYS (default 14) is how long a link stays valid
  *   LOI_PDF_CONVERTER  drive (Google's own converter, as the Apps Script) | gotenberg (GOTENBERG_URL) | none
  *   SMTP_HOST, SMTP_PORT (465), SMTP_USER, SMTP_PASS, SMTP_FROM  email delivery of signing links
@@ -177,6 +195,26 @@ function loadStorage(env, local) {
     drive = { ...serviceAccount(v('GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON'), 'GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON'), scope: 'https://www.googleapis.com/auth/drive',
       apiUrl: apiBase(env, 'GOOGLE_DRIVE_API_URL', 'https://www.googleapis.com/drive/v3'), uploadUrl: apiBase(env, 'GOOGLE_DRIVE_UPLOAD_URL', 'https://www.googleapis.com/upload/drive/v3'),
       tokenUrl: apiBase(env, 'GOOGLE_DRIVE_TOKEN_URL', 'https://oauth2.googleapis.com/token') };
+  }
+  let oauth = null;
+  const oauthFlag = v('GOOGLE_DRIVE_OAUTH').toLowerCase();
+  if (oauthFlag && !['on', 'off'].includes(oauthFlag)) throw new Error('GOOGLE_DRIVE_OAUTH must be on or off.');
+  if (oauthFlag === 'on') {
+    if (drive) throw new Error('Set either GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON (a Shared Drive) or GOOGLE_DRIVE_OAUTH=on (a My Drive), not both.');
+    const own = !!(v('GOOGLE_DRIVE_OAUTH_CLIENT_ID') || v('GOOGLE_DRIVE_OAUTH_CLIENT_SECRET'));
+    const clientId = own ? v('GOOGLE_DRIVE_OAUTH_CLIENT_ID') : v('GOOGLE_CLIENT_ID'), clientSecret = own ? v('GOOGLE_DRIVE_OAUTH_CLIENT_SECRET') : v('GOOGLE_CLIENT_SECRET');
+    const names = own ? 'GOOGLE_DRIVE_OAUTH_CLIENT_ID and GOOGLE_DRIVE_OAUTH_CLIENT_SECRET' : 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (the sign-in client)';
+    if (!clientId || !clientSecret) throw new Error(`GOOGLE_DRIVE_OAUTH=on needs ${names}.`);
+    if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(clientId)) throw new Error(`${own ? 'GOOGLE_DRIVE_OAUTH_CLIENT_ID' : 'GOOGLE_CLIENT_ID'} should look like 1234-abc.apps.googleusercontent.com.`);
+    const rawKey = v('GOOGLE_DRIVE_TOKEN_KEY');
+    const key = /^[0-9a-f]{64}$/i.test(rawKey) ? Buffer.from(rawKey, 'hex') : /^[A-Za-z0-9+/_-]{43}=?$/.test(rawKey) ? Buffer.from(rawKey.replace(/-/g, '+').replace(/_/g, '/'), 'base64') : null;
+    if (!key || key.length !== 32) throw new Error('GOOGLE_DRIVE_OAUTH=on needs GOOGLE_DRIVE_TOKEN_KEY: 32 random bytes as base64 or hex, e.g. from  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
+    oauth = { clientId, clientSecret, key, ownClient: own,
+      authUrl: apiBase(env, 'GOOGLE_AUTH_URL', 'https://accounts.google.com/o/oauth2/v2/auth'), tokenUrl: apiBase(env, 'GOOGLE_TOKEN_URL', 'https://oauth2.googleapis.com/token'),
+      jwksUrl: apiBase(env, 'GOOGLE_JWKS_URL', 'https://www.googleapis.com/oauth2/v3/certs'), revokeUrl: apiBase(env, 'GOOGLE_REVOKE_URL', 'https://oauth2.googleapis.com/revoke'),
+      apiUrl: apiBase(env, 'GOOGLE_DRIVE_API_URL', 'https://www.googleapis.com/drive/v3'), uploadUrl: apiBase(env, 'GOOGLE_DRIVE_UPLOAD_URL', 'https://www.googleapis.com/upload/drive/v3'),
+      // the portal makes its own folders in that Drive; folder IDs from variables can't be reached with drive.file
+      ignoredFolders: ['GOOGLE_DRIVE_LOI_FOLDER_ID', 'GOOGLE_DRIVE_DEALS_FOLDER_ID'].filter((k) => v(k)) };
   }
   const ttl = v('LOI_SIGN_TTL_DAYS') ? Number(v('LOI_SIGN_TTL_DAYS')) : 14;
   if (!(Number.isInteger(ttl) && ttl >= 1 && ttl <= 60)) throw new Error('LOI_SIGN_TTL_DAYS must be a whole number of days from 1 to 60.');
@@ -192,13 +230,14 @@ function loadStorage(env, local) {
     if (!v('SMTP_FROM') || !/^[^@\s]+@[^@\s]+$/.test(v('SMTP_FROM').replace(/^.*<|>$/g, ''))) throw new Error('SMTP_FROM must be the sender address (e.g. Blackhouse <loi@example.com>).');
     smtp = { host: v('SMTP_HOST'), port, secure, user: v('SMTP_USER'), pass: v('SMTP_PASS'), from: v('SMTP_FROM') };
   }
-  return { drive, loiFolder: folder('GOOGLE_DRIVE_LOI_FOLDER_ID'), dealsFolder: folder('GOOGLE_DRIVE_DEALS_FOLDER_ID'),
-    signing: v('LOI_SIGNING').toLowerCase() === 'on', signTtlDays: ttl, pdf: conv, gotenbergUrl: gotUrl.replace(/\/$/, ''), smtp };
+  return { drive, oauth, loiFolder: oauth ? '' : folder('GOOGLE_DRIVE_LOI_FOLDER_ID'), dealsFolder: oauth ? '' : folder('GOOGLE_DRIVE_DEALS_FOLDER_ID'),
+    signing: v('LOI_SIGNING').toLowerCase() === 'on', signTtlDays: ttl, signSecret: v('LOI_SIGN_SECRET'), pdf: conv, gotenbergUrl: gotUrl.replace(/\/$/, ''), smtp };
 }
 
 /** Hides credentials if a connection string ever ends up in a message. */
 const redact = (s) => String(s).replace(/(mongodb(?:\+srv)?:\/\/)[^@/\s]+@/gi, '$1***@').replace(/(Bearer\s+)[^\s"']+/gi, '$1***')
-  .replace(/\b(GOCSPX-)[\w-]+/g, '$1***').replace(/\b(client_secret|code_verifier|code|assertion)=[^&\s"']+/gi, '$1=***')
+  .replace(/\b(GOCSPX-)[\w-]+/g, '$1***').replace(/\b(client_secret|code_verifier|code|assertion|refresh_token|access_token|token)=[^&\s"']+/gi, '$1=***')
+  .replace(/\b(1\/\/[\w-]{20,}|ya29\.[\w.-]+)/g, '***')
   .replace(/-----BEGIN PRIVATE KEY-----[\s\S]*?(-----END PRIVATE KEY-----|$)/g, '[private key]').replace(/\bsk-ant-[\w-]+/g, 'sk-ant-***');
 
 module.exports = { loadConfig, redact, MODES };

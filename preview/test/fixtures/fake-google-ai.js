@@ -56,7 +56,7 @@ function createFakeGoogle(sa, files = demoDrive()) {
           const meta = JSON.parse(parts[0].toString('utf8')), parent = (meta.parents || [])[0];
           if (!files[parent] || files[parent].mimeType !== 'application/vnd.google-apps.folder') return send(404, { error: { code: 404, errors: [{ reason: 'notFound' }] } });
           const id = 'Up' + crypto.randomBytes(9).toString('hex');
-          files[id] = { name: meta.name, mimeType: meta.mimeType || (heads[1].match(/Content-Type: ([^\r\n]+)/) || [, 'application/octet-stream'])[1], parent, body: parts[1] };
+          files[id] = { name: meta.name, mimeType: meta.mimeType || (heads[1].match(/Content-Type: ([^\r\n]+)/) || [, 'application/octet-stream'])[1], parent, body: parts[1], appProperties: meta.appProperties || {} };
           server.uploads.push({ id, name: meta.name, mimeType: files[id].mimeType, parent, size: parts[1].length });
           return send(200, { id, name: meta.name, webViewLink: `https://drive.example.invalid/file/d/${id}/view` });
         }
@@ -68,6 +68,9 @@ function createFakeGoogle(sa, files = demoDrive()) {
       }
       if (req.method !== 'GET' || (auth !== 'Bearer fake-drive-token' && auth !== 'Bearer fake-drive-write-token')) return send(401, { error: { code: 401, errors: [{ reason: 'authError' }] } });
       if (u.pathname === '/drive/v3/files') {
+        // a tag search (appProperties): the files uploaded with that key
+        const tagged = (u.searchParams.get('q').match(/key='(\w+)' and value='([\w-]+)'/) || []);
+        if (tagged[1]) return send(200, { files: Object.entries(files).filter(([, f]) => (f.appProperties || {})[tagged[1]] === tagged[2]).map(([id, f]) => ({ id, name: f.name, webViewLink: `https://drive.example.invalid/file/d/${id}/view` })) });
         const parent = (u.searchParams.get('q').match(/'([^']+)' in parents/) || [])[1];
         return send(200, { files: Object.entries(files).filter(([, f]) => f.parent === parent).map(([id, f]) => ({ id, name: f.name, mimeType: f.mimeType, size: String((f.body || '').length), capabilities: { canDownload: true } })) });
       }

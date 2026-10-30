@@ -139,7 +139,8 @@ test('LOI signing: off unless set up; one-use, expiring link; client then owner;
   assert.match((await post({ name: 'Test Client One', agree: true, signature: sigUrl(), nonce: 'wrong' + nonce.slice(5) })).data.error, /out of date/);
   assert.match((await post({ name: 'Test Client One', agree: false, signature: sigUrl(), nonce })).data.error, /Tick the box/);
   assert.match((await post({ name: 'Test Client One', agree: true, signature: 'data:image/png;base64,AAAA', nonce })).data.error, /could not be read/);
-  assert.strictEqual((await LoiSignLink.findOne().lean()).failedAttempts, 3);
+  // the out-of-date page key isn't counted (an open page after a restart is not an attack); the other two are
+  assert.strictEqual((await LoiSignLink.findOne().lean()).failedAttempts, 2);
   const ok = await post({ name: 'Test Client One', agree: true, signature: sigUrl(), nonce });
   assert.strictEqual(ok.status, 200, JSON.stringify(ok.data));
   // one use only: replay refused, page says signed
@@ -213,7 +214,8 @@ test('deal files: uploads checked by content, to the unit of this client, into D
   const pdf = Buffer.from('%PDF-1.4\n% a made-up signed contract\n%%EOF');
   // not set up: a clear setup state
   const ns = await call(nodriveBase, 'POST', u + '/contract', { cookie: await login('boss', nodriveBase), file: pdf });
-  assert.strictEqual(ns.status, 503, JSON.stringify(ns.data)); assert.strictEqual(ns.data.needs.length, 2, JSON.stringify(ns.data));
+  assert.strictEqual(ns.status, 503, JSON.stringify(ns.data));
+  assert.ok(ns.data.needs.some((n) => /GOOGLE_DRIVE_OAUTH=on/.test(n) && /GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON/.test(n)), 'both ways to set it up are named: ' + JSON.stringify(ns.data));
   assert.deepStrictEqual((await call(nodriveBase, 'GET', '/api/deals/monday/9001', { cookie: await login('boss', nodriveBase) })).data.setup.ready, false);
   // checks
   assert.match((await call(base, 'POST', u + '/contract', { cookie: boss, file: Buffer.from('MZ fake executable ...........') })).data.error, /Only PDF, JPEG/);
@@ -247,4 +249,26 @@ test('deal files: uploads checked by content, to the unit of this client, into D
   assert.strictEqual(SH.dealStageOf({ slots: { clientLoi: 1, ownerLoi: 1 } }, true, '2027-01-01'), 'contract');
   // a JSON body is not an upload anywhere else
   assert.strictEqual((await call(base, 'POST', '/api/deals/monday/9001/6001/other', { cookie: boss, file: pdf })).status, 415);
+});
+
+test('a signing interrupted halfway (the server stopped) leaves the link usable again a few minutes later', async () => {
+  const boss = await login('boss');
+  const made = await call(base, 'POST', '/api/loi/monday/9001', { cookie: boss, body: { slot: 'lease', fields: FIELDS } });
+  assert.strictEqual(made.status, 201, JSON.stringify(made.data));
+  const sent = await call(base, 'POST', `/api/loi/monday/9001/${made.data.loi.id}/send`, { cookie: boss, body: { role: 'client', channel: 'link', confirm: true } });
+  assert.strictEqual(sent.status, 201, JSON.stringify(sent.data));
+  const link = pathOf(sent.data.link), nonce = nonceOf((await call(base, 'GET', link)).text);
+  const sign = () => call(base, 'POST', link, { body: { name: 'Test Client One', agree: true, signature: sigUrl(), nonce } });
+  // being signed right now (another submit, or a server that stopped mid-way): refused, not used up
+  await LoiSignLink.updateOne({ loiId: made.data.loi.id }, { $set: { claimUntil: new Date(Date.now() + 60e3) } });
+  assert.match((await call(base, 'GET', link)).text, /being signed right now/);
+  assert.strictEqual((await sign()).status, 409);
+  assert.strictEqual((await LoiSignLink.findOne({ loiId: made.data.loi.id }).lean()).usedAt, null, 'not counted as used');
+  // the claim has run out: the signer can finish, and only then is the link used
+  await LoiSignLink.updateOne({ loiId: made.data.loi.id }, { $set: { claimUntil: new Date(Date.now() - 1000) } });
+  const ok = await sign();
+  assert.strictEqual(ok.status, 200, JSON.stringify(ok.data));
+  const l = await LoiSignLink.findOne({ loiId: made.data.loi.id }).lean();
+  assert.ok(l.usedAt && !l.claimUntil);
+  assert.strictEqual((await Loi.findById(made.data.loi.id).lean()).status, 'clientSigned');
 });

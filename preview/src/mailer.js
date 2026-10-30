@@ -1,6 +1,8 @@
 'use strict';
-// A minimal SMTP client (no dependency) for emailing LOI signing links, as the Apps Script used MailApp: implicit TLS
-// (port 465) with AUTH LOGIN, or plain only for a local test server. One message per connection; never logs the password.
+// A minimal SMTP client (no dependency) for emailing LOI signing links, as the Apps Script used MailApp: implicit TLS on
+// port 465, STARTTLS on any other port (587), with AUTH LOGIN; plain only for a local test server (SMTP_SECURE=off).
+// One message per connection; never logs the password. Once the server has accepted the message, a problem afterwards
+// (the goodbye) doesn't make it a failure: it was sent.
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
@@ -12,22 +14,40 @@ const wrap76 = (b64) => b64.replace(/.{1,76}/g, '$&\r\n');
 
 /** cfg: { host, port, secure, user, pass, from } */
 function createMailer(cfg) {
+  const mode = !cfg.secure ? 'plain' : Number(cfg.port) === 465 ? 'tls' : 'starttls';
   function session(lines) {
     return new Promise((resolve, reject) => {
-      const sock = cfg.secure ? tls.connect({ host: cfg.host, port: cfg.port, servername: cfg.host }) : net.connect({ host: cfg.host, port: cfg.port });
-      sock.setTimeout(30000, () => { sock.destroy(); reject(new MailError('The mail server did not answer in time.')); });
-      let buf = '', step = -1;
-      const next = () => { step++; if (step < lines.length) sock.write(lines[step].send + '\r\n'); else { sock.end(); resolve(); } };
-      sock.on('data', (d) => {
+      let sock = mode === 'tls' ? tls.connect({ host: cfg.host, port: cfg.port, servername: cfg.host }) : net.connect({ host: cfg.host, port: cfg.port });
+      let buf = '', step = -1, accepted = false, over = false;
+      const end = (err) => { if (over) return; over = true; if (err && !accepted) reject(err); else resolve(); };
+      const next = () => { step++; if (step < lines.length) sock.write(lines[step].send + '\r\n'); else { sock.end(); end(); } };
+      function onData(d) {
         buf += d.toString('utf8');
         // a complete reply: its last line is "NNN text" (not "NNN-…")
         const done = buf.split('\r\n').filter(Boolean).pop(); if (!done || /^\d{3}-/.test(done) || !/^\d{3}/.test(done)) return;
         const code = Number(done.slice(0, 3)); buf = '';
         const want = step < 0 ? [220] : lines[step].expect;
-        if (!want.includes(code)) { sock.destroy(); return reject(new MailError(`The mail server refused the message (${step < 0 ? 'greeting' : lines[step].what}: ${code}).`)); }
+        if (!want.includes(code)) { sock.destroy(); return end(new MailError(`The mail server refused the message (${step < 0 ? 'greeting' : lines[step].what}: ${code}).`)); }
+        if (step >= 0 && lines[step].what === 'message') accepted = true;
+        if (step >= 0 && lines[step].upgrade) {
+          // STARTTLS accepted: the rest of the conversation is encrypted (and the server's certificate checked)
+          sock.removeListener('data', onData);
+          const plain = sock;
+          sock = tls.connect({ socket: plain, servername: cfg.host });
+          watch(sock); sock.once('secureConnect', next);
+          return;
+        }
         next();
-      });
-      sock.on('error', () => reject(new MailError('The mail server could not be reached.')));
+      }
+      function watch(s) {
+        s.setTimeout(30000, () => { s.destroy(); end(new MailError('The mail server did not answer in time.')); });
+        s.on('data', onData);
+        s.on('error', (e) => end(new MailError(/certificate|self.signed|altname/i.test(String(e && e.message)) ? 'The mail server\'s certificate could not be verified.' : 'The mail server could not be reached.')));
+        // closed by the server: fine after the message was accepted, a failure before (never left waiting); the plain
+        // socket closing under an upgraded TLS one is not the end
+        s.on('close', () => { if (s === sock) end(new MailError('The mail server closed the connection.')); });
+      }
+      watch(sock);
     });
   }
   /** { to, subject, text, attachment: { name, type, data } } */
@@ -40,12 +60,13 @@ function createMailer(cfg) {
       `--${b}--`, ''].join('\r\n').replace(/^\./gm, '..');
     await session([
       { send: 'EHLO blackhouse-portal', expect: [250], what: 'hello' },
+      ...(mode === 'starttls' ? [{ send: 'STARTTLS', expect: [220], what: 'encryption', upgrade: true }, { send: 'EHLO blackhouse-portal', expect: [250], what: 'hello' }] : []),
       ...(cfg.user ? [{ send: 'AUTH LOGIN', expect: [334], what: 'login' }, { send: Buffer.from(cfg.user).toString('base64'), expect: [334], what: 'login' }, { send: Buffer.from(cfg.pass).toString('base64'), expect: [235], what: 'password' }] : []),
       { send: `MAIL FROM:<${addr(cfg.from)}>`, expect: [250], what: 'sender' }, { send: `RCPT TO:<${to}>`, expect: [250, 251], what: 'recipient' },
       { send: 'DATA', expect: [354], what: 'data' }, { send: msg + '\r\n.', expect: [250], what: 'message' }, { send: 'QUIT', expect: [221], what: 'quit' },
     ]);
   }
-  return { send };
+  return { send, mode };
 }
 
 module.exports = { createMailer, MailError };

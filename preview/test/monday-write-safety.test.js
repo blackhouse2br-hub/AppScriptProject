@@ -139,7 +139,8 @@ test('Monday network and API errors during a write leak neither the token nor th
       mode = m;
       const r = await call('POST', '/api/monday/write', ck, { action, itemId: '9001', value, confirm: true });
       mode = '';
-      assert.strictEqual(r.status, 502, `${m} ${action}: reported as a failure — ${r.text}`);
+      // a network error: uncertain, so Monday is read again (not saved: 502); an API refusal of the value: 409
+      assert.strictEqual(r.status, m === 'api' ? 409 : 502, `${m} ${action}: reported as a failure — ${r.text}`);
       assert.match(JSON.parse(r.text).error, /Monday\.com/, 'says Monday failed');
       for (const [where, text] of [['response', r.text], ['status', (await call('GET', '/api/integrations/status', ck)).text],
         ['audit', JSON.stringify(await MondayWrite.find({ itemId: '9001' }).lean())], ['console', logged.join('\n')]]) {

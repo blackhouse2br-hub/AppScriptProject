@@ -33,10 +33,10 @@ test('mode selection is explicit', () => {
   assert.throws(() => loadConfig({ APP_MODE: 'live' }, NO_ARGS), /must be "demo" or "mongo"/);
   assert.throws(() => loadConfig({ NODE_ENV: 'production' }, NO_ARGS), /Demo mode is for local use only/);
   assert.throws(() => loadConfig({ NODE_ENV: 'production', APP_MODE: 'mongo', MONGODB_URI: 'mongodb://h/db' }, NO_ARGS), /Email-and-password sign-in is for the local preview only/);
-  // fully configured for Google + Pages/Railway, production is still blocked until a staging deployment is tested
+  // fully configured for Google + Pages/Railway, production is refused until the staging checklist is acknowledged (and its other conditions hold)
   assert.throws(() => loadConfig({ NODE_ENV: 'production', APP_MODE: 'mongo', MONGODB_URI: 'mongodb://h/db', HOST: '0.0.0.0', AUTH_PROVIDER: 'google',
     PUBLIC_API_URL: 'https://api.example.com', PORTAL_URL: 'https://portal.example.com/', GOOGLE_CLIENT_ID: '1-a.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'x' }, NO_ARGS),
-  /Production start is still blocked: Google sign-in is required before production/);
+  /Production start refused: /);
 });
 
 test('mongo mode refuses to start when MongoDB is unreachable (no demo fallback)', async () => {

@@ -686,10 +686,11 @@
           ${l.budget ? `<span class="sumi"><b>${esc(money(l.budget))}</b></span>` : ''}
           ${l.moveIn ? `<span class="sumi sub">Move-in ${esc(fmtDate(l.moveIn))}${mi != null ? ` (${mi < 0 ? Math.abs(mi) + ' d ago' : mi + ' d'})` : ''}</span>` : ''}
         </div>
-        <div class="quick"><span class="muted">${esc(l.phone)}</span>
+        <div class="quick">${telOf(l.phone) ? `<a class="muted" href="tel:${esc(telOf(l.phone))}" title="Call from this device's phone">${esc(l.phone)}</a>` : `<span class="muted">${esc(l.phone)}</span>`}
           ${canEdit('calendar') ? '<button class="btn sm primary" data-act="gobook">📅 Book Viewing</button>' : ''}
-          <button class="linkbtn" data-act="notwired" data-v="Message Lead">✉ Message Lead</button>
-          <button class="linkbtn" data-act="notwired" data-v="Call on respond.io">📞 Call on respond.io</button>
+          ${DEMO ? `<button class="linkbtn" data-act="notwired" data-v="Message Lead">✉ Message Lead</button>
+          <button class="linkbtn" data-act="notwired" data-v="Call on respond.io">📞 Call on respond.io</button>` : `<button class="linkbtn" data-act="rioopen" data-v="message" data-id="${esc(l.id)}" title="Opens this lead's conversation in respond.io (nothing is sent)">✉ Message Lead</button>
+          <button class="linkbtn" data-act="rioopen" data-v="call" data-id="${esc(l.id)}" title="Opens this lead's conversation in respond.io, where you start the call">📞 Call on respond.io</button>`}
           <span class="muted sub">Added ${esc(fmtDate(l.createdAt))} · updated ${esc(ago(l.updatedAt))}</span></div></div>
         <div class="d-nav">
           <button class="btn ghost sm" data-act="prevlead" title="Previous lead ( [ )" aria-label="Previous lead">‹</button>
@@ -795,13 +796,21 @@
     // e-signature status and actions per LOI (client first, then the owner; src/loiSign.js)
     const sg = st.signing, canSend = access('leads') === 'edit' && sg && sg.ready;
     const STATUS = { draft: 'Draft', sent: 'Sent to the client', clientSigned: 'Signed by the client', ownerSent: 'Sent to the owner', signed: 'Signed by both' };
+    // a signature is saved first; its copies (Drive, the unit's deal files) follow, and a failure there can be retried
+    const storeNote = (x, role) => {
+      const s = x.signed[role], st2 = s.store, dl = s.deal; if (!st2) return '';
+      const pending = st2.status === 'pending' || st2.status === 'failed' || (dl && dl.status === 'failed');
+      if (!pending) return `<div class="sub">${s.drive ? 'Copy saved in Google Drive' : 'Signed copy kept in the portal'}${dl && dl.status === 'linked' ? ' · in the unit\'s deal files' : ''}</div>`;
+      const why = st2.status === 'failed' ? st2.error : dl && dl.status === 'failed' ? dl.error : 'Saving the copy…';
+      return `<div class="src-err" role="status">The signature is safe (download it below), but its copy isn't saved yet: ${esc(why)}${canEdit('leads') ? ` <button class="btn sm" data-act="loistore" data-id="${esc(x.id)}" data-role="${role}">Try saving again</button>` : ''}</div>`;
+    };
     const signActs = (x) => [
       x.status !== 'signed' && !(x.signed && x.signed.client) && side === 'client' ? `<button class="btn sm" data-act="loisend" data-id="${esc(x.id)}" data-role="client" ${canSend ? '' : 'disabled'}>${x.status === 'sent' ? 'Send again' : 'Send for e-signature'}</button>` : '',
       x.signed && x.signed.client && !x.signed.owner ? `<button class="btn sm" data-act="loisend" data-id="${esc(x.id)}" data-role="owner" ${canSend ? '' : 'disabled'}>${x.status === 'ownerSent' ? 'Send to owner again' : 'Send to the owner'}</button>` : '',
       x.hasSigned ? `<button class="btn sm ghost" data-act="loisigned" data-id="${esc(x.id)}" data-fmt="docx">Signed .docx</button>${x.signed && (x.signed.owner || x.signed.client || {}).pdf ? ` <button class="btn sm ghost" data-act="loisigned" data-id="${esc(x.id)}" data-fmt="pdf">Signed PDF</button>` : ''}` : ''].filter(Boolean).join(' ');
     const list = st.loading ? '<div class="empty">Loading this client\'s LOIs…</div>' : st.err ? `<div class="src-err" role="alert">${esc(st.err)}</div>`
       : `<table class="t deal-t" aria-label="Prepared LOIs"><thead><tr><th>Prepared</th><th>Kind</th><th>Status</th><th></th></tr></thead><tbody>${lois.map((x) => `<tr><td>${esc(manilaTime(x.createdAt))}<div class="sub">${esc(x.by || '')}${x.unitName ? ' · ' + esc(x.unitName) : ''}</div></td><td>${esc(x.slotLabel)}${x.missing.length ? `<div><span class="tag warn">missing: ${esc(x.missing.join(', '))}</span></div>` : ''}</td>
-          <td>${esc(STATUS[x.status] || x.status)}${x.signed && x.signed.client ? `<div class="sub">client: ${esc(x.signed.client.name)}, ${esc(manilaTime(x.signed.client.at))}</div>` : ''}${x.signed && x.signed.owner ? `<div class="sub">owner: ${esc(x.signed.owner.name)}, ${esc(manilaTime(x.signed.owner.at))}</div>` : ''}</td>
+          <td>${esc(STATUS[x.status] || x.status)}${x.signed && x.signed.client ? `<div class="sub">client: ${esc(x.signed.client.name)}, ${esc(manilaTime(x.signed.client.at))}</div>${storeNote(x, 'client')}` : ''}${x.signed && x.signed.owner ? `<div class="sub">owner: ${esc(x.signed.owner.name)}, ${esc(manilaTime(x.signed.owner.at))}</div>${storeNote(x, 'owner')}` : ''}</td>
           <td><button class="btn sm" data-act="loidl" data-id="${esc(x.id)}">Download .docx</button> ${signActs(x)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No LOI prepared for this client yet.</td></tr>'}</tbody></table>`;
     if (side === 'owner') {
       return `${head}<p class="sub">The owner signs the same LOI after the client (Code.gs apiSendLoiOwner). Owner on the listing: <b>${esc((listing && listing.contact) || 'unknown')}</b>${listing ? ` · owner phone on the listing: ${listing.contactPhone ? 'yes' : 'no'}` : ''}.</p>
@@ -2055,11 +2064,13 @@
         <div class="up-img">${st.camp.image ? `<img src="${esc(API.url('/api/upsell/campaigns/' + st.sel + '/image'))}" alt="Offer image"><span class="sub">${esc(st.camp.image.name)} · sent before the text</span>${edit ? '<button class="btn sm danger" data-act="upimgdel">Remove image</button>' : ''}`
           : edit ? `<label class="btn sm">Add an image<input type="file" data-ch="upimg" accept="image/jpeg,image/png" hidden></label><span class="sub">JPEG or PNG (what WhatsApp accepts), 5 MB at most. Sent first, then the text.</span>` : ''}</div></div></div>`;
     // the next batches as the server works them out (one respond.io contact once; opted-out clients never)
-    const bn = (k) => (aud && aud.batches ? aud.batches[k].ids.length : 0);
+    const bn = (k) => (aud && aud.batches && aud.batches[k] ? aud.batches[k].ids.length : 0);
     const send = `<div class="panel"><h3>3 · Send</h3><div class="pad up-send">
         ${edit ? `<button class="btn primary" data-act="upreview" data-v="message" ${m.sends && !st.dirty && bn('message') ? '' : 'disabled'}>Review &amp; send 1:1 (next ${bn('message')})</button>
           <button class="btn" data-act="upreview" data-v="tag" ${m.sends && !st.dirty && bn('tag') && d.tag ? '' : 'disabled'}>Review &amp; tag ${bn('tag')} in respond.io</button>
-          ${bn('retry') ? `<button class="btn" data-act="upreview" data-v="retry" ${m.sends && !st.dirty ? '' : 'disabled'}>Review &amp; retry ${bn('retry')} failed</button>` : ''}` : ''}
+          ${bn('retry') ? `<button class="btn" data-act="upreview" data-v="retry" ${m.sends && !st.dirty ? '' : 'disabled'}>Review &amp; retry ${bn('retry')} failed</button>` : ''}
+          ${bn('retryTag') ? `<button class="btn" data-act="upreview" data-v="retryTag" ${m.sends && !st.dirty ? '' : 'disabled'}>Review &amp; retry ${bn('retryTag')} failed tags</button>` : ''}` : ''}
+        ${m.testOnly ? `<div class="src-note stale full">Controlled test: this server only sends to ${m.testOnly} test contact${m.testOnly > 1 ? 's' : ''} (RESPOND_SEND_ONLY_TO); everyone else is left out, and only a Manager can send.</div>` : ''}
         <button class="btn" data-act="upcsv">Export for email (CSV)</button>
         <button class="btn" data-act="upmailer">Email version (HTML mailer)</button>
         ${edit && aud && aud.counts.audience ? `<button class="btn ghost" data-act="upoptall" ${st.dirty ? 'disabled' : ''}>Mark the whole audience opted out (${aud.counts.audience})…</button>` : ''}
@@ -2093,21 +2104,35 @@
       <li><b>Always:</b> personalise ({firstName}), start with tenants and recent clients, honour STOP / unsubscribe (mark them opted out here), and leave at least 14 days between offers.</li></ul></div>`;
     return head + audPanel + offer + send + table + resPanel + optPanel + svcPanelHtml() + tips;
   }
-  /** The review before a real send: the batch, a rendered example, the image; sends only after the tick and the button. */
+  /** The channel 1:1 sends go out on (the offer's choice, or respond.io's own: the client's last-used channel). */
+  function upChannelName() {
+    const st = up(), id = st.camp && st.camp.channelId, ch = id && ((st.meta || {}).channels || []).find((c) => c.id === id);
+    return !id ? 'each client\'s last-used channel (Auto)' : ch ? (({ whatsapp: 'WhatsApp', viber: 'Viber', email: 'Email', messenger: 'Messenger' }[ch.kind] || ch.kind || 'channel') + (ch.name ? ' · ' + ch.name : '')) : 'channel ' + id;
+  }
+  /** A phone number a tel: link can dial (digits, optional +), or ''. */
+  const telOf = (p) => { const t = String(p || '').replace(/[^\d+]/g, ''); return /^\+?\d{7,15}$/.test(t) ? t : ''; };
+  /** Why respond.io couldn't be opened for this lead, and what to do instead (a call from this device, when there is a number). */
+  function rioProblem(kind, msg, tel, url) {
+    S.modal = { kind: 'rio' };
+    openModal(`<h3 id="modalTitle">${kind === 'call' ? 'Call on respond.io' : 'Message Lead'}</h3><p>${esc(msg)}</p>
+      ${url ? `<p><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open the conversation in respond.io</a></p>` : ''}
+      ${kind === 'call' && tel ? `<p class="sub">You can also call from this device: <a href="tel:${esc(tel)}">${esc(tel)}</a></p>` : ''}
+      <div class="actions"><button type="button" class="btn" data-act="mclose">Close</button></div>`);
+  }  /** The review before a real send: the batch, a rendered example, the image; sends only after the tick and the button. */
   async function upReview(kind) {
     const st = up();
     let aud; try { aud = st.aud = await API.get(`/api/upsell/campaigns/${st.sel}/audience`); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; }
-    const action = kind === 'tag' ? 'tag' : 'message', retry = kind === 'retry', bt = aud.batches[kind];
+    const action = kind === 'tag' || kind === 'retryTag' ? 'tag' : 'message', retry = kind === 'retry' || kind === 'retryTag', bt = aud.batches[kind];
     const batch = bt.ids.map((id, i) => ({ id, name: bt.names[i] }));   // exactly the batch the server would send
     if (!batch.length) { renderView(); return toast('Nobody left to ' + (action === 'tag' ? 'tag.' : 'send to.')); }
     let pv = null; if (action === 'message') { try { pv = await API.get(`/api/upsell/campaigns/${st.sel}/preview?lead=${encodeURIComponent(batch[0].id)}`); } catch (e) { if (!signedOut(e)) toast(e.message, true); return; } }
     st.pending = { action, retry, hash: bt.hash };
     S.modal = { kind: 'upsend' };
     openModal(`<h3 id="modalTitle">${action === 'tag' ? `Tag ${batch.length} client${batch.length === 1 ? '' : 's'} “${esc(st.camp.tag)}” in respond.io` : `${retry ? 'Retry' : 'Send'} to ${batch.length} client${batch.length === 1 ? '' : 's'}`}</h3>
-      <div class="src-note stale">${action === 'tag' ? 'This adds a tag to these contacts in respond.io. Nothing is sent to them.' : 'This sends real messages to these clients through respond.io (their last-used channel). It can\'t be undone.'}</div>
-      ${pv ? `<div class="up-pv">${pv.image ? `<img src="${esc(API.url(pv.image))}" alt="Offer image">` : ''}<div class="sub">Example for ${esc(pv.to)}:</div><pre class="report">${esc(pv.text)}</pre></div>` : ''}
-      <div class="sub">Recipients (${batch.length}${aud.recipients.length > batch.length ? ` of ${aud.recipients.filter((x) => x.onRespond).length} on respond.io` : ''}):</div>
-      <div class="up-list">${batch.map((x) => `<span>${esc(x.name)}</span>`).join('')}</div>
+      <div class="src-note stale">${action === 'tag' ? 'This adds a tag to these contacts in respond.io. Nothing is sent to them.' : `This sends real messages to these clients through respond.io, on ${esc(upChannelName())}. It can't be undone.`}${aud.testOnly ? ' Controlled test: only the RESPOND_SEND_ONLY_TO contacts are in this batch.' : ''}</div>
+      ${pv ? `<div class="up-pv">${pv.image ? `<img src="${esc(API.url(pv.image))}" alt="Offer image">` : ''}<div class="sub" id="upPvTo">Exactly what ${esc(pv.to)} receives:</div><pre class="report" id="upPvText">${esc(pv.text)}</pre></div>` : ''}
+      <div class="sub">Recipients (${batch.length}${aud.recipients.length > batch.length ? ` of ${aud.recipients.filter((x) => x.onRespond).length} on respond.io` : ''})${pv ? ' — press a name to see their message' : ''}:</div>
+      <div class="up-list">${batch.map((x) => (pv ? `<button type="button" class="linkbtn" data-act="uppv" data-id="${esc(x.id)}">${esc(x.name)}</button>` : `<span>${esc(x.name)}</span>`)).join('')}</div>
       <label class="tagck"><input type="checkbox" id="upConfirm"> I've reviewed the ${action === 'tag' ? 'list' : 'message and the recipients'}</label>
       <div class="actions"><button type="button" class="btn" data-act="mclose">Cancel</button><button type="button" class="btn primary" data-act="upgo" id="upGo" disabled>${action === 'tag' ? 'Tag' : retry ? 'Retry' : 'Send'} to ${batch.length}</button></div>`);
     const c = $('#upConfirm'); if (c) c.addEventListener('change', () => { $('#upGo').disabled = !c.checked; });
@@ -2165,6 +2190,18 @@
       st.making = false; renderDrawerBody();
     },
     loitplretry: () => { S.loiTpl = null; renderView(); },
+    drivestretry: () => { S.driveSt = null; renderView(); },
+    // Google's consent screen (a full-page visit; Google sends the browser back to Settings → Files)
+    driveconnect: () => { location.href = (API.base || '') + '/api/drive/oauth/start'; },
+    driveswitch: () => {
+      if (!confirm('Move Google Drive storage to another Google account? New files will be saved there. Files already saved stay in the current account\'s Drive, and the portal can\'t open them any more. The current account\'s access is removed.')) return;
+      location.href = (API.base || '') + '/api/drive/oauth/start?switch=1';
+    },
+    drivedisconnect: async () => {
+      if (!confirm('Disconnect Google Drive storage? The portal stops saving signed LOIs and deal files, and can\'t open the ones already saved until the same Google account is connected again. Nothing is deleted from Drive.')) return;
+      try { const r = await API.post('/api/drive/disconnect', { confirm: true }); toast(r.revoked ? 'Google Drive storage disconnected' : 'Disconnected here, but Google could not be told. Remove "Blackhouse" access in that Google account (Security → Third-party connections).', !r.revoked); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      S.driveSt = null; S.driveNote = ''; S.deals = null; renderView();
+    },
     // LOI e-signature: review the text and the channel, confirm, then the link is made (and sent, or shown to copy)
     loisend: (el) => {
       const l = leadById(S.open); if (!l) return; const st = loiState(l), x = (st.lois || []).find((y) => y.id === el.dataset.id); if (!x) return;
@@ -2198,10 +2235,28 @@
           <span class="sub">Valid until ${esc(manilaTime(r.expiresAt))}. The link is shown only now.</span></div>`;
         el.hidden = true;
         const st = loiState(l), i = (st.lois || []).findIndex((y) => y.id === r.loi.id); if (i >= 0) st.lois[i] = r.loi;
-      } catch (e) { el.disabled = false; if (!signedOut(e)) toast(e.message, true); }
+      } catch (e) {
+        el.disabled = false; if (signedOut(e)) return;
+        // email / respond.io failed after the link was made: the link is shown so it can still be sent by hand
+        if (e.data && e.data.text) {
+          $('#lsOut').innerHTML = `<div class="src-err" role="alert">${esc(e.message)}</div><div class="src-note" role="status"><b>Send it yourself instead</b>
+            <textarea readonly rows="5" id="lsDone">${esc(e.data.text)}</textarea><button type="button" class="btn sm" data-act="lscopy">Copy message</button></div>`;
+          el.hidden = true; return;
+        }
+        toast(e.message, true);
+      }
     },
-    lscopy: () => { const t = $('#lsDone'); try { navigator.clipboard.writeText(t.value); toast('Copied'); } catch (e) { t.select(); toast('Select and copy the text', true); } },
-    loisigned: async (el) => {
+    lscopy: async () => { const t = $('#lsDone'); try { await navigator.clipboard.writeText(t.value); toast('Copied'); } catch (e) { t.select(); toast('Copying was blocked: the text is selected, copy it yourself.', true); } },
+    // save a signature's copies again (Drive, deal files): never a new signature and never a second Drive copy
+    loistore: async (el) => {
+      const l = leadById(S.open); if (!l) return; el.disabled = true;
+      try {
+        const r = await API.post(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}/${el.dataset.id}/store`, { role: el.dataset.role });
+        const st = loiState(l), i = (st.lois || []).findIndex((y) => y.id === r.loi.id); if (i >= 0) st.lois[i] = r.loi;
+        toast(r.store && r.store.status === 'saved' && !(r.deal && r.deal.status === 'failed') ? 'Signed copy saved.' : 'Still not saved: ' + ((r.store && r.store.error) || (r.deal && r.deal.error) || 'try again later'), !(r.store && r.store.status === 'saved'));
+        renderDrawerBody();
+      } catch (e) { el.disabled = false; if (!signedOut(e)) toast(e.message, true); }
+    },    loisigned: async (el) => {
       const l = leadById(S.open); if (!l) return;
       try {
         const blob = await API.getBlob(`/api/loi/${loiSrc()}/${encodeURIComponent(l.id)}/${el.dataset.id}/signed?fmt=${el.dataset.fmt}`);
@@ -2254,6 +2309,12 @@
     },
     upreview: (el) => upReview(el.dataset.v),
     upgo: () => upGo(),
+    // the review: the exact message this recipient would get (worked out by the server, nothing is sent)
+    uppv: async (el) => {
+      const st = up();
+      try { const pv = await API.get(`/api/upsell/campaigns/${st.sel}/preview?lead=${encodeURIComponent(el.dataset.id)}`); $('#upPvTo').textContent = `Exactly what ${pv.to} receives:`; $('#upPvText').textContent = pv.text; }
+      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+    },
     upprojtext: async () => {
       const st = up(); if (!st.draft.projectId) return toast('Pick a project first.', true);
       try { const r = await API.get('/api/upsell/project-text/' + st.draft.projectId); if (!st.draft.text.trim() || confirm('Replace the message with this project\'s details?')) { st.draft.text = r.text; st.dirty = true; renderView(); } if (!r.published) toast('That project isn\'t published, so the message has no page link.', true); } catch (e) { if (!signedOut(e)) toast(e.message, true); }
@@ -2534,10 +2595,40 @@
   // ---------- Settings ----------
   function settingsView() {
     const tabs = [['team', 'Team & Access'], ['files', 'Files'], ['wa', 'WhatsApp Templates'], ['integ', 'Integrations'], ['sync', 'Monday Sync']];
-    const body = S.setTab === 'wa' ? waView() : S.setTab === 'files' ? (DEMO ? laterBox('Files (LOI templates)', 'upload the Lease and Sale LOI templates, stored in Google Drive.') : loiTemplatesView())
+    const body = S.setTab === 'wa' ? waView() : S.setTab === 'files' ? (DEMO ? laterBox('Files (LOI templates)', 'upload the Lease and Sale LOI templates, stored in Google Drive.') : driveStorageView() + loiTemplatesView())
       : S.setTab === 'integ' ? integView()
       : S.setTab === 'sync' ? laterBox('Monday Sync', 'AI STATUS write-back and client subitem sync to Monday.com are not part of the portal. ' + (mondayWritesOn() ? 'Only the confirmed updates listed under Integrations are written to Monday.' : 'Monday updates are switched off on this server.')) : teamView();
     return `<div class="subtabs" role="tablist">${tabs.map(([k, l]) => `<button class="btn ${S.setTab === k ? 'on' : ''}" role="tab" aria-selected="${S.setTab === k}" data-act="settab" data-v="${k}">${esc(l)}</button>`).join('')}</div>${body}`;
+  }
+  const DRIVE_RESULT = {
+    connected: 'Google Drive storage is connected.', switched: 'Google Drive storage now uses the new Google account. Files saved before stay in the previous account\'s Drive.',
+    cancelled: 'Connecting Google Drive was cancelled.', expired: 'That Google Drive connection attempt expired or came from another browser. Try again.',
+    forbidden: 'Only a Manager can connect Google Drive storage.', scope: 'Google Drive was not connected: the Drive permission was not ticked on Google\'s screen. Try again and allow "See, edit, create and delete only the specific Google Drive files you use with this app".',
+    offline: 'Google did not give lasting access. Try again (the portal asks Google for it each time).', folders: 'Google Drive was connected but the portal couldn\'t make its folders there. Try again.',
+    other_account: 'That is a different Google account from the connected one, so nothing changed. Choose the same account to reconnect, or use "Use another Google account…" to move storage on purpose.',
+    api: 'The Google Drive API is not enabled in the Google Cloud project of the portal\'s OAuth client. Enable it, then try again.', google: 'Google Drive could not be connected. Try again.',
+  };
+  /** Settings → Files: where signed LOIs and deal files are saved (src/driveStore.js). */
+  function driveStorageView() {
+    const st = S.driveSt || (S.driveSt = { loading: true });
+    if (st.loading && !st.started) { st.started = true; API.get('/api/drive/storage').then((r) => { S.driveSt = { s: r.storage }; }, (e) => { if (!signedOut(e)) S.driveSt = { err: e.message }; }).then(() => { if (S.view === 'team') renderView(); }); }
+    const s = st.s || {}, note = S.driveNote ? `<div class="${/^(connected|switched)$/.test(S.driveNote) ? 'ok-box' : 'src-err'}" role="status">${esc(DRIVE_RESULT[S.driveNote] || DRIVE_RESULT.google)}</div>` : '';
+    const yes = (b) => (b ? '<span class="tag ok">ready</span>' : '<span class="tag warn">not ready</span>');
+    let inner;
+    if (st.err) inner = `<div class="src-err" role="alert">${esc(st.err)} <button class="linkbtn" data-act="drivestretry">Try again</button></div>`;
+    else if (st.loading) inner = '<div class="empty">Loading…</div>';
+    else if (!s.mode) inner = `<div class="sub">Not set up on this server. Signed LOI copies and deal files need one of: <b>GOOGLE_DRIVE_OAUTH=on</b> (a Google account's My Drive, connected here by a Manager) or <b>GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON</b> with folder IDs (a Shared Drive).</div>`;
+    else if (s.mode === 'service-account') inner = `<div>Shared Drive, as the service account <b>${esc(s.account)}</b>. Signed LOIs ${yes(s.folders.loi)} · Deal files ${yes(s.folders.deals)}</div><div class="sub">The folders are set on the server (GOOGLE_DRIVE_LOI_FOLDER_ID, GOOGLE_DRIVE_DEALS_FOLDER_ID) and must be in a Shared Drive where the service account is a Content manager.</div>`;
+    else {
+      inner = s.connected ? `<div>Saving to the My Drive of <b>${esc(s.email)}</b>, in <b>${esc(s.folderNames.root)}</b>. Signed LOIs ${yes(s.folders.loi && !s.problem)} · Deal files ${yes(s.folders.deals && !s.problem)}</div>
+          <div class="sub">Connected by ${esc(s.connectedBy || '—')} ${esc(ago(s.connectedAt))}${s.lastOkAt ? ` · last used ${esc(ago(s.lastOkAt))}` : ''}. The portal sees only the folders and files it made there.</div>
+          ${s.problem ? `<div class="src-err" role="alert">${esc(s.problem)}</div>` : ''}`
+        : '<div class="sub">Not connected yet. A Manager connects the Google account whose My Drive keeps signed LOIs and deal files. The portal makes a <b>Blackhouse Portal</b> folder there and can see nothing else in that Drive.</div>';
+      if (isManager()) inner += `<div style="margin-top:8px"><button class="btn sm primary" data-act="driveconnect">${s.connected ? 'Reconnect' : 'Connect Google Drive'}</button>${s.connected ? ' <button class="btn sm" data-act="driveswitch">Use another Google account…</button> <button class="btn sm danger" data-act="drivedisconnect">Disconnect</button>' : ''}</div>
+        <div class="sub">${s.connected ? 'Reconnect with the same Google account: files saved by the portal can only be opened through the account that saved them. ' : ''}Uses ${esc(s.client)}.</div>`;
+      if ((s.ignored || []).length) inner += `<div class="sub">Ignored with My Drive storage: ${s.ignored.map(esc).join(', ')}.</div>`;
+    }
+    return `<div class="panel"><h3>Google Drive storage <span class="muted">where signed LOIs and deal files are saved</span></h3><div class="pad">${note}${inner}</div></div>`;
   }
   /** Settings → Files: the team's LOI Word templates (Code.gs LOI_TPL_*), kept in the portal's database. */
   function loiTemplatesView() {
@@ -2722,11 +2813,14 @@
   /** Details tab, Monday leads: the few fields that update the Direct Clients board, each saved on its own after a confirmation. */
   function mondayUpdateBox(l) {
     const rows = MW_LEAD.map(([k, cur]) => [k, mwAction(k), cur(l)]).filter(([, a]) => a);
-    if (!rows.length) return '';
+    // fields this member may update but whose Monday column isn't usable: say why, instead of hiding them silently
+    const blocked = !DEMO && S.source === 'monday' && S.mw && S.mw.enabled ? MW_LEAD.map(([k]) => S.mw.actions[k]).filter((a) => a && !a.allowed && a.error) : [];
+    const why = blocked.length ? `<div class="sub" role="note">${blocked.map((a) => `${esc(a.label)} can't be updated here: ${esc(a.error)}`).join('<br>')}</div>` : '';
+    if (!rows.length) return why ? `<div class="section-title">Update on Monday</div>${why}` : '';
     const input = (k, a, v) => a.kind === 'status' ? `<select data-mwin="${k}" aria-label="${esc(a.label)}">${v && !a.labels.includes(v) ? `<option value="" selected>${esc(v)} (current)</option>` : !v ? '<option value="" selected>(not set)</option>' : ''}${a.labels.map((x) => `<option ${x === v ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`
-      : `<input data-mwin="${k}" aria-label="${esc(a.label)}" ${a.kind === 'number' ? 'type="number" min="1" step="1000" inputmode="numeric"' : a.kind === 'date' ? 'type="date"' : 'type="text" maxlength="60"'} value="${esc(v)}">`;
+      : `<input data-mwin="${k}" aria-label="${esc(a.label)}" ${a.kind === 'number' ? 'type="number" min="1" step="any" inputmode="numeric"' : a.kind === 'date' ? 'type="date"' : 'type="text" maxlength="60"'} value="${esc(v)}">`;
     return `<div class="section-title">Update on Monday <span class="muted" style="text-transform:none;font-weight:400">· saved straight to the Direct Clients board, one field at a time, after you confirm</span></div>
-      <div class="mwbox">${rows.map(([k, a, v]) => `<label class="mwrow"><span>${esc(a.label)}</span>${input(k, a, v)}<button type="button" class="btn sm" data-act="mwsave" data-k="${k}">Save to Monday</button></label>`).join('')}</div>`;
+      <div class="mwbox">${rows.map(([k, a, v]) => `<label class="mwrow"><span>${esc(a.label)}</span>${input(k, a, v)}<button type="button" class="btn sm" data-act="mwsave" data-k="${k}">Save to Monday</button></label>`).join('')}</div>${why}`;
   }
   // Monday's own text when it isn't a plain number (shown as it is, never "NaN")
   const mwShow = (a, v) => (!v ? '(empty)' : a.kind === 'number' && Number.isFinite(Number(v)) ? '₱' + Number(v).toLocaleString('en-PH') : v);
@@ -2750,7 +2844,9 @@
     try { r = await API.post('/api/monday/write', { action: m.key, itemId: m.itemId, value: m.value, expect: m.before || '', confirm: true }); }
     catch (e) {
       if (signedOut(e)) return;
-      if (e.stale) { S.modalReturn = null; closeModal(); return toast('Monday was not updated: ' + e.message, true); }
+      // changed on Monday meanwhile: the page now shows Monday's current value (the server sent it)
+      if (e.stale) { S.modalReturn = null; closeModal(); if (e.data && e.data.record) m.onDone({ record: e.data.record, unchanged: true }); return toast('Monday was not updated: ' + e.message, true); }
+      if (e.data && e.data.uncertain) { S.modalReturn = null; closeModal(); return toast(e.message, true); }
       if (btn) { btn.disabled = false; btn.textContent = 'Update Monday'; } return toast('Monday was not updated: ' + e.message, true);
     }
     S.modalReturn = null; closeModal(); m.onDone(r);
@@ -3194,7 +3290,10 @@
     if (DEMO) { if (!store.get(STORE)) persist(); return true; }
     // returning from Google: show why a sign-in was refused, and take the code out of the address bar
     const err = (location.hash.match(/^#signin-error=([a-z_]+)$/) || [])[1];
-    if (err || location.hash === '#') history.replaceState(null, '', location.pathname + location.search);
+    // returning from "Connect Google Drive" (Settings → Files)
+    const drv = (location.hash.match(/^#drive=([a-z_]+)$/) || [])[1];
+    if (drv) { S.driveNote = drv; S.setTab = 'files'; }
+    if (err || drv || location.hash === '#') history.replaceState(null, '', location.pathname + location.search);
     try { await API.get('/api/session'); await loadAll(); return true; } catch (e) {
       if (e.status === 401) renderLogin(err ? SIGNIN_ERRORS[err] || SIGNIN_ERRORS.google : '', !!err); else renderFatal(e.message);
       return false;
@@ -3299,8 +3398,14 @@
     },
     svrio: async (el) => {
       if (!$('#svOk') || !$('#svOk').checked) return toast('Tick the box to confirm you checked the text.', true);
-      try { const r = await API.post(`/api/services/${el.dataset.id}/send`, { supplierId: el.dataset.sp, text: $('#svTxt').value, confirm: true }); closeModal(); svRefreshRow(r.row); toast('Sent to ' + r.row.supplier); }
-      catch (e) { if (!signedOut(e)) toast(e.message, true); }
+      const body = { supplierId: el.dataset.sp, text: $('#svTxt').value, confirm: true };
+      const send = async () => { const r = await API.post(`/api/services/${el.dataset.id}/send`, body); closeModal(); svRefreshRow(r.row); toast('Sent to ' + r.row.supplier); };
+      try { await send(); }
+      catch (e) {
+        // already sent to this supplier before: only again when the member says so
+        if (e.already && confirm(e.message + '\n\nSend it again anyway?')) { body.resend = true; try { await send(); } catch (e2) { if (!signedOut(e2)) toast(e2.message, true); } return; }
+        if (!signedOut(e)) toast(e.message, true);
+      }
     },
     svsup: () => svSuppliersModal(),
     supadd: () => { const L = S.modal.supList; L.push({ svc: sv().tab !== 'all' ? sv().tab : 'movers', name: '', channel: 'whatsapp', contact: '', respondId: '', notes: '' }); svSuppliersModal(); },
@@ -3415,6 +3520,18 @@
       if (cnt) cnt.textContent = (i + 1) + '/' + x.photos.length;
     },
     notwired: (el) => toast(el.dataset.v + ' is switched off in the preview (read-only; no messages are sent).'),
+    // "Message Lead" / "Call on respond.io": open this lead's own conversation in respond.io (the server checks the lead is
+    // visible to this member and gives the address). Nothing is sent and no call is started by the portal.
+    rioopen: async (el) => {
+      const id = el.dataset.id, kind = el.dataset.v;
+      const w = window.open('', '_blank');   // opened in the click itself, so the browser doesn't block it
+      let r;
+      try { r = await API.get(`/api/respond/link/${loiSrc()}/${encodeURIComponent(id)}`); }
+      catch (e) { if (w) w.close(); if (signedOut(e)) return; return rioProblem(kind, e.message, e.data && e.data.tel); }
+      if (S.open !== id) { if (w) w.close(); return; }   // another lead was opened meanwhile: never this one's link
+      if (w) { w.opener = null; w.location.href = r.url; } else return rioProblem(kind, 'Your browser blocked the new tab. Allow pop-ups for the portal, or use this link:', r.tel, r.url);
+      toast(kind === 'call' ? 'Opened ' + (r.name || 'the lead') + ' in respond.io. Press the phone icon in the conversation to call (the client must allow calls); the portal hasn\'t started a call.' : 'Opened ' + (r.name || 'the lead') + '\'s conversation in respond.io. Nothing was sent.');
+    },
     // Monday updates (allowlisted, confirmed first)
     mwsave: (el) => {
       const l = leadById(S.open), k = el.dataset.k, a = mwAction(k); if (!l || !a) return;

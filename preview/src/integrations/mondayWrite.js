@@ -16,7 +16,7 @@ const ACTIONS = Object.freeze({
   listingAvailability: { label: 'Availability', board: 'listings', field: 'status', types: ['status', 'color'], kind: 'status', current: 'availabilityLabel', module: 'invdash',
     warn: 'Changing Availability may trigger automations set up on the Monday Listings board.' },
   // Lead details (Monday leads): fields whose portal value and Monday column match one to one; Managers only for now
-  leadBudget: { label: 'Budget', board: 'leads', field: 'budget', types: ['numbers'], kind: 'number', current: 'budgetText', module: 'leads', roles: MANAGERS },
+  leadBudget: { label: 'Budget', board: 'leads', field: 'budget', types: ['numbers', 'text'], kind: 'number', current: 'budgetText', module: 'leads', roles: MANAGERS },
   leadMoveIn: { label: 'Target Move-in Date', board: 'leads', field: 'moveIn', types: ['date'], kind: 'date', module: 'leads', roles: MANAGERS },
   leadInquiry: { label: 'Inquiry Type', board: 'leads', field: 'inquiry', types: ['status', 'color'], kind: 'status', current: 'inquiryLabel', module: 'leads', roles: MANAGERS },
   leadNationality: { label: 'Nationality', board: 'leads', field: 'nationality', types: ['text'], kind: 'text', max: 60, module: 'leads', roles: MANAGERS },
@@ -115,8 +115,10 @@ async function performWrite({ integ, user, body, audit }) {
   try { live = await monday.refreshItem(a.board, itemId, { remember: false }); } catch (e) { throw fail('Could not read the current value from Monday.com, so nothing was changed.' + (e.integration ? ' ' + e.message : ''), 502); }
   if (!live) throw fail('Not found.', 404);
   const before = currentValue(a, live);
-  if (before === value) return { unchanged: true, record: live, action: a, col };
-  if (body.expect !== undefined && body.expect.trim() !== before) throw fail(`${a.label} on Monday has changed since this page loaded. Nothing was changed; reload and check the current value.`, 409, { stale: true });
+  // the server's copy is brought up to date too, so the page shows Monday's value right away
+  const remember = () => monday.refreshItem(a.board, itemId).catch(() => null);
+  if (before === value) return { unchanged: true, record: (await remember()) || live, action: a, col };
+  if (body.expect !== undefined && body.expect.trim() !== before) throw fail(`${a.label} on Monday has changed since this page loaded. Nothing was changed; the page now shows Monday's current value.`, 409, { stale: true, record: (await remember()) || live });
   if (before && body.confirm !== true) throw fail(`This replaces ${a.label} on Monday.${a.warn ? ' ' + a.warn : ''} Confirm to continue.`, 409, { needsConfirm: true });
   const entry = { action: a.key, board: a.board, itemId, column: col.title.slice(0, 80), by: { name: user.name, userId: user._id },
     // labels are board options, not personal data; free-text, number and date values are not stored in the audit
@@ -129,8 +131,13 @@ async function performWrite({ integ, user, body, audit }) {
   try {
     await monday.writeColumn({ board: a.board, itemId, columnId: col.id, value });
   } catch (err) {
-    await finish({ ok: false, error: auditError(a, value, err) });
-    throw err;
+    if (!err.uncertain) { await finish({ ok: false, error: auditError(a, value, err) }); throw err; }
+    // a timeout or server error: Monday itself says whether it was saved
+    let check = null;
+    try { check = await monday.refreshItem(a.board, itemId, { remember: false }); } catch (e) { /* still unknown */ }
+    if (!check) { await finish({ ok: false, error: 'Outcome unknown: ' + auditError(a, value, err) }); throw fail(`Monday.com didn't answer clearly, so it may or may not have saved ${a.label}. Reload the lead to check before trying again.`, 502, { uncertain: true }); }
+    if (currentValue(a, check) !== value) { await finish({ ok: false, error: auditError(a, value, err) }); throw fail(`Monday.com did not save ${a.label} (checked again just now). Nothing was changed.`, 502); }
+    // it was saved after all
   }
   await finish({ ok: true, error: '' });
   let fresh = null;

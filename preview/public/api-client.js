@@ -36,7 +36,7 @@
     if (asText && res.ok) return asText === 'blob' ? res.blob() : res.text();
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
-    if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; err.stale = !!(data && data.stale); err.partial = !!(data && data.partial); throw err; }
+    if (!res.ok) { const err = new Error((data && data.error) || `Request failed (${res.status}).`); err.status = res.status; err.stale = !!(data && data.stale); err.partial = !!(data && data.partial); err.already = !!(data && data.already); err.data = data; throw err; }
     return data;
   }
   window.BH_API = {

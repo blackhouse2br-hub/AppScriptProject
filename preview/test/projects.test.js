@@ -325,5 +325,5 @@ test('pre-deploy fixes: PDFs download, the preview form is never connected, test
   const env = { APP_MODE: 'mongo', MONGODB_URI: 'mongodb+srv://u:p@x/db', HOST: '0.0.0.0', PUBLIC_API_URL: 'https://example.up.railway.app', AUTH_PROVIDER: 'google', GOOGLE_CLIENT_ID: '1-x.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 's' };
   assert.doesNotThrow(() => loadConfig(env, ARGV));
   for (const k of ['ANTHROPIC_BASE_URL', 'GOOGLE_DRIVE_API_URL', 'GOOGLE_DRIVE_TOKEN_URL']) assert.throws(() => loadConfig({ ...env, [k]: 'http://127.0.0.1:9' }, ARGV), /local tests only/, k);
-  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production' }, ARGV), /Production start is still blocked/);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production' }, ARGV), /Production start refused/);
 });

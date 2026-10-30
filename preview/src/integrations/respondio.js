@@ -45,8 +45,12 @@ class SendError extends Error {
   constructor(message, { stop = false, retryAfter = 0, code = 0, unknown = false } = {}) { super(message); this.stop = stop; this.retryAfter = retryAfter; this.code = code; this.unknown = unknown; }
 }
 function createRespondSender(cfg) {
+  const onlyTo = cfg.onlyTo || [];
+  /** RESPOND_SEND_ONLY_TO (a controlled test): may this contact be sent to? */
+  const allowed = (cid) => !onlyTo.length || onlyTo.includes(String(cid).replace(/\D/g, ''));
   async function post(path, body) {
     if (!SEND_PATH.test(path)) throw new SendError('Blocked: this respond.io request is not an allowed send.', { stop: true });
+    if (!allowed(path.match(/id:(\d+)/)[1])) throw new SendError('Blocked: this server only sends to the test contacts in RESPOND_SEND_ONLY_TO.', { code: 0 });
     let res;
     try {
       res = await fetch(cfg.apiUrl + path, { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.token, 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
@@ -58,15 +62,17 @@ function createRespondSender(cfg) {
     // as Code.gs sendError_, plus: a rejected token or rate limit stops the whole batch
     if (res.status === 401 || res.status === 403) throw new SendError(`respond.io rejected RESPOND_TOKEN for sending (HTTP ${res.status}). The token needs permission to send messages and tag contacts.`, { stop: true, code: res.status });
     if (res.status === 429) throw new SendError('respond.io is rate-limiting requests. Wait a moment and try again.', { stop: true, retryAfter: Number(res.headers.get('retry-after')) || 60, code: 429 });
-    if (/24|window|session|template|re-?engage/i.test(raw)) throw new SendError('Can\'t send: the client hasn\'t messaged in the last 24 hours, so WhatsApp only allows an approved template. Tag them and send a template broadcast from respond.io.', { code: res.status });
-    if (res.status === 404) throw new SendError('respond.io has no contact with this client\'s Respond ID.', { code: 404 });
+    // a server error first: it may have been delivered, whatever its text says (never "failed", so never re-sent in bulk)
     if (res.status >= 500) throw new SendError(`respond.io had a server error (HTTP ${res.status}). It may or may not have been sent: check the chat.`, { stop: true, unknown: true, code: res.status });
+    if (/24[\s-]*h(ou)?r|messaging window|outside (of )?the .*window|session (has )?expired|template|re-?engage/i.test(raw)) throw new SendError('Can\'t send: this contact hasn\'t messaged in the last 24 hours, so WhatsApp only allows an approved template. Tag them and send a template broadcast from respond.io.', { code: res.status });
+    if (res.status === 404) throw new SendError('respond.io has no contact with this Respond ID.', { code: 404 });
     throw new SendError(`respond.io couldn't send it (HTTP ${res.status}${raw ? ': ' + raw : ''}).`, { code: res.status });
   }
   const id = (cid) => String(cid).replace(/\D/g, '');
   // channelId (digits) picks the respond.io channel, as the Apps Script's picker did; empty = respond.io's choice ("Auto")
   const ch = (channelId) => (/^\d{1,20}$/.test(String(channelId || '')) ? { channelId: Number(channelId) } : {});
   return {
+    allowed, onlyTo,
     text: (cid, text, channelId) => post(`/contact/id:${id(cid)}/message`, { ...ch(channelId), message: { type: 'text', text } }),
     image: (cid, url, channelId) => post(`/contact/id:${id(cid)}/message`, { ...ch(channelId), message: { type: 'attachment', attachment: { type: 'image', url } } }),
     tag: (cid, tag) => post(`/contact/id:${id(cid)}/tag`, [tag]),

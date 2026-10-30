@@ -164,4 +164,16 @@ test('respond.io supplier send: off unless RESPOND_SENDS=on; confirmed, name-che
   assert.deepStrictEqual(sent.map((c) => [c.path, c.body]), [['/contact/id:888001/message', { message: { type: 'text', text } }]]);
   assert.deepStrictEqual((await ServiceSend.find().lean()).map((x) => [x.status, x.supplierName]), [['sent', 'Fake Movers RIO']]);
   assert.strictEqual(ok.data.row.supplier, 'Fake Movers RIO');
+  // pressed twice at once: one send; sent before: again only when the member says so
+  const n = posts().length;
+  const again = await call(onBase, 'POST', `/api/services/${r.id}/send`, { cookie: bossOn, body: { supplierId: rio.id, text, confirm: true } });
+  assert.deepStrictEqual([again.status, again.data.already], [409, true]); assert.match(again.data.error, /already sent to Fake Movers RIO/);
+  assert.strictEqual(posts().length, n, 'not sent twice');
+  await ServiceSend.updateMany({}, { $set: { lock: `${r.id}:${rio.id}`, status: 'sending' } });   // a send still in flight
+  assert.match((await call(onBase, 'POST', `/api/services/${r.id}/send`, { cookie: bossOn, body: { supplierId: rio.id, text, confirm: true, resend: true } })).data.error, /being sent .* right now/);
+  await ServiceSend.updateMany({}, { $set: { status: 'sent' }, $unset: { lock: 1 } });
+  assert.strictEqual(posts().length, n);
+  const re = await call(onBase, 'POST', `/api/services/${r.id}/send`, { cookie: bossOn, body: { supplierId: rio.id, text, confirm: true, resend: true } });
+  assert.strictEqual(re.status, 200); assert.strictEqual(posts().length, n + 1);
+  assert.strictEqual(await ServiceSend.countDocuments({ lock: { $exists: true } }), 0, 'no lock left behind');
 });

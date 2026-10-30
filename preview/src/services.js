@@ -89,13 +89,14 @@ function serviceRoutes(r, config, integ) {
       let msgs;
       try { msgs = await integ.respond.recent(c.contactId, 50); } catch (err) { errors.push(SH.serviceRef(id, '') + ': ' + err.message); if (/rejected|rate-limiting/.test(err.message)) break; continue; }
       const first = Math.min(...Object.values(o)), after = msgs.filter((m) => (m.ts || 0) >= first - 60e3), replies = after.filter((m) => m.from === 'client' && m.text);
-      let found = {};
+      let found = {}, aiFailed = false, stop = false;
       if (replies.length && ai) {
         // the chat is redacted before it leaves the portal: no client name, email, phone, link, unit number or ID
         // (unit numbers seen anywhere in the chat are also removed where they appear bare, here and in the answer)
         const pc = { ...c, units: [...new Set(after.flatMap((m) => SH.unitsIn(m.text)))] };
         const convo = after.slice(-30).map((m) => (m.from === 'client' ? 'CLIENT: ' : 'BLACKHOUSE: ') + SH.redactForAi(String(m.text).slice(0, 600), pc)).join('\n');
-        try { found = await ai.classify({ offered: Object.keys(o), convo }); } catch (err) { if (!err.integration) throw err; errors.push(err.message); if (err.httpStatus === 429) break; }
+        // a failed read leaves the client unscanned (read again next time); busy or a key / credit problem stops the batch
+        try { found = await ai.classify({ offered: Object.keys(o), convo }); } catch (err) { if (!err.integration) throw err; errors.push(err.message); aiFailed = true; stop = err.httpStatus === 429 || !!err.fatal; }
         // and whatever comes back is checked again before it is saved or shown (it can reach a supplier)
         Object.values(found).forEach((f) => {
           f.summary = SH.redactForAi(f.summary, pc);
@@ -107,10 +108,11 @@ function serviceRoutes(r, config, integ) {
       for (const [svc, at] of Object.entries(o)) {
         const f = found[svc];
         await ServiceRequest.updateOne({ source, leadId: id, svc },
-          { $set: { offeredAt: new Date(at), scannedAt: new Date(), ...(f ? { interest: f.interest, summary: f.summary, details: f.details, lastReply } : {}) },
+          { $set: { offeredAt: new Date(at), ...(aiFailed ? {} : { scannedAt: new Date() }), ...(f ? { interest: f.interest, summary: f.summary, details: f.details, lastReply } : {}) },
             $setOnInsert: { stage: 'New', history: [{ at: new Date(), by: req.user.name, stage: 'New', what: 'Offer found' }] } }, { upsert: true });
       }
       scanned++;
+      if (stop) break;
     }
     res.json({ scanned, remaining: todo.length - scanned, errors: errors.slice(0, 5), aiMissing: !ai });
   });
@@ -157,15 +159,25 @@ function serviceRoutes(r, config, integ) {
     if (!sp || sp.svc !== t.x.svc) return bad(res, 'Pick one of this service\'s suppliers.');
     if (!sp.respondId) return bad(res, 'This supplier has no respond.io contact ID — use the WhatsApp / Viber / email button instead.');
     if (!sender) return res.status(409).json({ error: 'Sending through respond.io is switched off on this server (RESPOND_SENDS). Use the WhatsApp / Viber / email button, then "Mark as sent".' });
+    if (sender.onlyTo.length && req.user.role !== 'Manager') return res.status(403).json({ error: 'This server is in a controlled test (RESPOND_SEND_ONLY_TO): only a Manager can send on respond.io.' });
+    if (!sender.allowed(sp.respondId)) return res.status(409).json({ error: 'This server only sends to the test contacts in RESPOND_SEND_ONLY_TO, and this supplier isn\'t one. Nothing was sent.' });
     // the client's name, number or email must not be in it (the page warns; the server refuses)
     if (SH.leaksClient(text, t.c)) return bad(res, 'The text contains the client\'s name, a phone number or an email. Remove it: suppliers never get the client\'s details.');
-    const rec = await ServiceSend.create({ requestId: t.x._id, supplierId: String(sp._id), supplierName: sp.name, text, by: req.user.name });
+    // a send that never finished (the server stopped mid-send) counts as possibly sent: no longer in flight
+    await ServiceSend.updateMany({ requestId: t.x._id, supplierId: String(sp._id), status: 'sending', createdAt: { $lt: new Date(Date.now() - 5 * 60e3) } }, { $set: { status: 'unknown', error: 'The server stopped before the result was known: check the chat.' }, $unset: { lock: 1 } });
+    // sent (or possibly sent) to this supplier before: only again when the member says so
+    const prev = await ServiceSend.findOne({ requestId: t.x._id, supplierId: String(sp._id), status: { $in: ['sent', 'unknown'] } }).sort({ createdAt: -1 }).lean();
+    if (prev && b.resend !== true) return res.status(409).json({ error: `This request was already ${prev.status === 'sent' ? 'sent' : 'possibly sent'} to ${sp.name} (${prev.by}). Check the supplier's chat in respond.io before sending it again.`, already: true });
+    await ServiceSend.init();   // the lock's unique index must exist before the first send
+    let rec;
+    try { rec = await ServiceSend.create({ requestId: t.x._id, supplierId: String(sp._id), supplierName: sp.name, text, by: req.user.name, lock: `${t.x._id}:${sp._id}` }); }
+    catch (err) { if (err.code === 11000) return res.status(409).json({ error: 'This request is being sent to that supplier right now.' }); throw err; }
     try { await sender.text(sp.respondId, text); }
     catch (err) {
-      await ServiceSend.updateOne({ _id: rec._id }, { $set: { status: err.unknown ? 'unknown' : 'failed', error: String(err.message).slice(0, 300) } });
+      await ServiceSend.updateOne({ _id: rec._id }, { $set: { status: err.unknown ? 'unknown' : 'failed', error: String(err.message).slice(0, 300) }, $unset: { lock: 1 } });
       return res.status(err.unknown ? 502 : 409).json({ error: err.message, unknown: !!err.unknown });
     }
-    await ServiceSend.updateOne({ _id: rec._id }, { $set: { status: 'sent' } });
+    await ServiceSend.updateOne({ _id: rec._id }, { $set: { status: 'sent' }, $unset: { lock: 1 } });
     const doc = await ServiceRequest.findByIdAndUpdate(t.x._id, { $set: { stage: 'Sent to supplier', supplierId: String(sp._id), supplierName: sp.name, sentToSupplierAt: new Date() }, $inc: { version: 1 },
       ...hist(req.user.name, 'Sent to supplier', 'Sent to ' + sp.name + ' via respond.io') }, { returnDocument: 'after' }).lean();
     res.json({ row: rowOut(doc, t.c), sent: true });

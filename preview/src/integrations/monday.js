@@ -160,7 +160,8 @@ function shapeLead(it, cols) {
   const v = values(it, cols), group = (it.group && it.group.title) || '';
   const inquiry = /buy|sale|purchase/i.test(v.inquiry) ? 'Buy' : /rent|lease/i.test(v.inquiry) ? 'Rent'
     : /sale|buy/i.test(group) ? 'Buy' : /rent|lease/i.test(group) ? 'Rent' : '';
-  const contactId = v.contactId.replace(/\D/g, '');
+  // the Respond ID only when it is one number: digits picked out of other text ("12345 / 67890") would be another contact
+  const rawCid = String(v.contactId || '').trim(), contactId = /^\d{1,20}$/.test(rawCid) ? rawCid : '';
   return {
     id: String(it.id), code: it.name, mondayItemId: String(it.id), group,
     name: v.contactName || it.name, phone: v.phone, email: v.email,
@@ -178,7 +179,7 @@ function shapeLead(it, cols) {
     nationality: v.nationality, moveIn: ymdIn(v.moveIn), leaseTerm: v.leaseTerm, failReason: v.failReason, leaseEnd: '',
     inquiryDate: ymdIn(v.inquiryDate), failedDate: ymdIn(v.failedDate), contractDate: ymdIn(v.contractDate),
     createdAt: it.created_at || '', updatedAt: it.updated_at || it.created_at || '',
-    daysInStage: null, onRespond: !!contactId, contactId,
+    daysInStage: null, onRespond: !!contactId, contactId, contactIdInvalid: !!rawCid && !contactId,
   };
 }
 function shapeListing(it, cols) {
@@ -264,6 +265,18 @@ function assertAllowedWrite(query, variables, boards) {
   if (!ok) throw new IntegrationError('monday', 'Blocked: this Monday change is not on the allowed list.', { status: 500 });
 }
 
+/** A failed write, in plain words: { status, uncertain } (uncertain: Monday may have applied it). */
+function writeError(e, hide) {
+  const m = hide(String((e && e.message) || e));
+  // countsAsFailure false: a refused write says nothing about reads. uncertain: Monday may have applied it anyway.
+  const err = (msg, status, extra) => Object.assign(new IntegrationError('monday', msg, { status, countsAsFailure: false }), extra || {});
+  if (/Could not reach Monday|timed out|returned HTTP 5\d\d|Internal ?Server/i.test(m)) return err(m.replace(/\.?$/, '') + '. Monday.com may or may not have saved it.', 502, { uncertain: true });
+  if (/rejected MONDAY_TOKEN|UserUnauthorized|not authori[sz]ed|permission|read[- ]only|viewer/i.test(m)) return err('The Monday token\'s user is not allowed to change this column on this board. Nothing was changed. Check that user\'s access to the board and column in Monday.com.', 403);
+  if (/rate-limit|complexity|ComplexityException|retry_in_seconds|429/i.test(m)) return err('Monday.com is limiting requests right now. Nothing was changed; try again in a minute.', 429, { retryAfter: 60 });
+  if (/ColumnValueException|InvalidColumnId|invalid value|column/i.test(m)) return err('Monday.com refused the value for this column (the column may have changed). Nothing was changed; reload and try again.', 409);
+  return err(m, (e && e.httpStatus) || 502);
+}
+
 function createMonday(cfg, status, { now = Date.now } = {}) {
   const mockApi = /^http:\/\/(127\.0\.0\.1|localhost):/.test(cfg.apiUrl);
 
@@ -282,13 +295,13 @@ function createMonday(cfg, status, { now = Date.now } = {}) {
     assertAllowedWrite(WRITE_MUTATION, variables, cfg.boards);
     // Monday's error text may echo the submitted value: it is replaced before the status, the reply or the audit see it
     const hide = (m) => [variables.v, JSON.stringify(variables.v).slice(1, -1)].filter(Boolean).reduce((s, x) => s.split(x).join('[value]'), String(m));
+    // a refused write says nothing about reading, so it never marks the Monday connection as failing; each kind of
+    // refusal gets its own plain answer, and an unclear outcome (timeout, server error) is marked uncertain
     const d = await tracked(status, async () => {
-      try { return await send(WRITE_MUTATION, variables); } catch (e) {
-        throw new IntegrationError('monday', hide(e.message), { status: e.httpStatus || 502, countsAsFailure: e.countsAsFailure !== false });
-      }
+      try { return await send(WRITE_MUTATION, variables); } catch (e) { throw writeError(e, hide); }
     });
     const done = d.change_simple_column_value;
-    if (!done || String(done.id) !== variables.i) throw new IntegrationError('monday', 'Monday.com did not confirm the change.');
+    if (!done || String(done.id) !== variables.i) throw Object.assign(new IntegrationError('monday', 'Monday.com did not confirm the change.', { status: 502, countsAsFailure: false }), { uncertain: true });
     return { id: String(done.id) };
   }
   // the token never appears in a message (e.g. a fetch error quoting a malformed header)

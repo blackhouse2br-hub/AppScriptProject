@@ -15,6 +15,7 @@ const { upsellRoutes } = require('./upsell');
 const { loiRoutes } = require('./loi');
 const { serviceRoutes } = require('./services');
 const { dealRoutes } = require('./deals');
+const { createWriterStore } = require('./driveStore');
 
 const bad = (res, errors) => res.status(400).json({ error: errors[0], errors });
 const LEAD_SCREENS = ['leads', 'vaportal', 'monitor', 'calendar', 'renewals', 'ldash', 'daily', 'propreq', 'brokers'];
@@ -43,6 +44,11 @@ function apiRouter(config) {
   });
   r.use(express.json({ limit: '100kb' }));
   authRoutes(r, config);
+  // Google Drive storage for written files (src/driveStore.js): Google's return from "Connect Google Drive" comes
+  // without the session cookie, so that one route is checked by its own one-use state instead
+  const writer = createWriterStore(config);
+  writer.publicRoutes(r);
+  writer.load().catch((e) => console.warn('[drive] could not read the Drive connection: ' + e.message));
   r.use(requireUser);
   // a Broker's exact Monday Salesperson label (admin-set; missing or shared → no Monday viewings), resolved once per request
   r.use(async (req, res, next) => { await resolveBrokerLabel(req.user); next(); });
@@ -394,7 +400,8 @@ function apiRouter(config) {
   // Upselling: offers to clients, sent 1:1 or tagged through respond.io (sending off unless RESPOND_SENDS=on)
   upsellRoutes(r, config, integ);
   // deal files (signed LOIs, contract, deposit slip, renewals) in Google Drive, and LOI e-signature
-  const deals = dealRoutes(r, config, integ);
+  writer.routes(r);
+  const deals = dealRoutes(r, config, integ, writer);
   // LOI: the team's Word templates, LOIs filled from them, and signing links (src/loiSign.js)
   r.loiSign = loiRoutes(r, config, integ, deals);
   // Service Requests: interest read from replies to services offers (AI), suppliers, anonymised requests to them

@@ -52,9 +52,10 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 | `GOOGLE_CLIENT_ID` | yes | from step 3, ending in `.apps.googleusercontent.com`. It isn't a secret, but it belongs only here. |
 | `GOOGLE_CLIENT_SECRET` | yes 🔒 | from step 3 (starts with `GOCSPX-`) |
 | `GOOGLE_ALLOWED_DOMAIN` | optional | your Google Workspace domain (e.g. `yourcompany.com`) to refuse personal Gmail accounts. Leave it unset if the team uses Gmail. |
-| `NODE_ENV` | see step 6 | Railway sets `production` by default, which the guard refuses. Leave it as it is until the new code is deployed, then set `staging` for the test run. |
+| `NODE_ENV` | see step 6 and "Before production" | `staging` for the test run. `production` starts only when every production condition holds (`src/production.js`): Google sign-in, `HOST=0.0.0.0` with an https `PUBLIC_API_URL`, no local-test variable, a hosted `MONGODB_URI`, both KPI reviewers, `LOI_SIGN_SECRET` when signing is on, and `PRODUCTION_CHECKLIST_ACK`. |
+| `PRODUCTION_CHECKLIST_ACK` | for production | exactly `DEPLOYMENT.md-before-production-v1`, set only after every item in "Before production" passed on the staging run. A changed checklist gets a new version, which has to be acknowledged again. |
 | `SESSION_HOURS` | optional | sign-in length in hours, 1–720 (default `12`) |
-| `MONDAY_TOKEN` | yes 🔒 | Monday API token (read-only use; with `MONDAY_WRITES=on` it also needs write access to the Leads and Listings boards) |
+| `MONDAY_TOKEN` | yes 🔒 | Monday API token (read-only use). With `MONDAY_WRITES=on` its user must be a full member (not a viewer or guest) able to edit, on Direct Clients: Budget, Target Move-in Date, Inquiry Type, Nationality; on Listings: Availability; on the Calendar: Status, LOI Creation Date (and the feedback column if set). |
 | `MONDAY_LEADS_BOARD_ID` | yes | digits only (Direct Clients board) |
 | `MONDAY_LISTINGS_BOARD_ID` | yes | digits only |
 | `MONDAY_CALENDAR_BOARD_ID` | yes | digits only |
@@ -62,19 +63,23 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 | `MONDAY_CALENDAR_FEEDBACK_COLUMN` | optional | the id of one dedicated Calendar-board column of type **text**, with a title no other column has, that also receives a viewing's broker feedback (one line, ≤ 200 characters). Not one the portal already reads; never "Remarks" (duplicated). Unset or unusable: the feedback stays in the portal only (Settings → Integrations → Test Monday connection shows the check). |
 | `MONDAY_WRITE_LIMIT` | optional | Monday update attempts per user per minute, 1–60 (default 10; the server as a whole allows 3×). |
 | `RESPOND_TOKEN` | optional 🔒 | respond.io API token (read-only use, unless `RESPOND_SENDS=on`); without it the Chat tab says "not connected" |
-| `RESPOND_SPACE_ID` | optional | digits only; only adds "Open in respond.io" links |
+| `RESPOND_SPACE_ID` | for Message Lead / Call | digits only: the number in your respond.io address (`app.respond.io/space/<number>/…`). The lead drawer's **Message Lead** and **Call on respond.io** open that lead's conversation with it; unset or not a number, they explain what is missing. |
 | `RESPOND_LIST_CHECKS` | optional | leave **unset** (off): respond.io is read only when someone opens a lead's Chat tab. `on` checks every visible lead. |
 | `KPI_REVIEWER_TOBY_EMAIL` | for KPI Review | Toby's **own** Google account email, exactly as in Team & Access. Only he and Jonjo can open KPI Review. |
 | `KPI_REVIEWER_JONJO_EMAIL` | for KPI Review | Jonjo's own Google account email, as in Team & Access. Must differ from Toby's. `blackhouse2br@gmail.com` is refused. |
-| `RESPOND_SENDS` | optional | leave **unset** (off). `on` lets Upselling send 1:1 messages and tag contacts through respond.io, each batch reviewed and confirmed by the operator. `RESPOND_TOKEN` must be allowed to send and tag. |
+| `RESPOND_SENDS` | optional | leave **unset** (off). `on` lets Upselling send 1:1 messages and tag contacts through respond.io, each batch reviewed and confirmed by the operator; also supplier requests (Service Requests) and LOI links to a client. `RESPOND_TOKEN` must be allowed to send and tag. |
+| `RESPOND_SEND_ONLY_TO` | for the first live test | up to 10 respond.io contact IDs (digits, comma-separated). While set, **every** respond.io send and tag goes only to these contacts (everyone else is left out before anything is recorded), and only a Manager can send. Remove it after the controlled test. |
 | `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` | optional 🔒 | Project Pages "Add from Drive" / "Build from Google Drive": a service account's JSON key (or base64 of it). See "Google Drive for Project Pages" below. Unset: projects, uploads and pages still work. |
 | `ANTHROPIC_API_KEY` | optional 🔒 | lets "Build from Google Drive" fill empty fields from the folder's documents (Claude Opus 5.5; results are reviewed before saving), and Service Requests "Check replies" mark interest per service (Claude Haiku 5.5). Unset: Build only adds the folder's media; Check replies only finds the offers. |
-| `GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON` | optional 🔒 | LOI signed copies and deal files: a **second** service account (not the read-only one) that is a Content manager of the folders below, in a **Shared Drive**. Unset: those show a setup state. |
-| `GOOGLE_DRIVE_LOI_FOLDER_ID` / `GOOGLE_DRIVE_DEALS_FOLDER_ID` | optional | the folders' IDs (after `/folders/` in their links): signed LOIs and their PDFs; signed contracts, deposit slips, renewal contracts |
+| `GOOGLE_DRIVE_OAUTH` | optional | `on`: LOI signed copies and deal files go to **one Google account's My Drive**, connected by a Manager in Settings → Files (for accounts without Shared drives). See "Google Drive for LOI signing and deal files" below. Not together with `GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON`. |
+| `GOOGLE_DRIVE_TOKEN_KEY` | with `GOOGLE_DRIVE_OAUTH=on` 🔒 | 32 random bytes, base64 or hex: encrypts the stored Google refresh token. Changing it means reconnecting. |
+| `GOOGLE_DRIVE_OAUTH_CLIENT_ID` / `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` 🔒 | optional | only to use an OAuth client other than the sign-in one (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, used by default) |
+| `GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON` | optional 🔒 | the other way: a **second** service account (not the read-only one) that is a Content manager of the folders below, in a **Shared Drive**. Unset (and no `GOOGLE_DRIVE_OAUTH`): those show a setup state. |
+| `GOOGLE_DRIVE_LOI_FOLDER_ID` / `GOOGLE_DRIVE_DEALS_FOLDER_ID` | Shared Drive only | the folders' IDs (after `/folders/` in their links): signed LOIs and their PDFs; signed contracts, deposit slips, renewal contracts. Ignored with `GOOGLE_DRIVE_OAUTH=on` (the portal makes its own folders). |
 | `LOI_SIGNING` | optional | leave **unset** (off) until the checks under "Before production" pass. `on` lets staff create LOI signing links. |
-| `LOI_SIGN_TTL_DAYS` / `LOI_SIGN_SECRET` | optional | days a signing link stays valid (default 14); a long random text so open signing pages survive a restart (🔒) |
+| `LOI_SIGN_TTL_DAYS` / `LOI_SIGN_SECRET` | optional / with signing 🔒 | days a signing link stays valid (default 14, 1–60); at least 32 random characters so open signing pages survive a restart (required in production when `LOI_SIGNING=on`) |
 | `LOI_PDF_CONVERTER` / `GOTENBERG_URL` | optional | `drive` (Google's converter through the writer account, as the Apps Script), `gotenberg` (a LibreOffice service at `GOTENBERG_URL`, https), or `none` (no PDF; the signed copy is a .docx) |
-| `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 🔒 `SMTP_FROM` | optional | email for LOI signing links and Upselling "send test to me" (implicit TLS, port 465). Unset: links are copied instead. |
+| `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 🔒 `SMTP_FROM` | optional | email for LOI signing links and Upselling "send test to me": port `465` (implicit TLS, the default) or `587` (STARTTLS), AUTH LOGIN. Gmail / Google Workspace: `smtp.gmail.com`, 465, the full address as `SMTP_USER`, a 16-character **App Password** (needs 2-Step Verification) as `SMTP_PASS`, and that address (or a verified alias) in `SMTP_FROM`. Check that your Railway plan allows outbound SMTP. Unset: links are copied instead. |
 
 **Google Drive for Project Pages (optional, read-only).** No callback URL, consent screen or user sign-in is involved:
 1. Google Cloud Console → a project → **APIs & Services → Library → Google Drive API → Enable**.
@@ -85,11 +90,34 @@ Service **AppScriptProject** → **Variables**. Every name below is read by `src
 4. In Drive, **share each project folder with the service account's email as Viewer** (for a shared drive, add it as
    a member). The portal reads only what is shared with it (scope `drive.readonly`) and never changes Drive.
 
-**Google Drive for LOI signing and deal files (optional, writes).** Same steps 1–2 as above for a second service
-account; then create a **Shared Drive** (service accounts have no storage of their own, so uploads into a person's My
-Drive fail), add the service account as **Content manager**, create the two folders in it and put their IDs in
-`GOOGLE_DRIVE_LOI_FOLDER_ID` and `GOOGLE_DRIVE_DEALS_FOLDER_ID`. The portal never shares files with "anyone with the
-link": signers open the PDF through their signing link, staff through the portal.
+**Google Drive for LOI signing and deal files (optional, writes).** A service account has no storage of its own, so
+sharing a My Drive folder with one does **not** let it upload (Drive answers "storage quota exceeded"). Two ways:
+
+*A. One Google account's My Drive (no Shared drives needed) — `GOOGLE_DRIVE_OAUTH=on`.* The sign-in OAuth client is reused:
+1. Google Cloud Console → the project of the sign-in client → **APIs & Services → Library → Google Drive API → Enable**.
+2. **Google Auth Platform → Clients →** the sign-in Web client → **Authorized redirect URIs → add**
+   `<PUBLIC_API_URL>/api/drive/oauth/callback` (keep the sign-in URI `…/api/auth/google/callback`).
+3. **Data Access → Add or remove scopes →** tick `.../auth/drive.file` ("See, edit, create and delete only the specific
+   Google Drive files you use with this app"; a non-sensitive scope, so no Google review is needed for it).
+4. **Audience:** if the user type is *External*, the publishing status must be **In production**. While it is
+   *Testing*, Google ends the portal's Drive access every 7 days and a Manager would have to reconnect each week.
+   (*Internal*, for a Workspace organization, has no such limit.)
+5. Railway variables: `GOOGLE_DRIVE_OAUTH=on` and `GOOGLE_DRIVE_TOKEN_KEY` (from
+   `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`, pasted straight into Railway). Redeploy.
+6. A Manager signs in → **Settings → Files → Connect Google Drive** → chooses the Google account whose My Drive keeps the
+   files → allows access. The portal makes `Blackhouse Portal / Signed LOIs` and `Blackhouse Portal / Deal files` there
+   and can see nothing else in that Drive. The access renews by itself (Google refresh token, stored encrypted); if
+   it is removed in that Google account (or unused for six months: opening Settings → Files renews it once a month), the Files page says so and a Manager reconnects.
+   Always reconnect with the **same** Google account and keep the OAuth client in the same Google Cloud project: files the
+   portal saved can only be reached through the account and the project that saved them. A failed reconnect never ends
+   the working connection.
+
+*B. A Shared Drive (Google Workspace) — `GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON`.* Same steps 1–2 as for Project Pages
+for a second service account; create a **Shared Drive**, add the service account as **Content manager**, create the two
+folders in it and put their IDs in `GOOGLE_DRIVE_LOI_FOLDER_ID` and `GOOGLE_DRIVE_DEALS_FOLDER_ID`.
+
+Either way the portal never shares files with "anyone with the link": signers open the PDF through their signing link,
+staff through the portal.
 
 **Upselling images** are sent to respond.io as links to `<PUBLIC_API_URL>/upsell-media/<random token>`; respond.io
 must be able to reach that address (it can on Railway). **Project inquiry form:** set the form endpoint in Project
@@ -106,8 +134,8 @@ email: that member ID is their employee ID, and it's how they acknowledge "We di
 **Do not set:**
 * `PORT`: Railway sets it.
 * `PORTAL_URL`: leave it unset, because Railway serves the page itself. It's only for a page hosted on another domain you own.
-* `MONDAY_API_URL`, `RESPOND_API_URL`, `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL`, `GOOGLE_JWKS_URL`: these are for local test servers only. The server refuses them unless they point to 127.0.0.1.
-* `GOOGLE_DRIVE_UPLOAD_URL`, `GOTENBERG_TEST_URL`, `SMTP_SECURE`: local tests only; refused on a server others can reach.
+* `MONDAY_API_URL`, `RESPOND_API_URL`, `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL`, `GOOGLE_JWKS_URL`, `GOOGLE_REVOKE_URL`: these are for local test servers only. The server refuses them unless they point to 127.0.0.1.
+* `GOOGLE_DRIVE_API_URL`, `GOOGLE_DRIVE_TOKEN_URL`, `GOOGLE_DRIVE_UPLOAD_URL`, `ANTHROPIC_BASE_URL`, `GOTENBERG_TEST_URL`, `SMTP_SECURE` (any value): local tests only; a server others can reach refuses to start with them.
 
 The app checks all of this at startup. If anything is missing or unsafe, it stops with a one-line message in the
 deploy log naming the variable, and never prints the values.
@@ -156,7 +184,8 @@ Local check: `npm run build:pages -- --redirect=https://<service>.up.railway.app
 1. Enter the settings and variables from steps 1–4, with `NODE_ENV` left at Railway's default. While the old code is
    deployed, this keeps it refusing to start. The old code has no Google sign-in and must never run on Railway.
 2. Push the new code. With `NODE_ENV=production`, the new code checks every setting and then stops with
-   *"Production start is still blocked…"*. That message means all other settings passed.
+   *"Production start refused: …"*, naming the first production condition not met (at the end, `PRODUCTION_CHECKLIST_ACK`).
+   It means every other setting passed.
 3. Set `NODE_ENV=staging`. Railway redeploys; `<PUBLIC_API_URL>/healthz` must show
    `{"ok":true,"app":"blackhouse-leads-portal","mode":"mongo","db":"connected","auth":"google"}`.
 4. Run the GitHub Pages workflow.
@@ -165,7 +194,7 @@ The staging run is a real, public address showing real Monday data, but only to 
 
 ## Before production
 
-Production (`NODE_ENV=production`) stays blocked in `src/config.js` until all of these pass on the staging run:
+Production (`NODE_ENV=production`) is refused (`src/production.js`) until all of these pass on the staging run and the owner sets `PRODUCTION_CHECKLIST_ACK=DEPLOYMENT.md-before-production-v1`:
 
 - [ ] `<PUBLIC_API_URL>/healthz` shows `"db":"connected"` and `"auth":"google"`.
 - [ ] A listed Manager, VA and Broker can each sign in with Google, in Chrome, Safari and a phone browser, and see only
@@ -185,5 +214,11 @@ Production (`NODE_ENV=production`) stays blocked in `src/config.js` until all of
 - [ ] Service Requests: suppliers entered by a Manager; with `ANTHROPIC_API_KEY`, "Check replies" on a test client
       marks interest correctly and keeps no client name or number in the request text.
 
-After that, a small code change removes the block (the "Production start is still blocked" check in `src/config.js`),
-and `NODE_ENV` can be set to `production`.
+- [ ] Railway runs **one** replica (sign-in throttles, the Monday cache and rate limits are kept in the server's memory).
+- [ ] Atlas: the cluster tier has backups (M0 has none) and a restore was tried; the database user has only the
+      readWrite role on the portal's database.
+- [ ] `KPI_REVIEWER_TOBY_EMAIL`, `KPI_REVIEWER_JONJO_EMAIL` and, if signing is on, `LOI_SIGN_SECRET` are set.
+
+Then set `PRODUCTION_CHECKLIST_ACK=DEPLOYMENT.md-before-production-v1` and `NODE_ENV=production`. The server checks every
+condition again at each start and refuses, naming the variable, if one is missing (never its value). Nothing about
+sign-in, Team & Access or KPI Review privacy changes in production.

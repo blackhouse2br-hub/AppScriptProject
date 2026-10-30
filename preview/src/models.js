@@ -129,6 +129,10 @@ const OAuthState = mongoose.model('OAuthState', new Schema({
   verifier: { type: String, required: true },
   nonce: { type: String, required: true },
   expiresAt: { type: Date, required: true, expires: 0 },
+  // 'signin' (src/google.js) or 'drive' (src/driveStore.js, connecting My Drive storage); a state works for its own flow only
+  purpose: { type: String, enum: ['signin', 'drive'], default: 'signin' },
+  userId: { type: ObjectId, ref: 'User', default: null },   // drive: the Manager who started it (must finish it)
+  allowSwitch: { type: Boolean, default: false },            // drive: another Google account may replace the connected one
 }));
 
 // ---- portal-only records about leads that may live on Monday.com (source 'monday', read-only there) or in MongoDB ----
@@ -362,6 +366,8 @@ const ServiceSend = mongoose.model('ServiceSend', new Schema({
   supplierName: { type: String, default: '' }, text: { type: String, default: '', maxlength: 4000 },
   status: { type: String, enum: ['sending', 'sent', 'failed', 'unknown'], default: 'sending' }, error: { type: String, default: '' },
   by: { type: String, default: '' },
+  // "<requestId>:<supplierId>" while a send is in flight (removed when it ends): a double press can't send twice
+  lock: { type: String, unique: true, sparse: true },
 }, opts));
 
 // ---- Deal files (src/deals.js; Code.gs vw_<lead>[listing].deal / .loi.clientSigned / .ownerSigned): per lead and unit ----
@@ -406,8 +412,21 @@ const LoiSignLink = mongoose.model('LoiSignLink', new Schema({
   tokenHash: { type: String, required: true, unique: true }, loiId: { type: ObjectId, ref: 'Loi', required: true, index: true },
   role: { type: String, enum: ['client', 'owner'], required: true }, signerName: { type: String, default: '', maxlength: 120 },
   expiresAt: { type: Date, required: true }, usedAt: { type: Date, default: null }, revokedAt: { type: Date, default: null },
+  claimUntil: { type: Date, default: null },   // being signed until then (a crash halfway leaves the link usable again)
   delivery: { channel: { type: String, enum: ['link', 'respond', 'email'], default: 'link' }, to: { type: String, default: '' }, status: { type: String, default: '' } },
   createdBy: { type: String, default: '' }, failedAttempts: { type: Number, default: 0 },
 }, opts));
 
-module.exports = { UpsellLegacy, LoiSignLink, DealFile, ServiceRequest, Supplier, ServiceSend, LoiTemplate, Loi, Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };
+// ---- Google Drive storage in a My Drive (src/driveStore.js, GOOGLE_DRIVE_OAUTH=on): the one connected Google account ----
+// The refresh token is AES-256-GCM encrypted with GOOGLE_DRIVE_TOKEN_KEY and never leaves the server (select: false).
+const enc = { iv: String, tag: String, data: String };
+const DriveConnection = mongoose.model('DriveConnection', new Schema({
+  key: { type: String, required: true, unique: true, enum: ['writer'], default: 'writer' },
+  email: str(120), sub: str(60), scope: str(400), clientId: str(200),   // clientId: the OAuth client that holds the grant
+  refreshToken: { type: new Schema(enc, { _id: false }), select: false },
+  folders: { root: str(100), loi: str(100), deals: str(100) },   // created by the portal (drive.file sees only these)
+  connectedBy: by, connectedAt: { type: Date, default: null },
+  lastOkAt: { type: Date, default: null }, problem: str(400),       // problem: e.g. the access was removed in Google
+}, opts));
+
+module.exports = { DriveConnection, UpsellLegacy, LoiSignLink, DealFile, ServiceRequest, Supplier, ServiceSend, LoiTemplate, Loi, Lead, Listing, Viewing, Note, User, Template, Session, OAuthState, AvailabilityRequest, LeadOverride, MondayWrite, ViewingResult, RenewalLog, DailyNote, PlCell, KpiFeedback, KpiAck, KpiSnapshot, Project, ProjectSetting, UpsellCampaign, UpsellSend, UpsellOptOut };

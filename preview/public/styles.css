@@ -231,6 +231,8 @@ table.deal-t td, table.deal-t th { white-space: normal; vertical-align: top; }
 table.deal-t th[scope="row"] { width: 40%; text-transform: none; letter-spacing: 0; font-size: 12.5px; }
 .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); margin-left: 4px; }
 .tag.warn { border-color: var(--danger, #c0392b); color: var(--danger, #c0392b); }
+.tag.ok { border-color: var(--ok, #2e8b57); color: var(--ok, #2e8b57); }
+.ok-box { border: 1px solid color-mix(in srgb, var(--ok, #2e8b57) 55%, var(--line)); background: color-mix(in srgb, var(--ok, #2e8b57) 10%, var(--panel)); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
 
 /* Chat */
 .chat { display: flex; flex-direction: column; gap: 8px; }

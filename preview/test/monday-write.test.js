@@ -284,7 +284,9 @@ test('column choice: exactly one column with the action\'s title, and the one th
   assert.throws(() => pickColumn([st('s', 'Status')], ACTIONS.listingAvailability), /no "Availability" column/);
   const txt = (id, title) => ({ id, title, type: 'text', settings_str: '{}' });
   assert.throws(() => pickColumn([txt('n1', 'Nationality'), txt('n2', 'nationality')], ACTIONS.leadNationality), /more than one "Nationality"/);
-  assert.throws(() => pickColumn([{ ...txt('b', 'Budget') }], ACTIONS.leadBudget), /not the expected kind/);
+  // Budget: a numbers column, or a text one as the Apps Script used (the same digits are written); not a date column
+  assert.strictEqual(pickColumn([{ ...txt('b', 'Budget') }], ACTIONS.leadBudget).id, 'b');
+  assert.throws(() => pickColumn([{ id: 'b', title: 'Budget', type: 'date', settings_str: '{}' }], ACTIONS.leadBudget), /not the expected kind/);
 });
 
 test('audit: logged before sending (nothing is sent if it can\'t be); a logging problem afterwards doesn\'t hide success', async () => {
@@ -306,7 +308,8 @@ test('audit: logged before sending (nothing is sent if it can\'t be); a logging 
 test('a Monday failure is reported as a failure and audited; nothing is saved elsewhere instead', async () => {
   failNextMutation = true;
   const r = await write(on, ck.boss, { action: 'leadNationality', itemId: '9006', value: 'Korean', confirm: true });
-  assert.strictEqual(r.status, 502); assert.match(r.data.error, /Monday\.com: Internal server error/);
+  // a server error is unclear, so Monday is read again: not saved, said plainly
+  assert.strictEqual(r.status, 502); assert.match(r.data.error, /Monday\.com did not save Nationality \(checked again just now\)/);
   const au = await MondayWrite.findOne({ itemId: '9006', action: 'leadNationality' }).lean();
   assert.strictEqual(au.ok, false); assert.match(au.error, /Internal server error/); assert.ok(!/Korean/.test(au.error));
   const lead = (await call(on, 'GET', '/api/monday/bootstrap', ck.boss)).data.leads.find((x) => x.id === '9006');

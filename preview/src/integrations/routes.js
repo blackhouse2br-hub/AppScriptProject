@@ -186,6 +186,24 @@ function integrationRoutes(r, integ) {
     } catch (err) { failed(res, err); }
   });
 
+  // "Message Lead" / "Call on respond.io": the address of this lead's conversation in respond.io, for a lead the user can
+  // see. Nothing is read from or sent to respond.io (no token needed); the contact ID comes from the lead, never the
+  // request; no other contact is ever used instead. A call is started by a person, inside respond.io.
+  r.get('/respond/link/:source/:id', need('leads', 'view'), async (req, res) => {
+    let lead = null;
+    try {
+      if (req.params.source === 'mongo') lead = await findVisibleLead(req.user, req.params.id);
+      else if (req.params.source === 'monday' && monday) lead = await visibleMondayLead(req.user, req.params.id);
+    } catch (err) { return failed(res, err); }
+    if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+    const raw = String(lead.contactId || '').trim(), phone = String(lead.phone || '').replace(/[^\d+]/g, '');
+    const tel = /^\+?\d{7,15}$/.test(phone) ? phone : '';
+    if (lead.contactIdInvalid || (raw && !/^\d{1,20}$/.test(raw))) return res.status(422).json({ error: 'The Respond ID on Monday for this lead isn\'t a single number, so the portal won\'t guess which contact it is. Fix it on the Monday board.', problem: 'badContact', tel });
+    if (!raw) return res.status(404).json({ error: 'This lead has no respond.io contact ID (the Respond ID column on Monday). Add it there; the portal doesn\'t create or look up contacts.', problem: 'noContact', tel });
+    if (!ic.respond.spaceId) return res.status(409).json({ error: ic.respond.spaceIdInvalid ? 'RESPOND_SPACE_ID on the server isn\'t a number. Set it to the number in your respond.io address (app.respond.io/space/<number>/…).' : 'Links into respond.io need RESPOND_SPACE_ID on the server: the number in your respond.io address (app.respond.io/space/<number>/…).', problem: 'noSpace', tel });
+    res.json({ url: `https://app.respond.io/space/${ic.respond.spaceId}/inbox/${raw}`, name: lead.name || '', tel });
+  });
+
   // chat history for a lead the user can see; the contact ID always comes from the lead, never from the request
   r.get('/respond/chat/:source/:id', need('leads', 'view'), async (req, res) => {
     if (!respond) return notConnected(res, 'respond.io', ['RESPOND_TOKEN']);
@@ -226,7 +244,10 @@ function integrationRoutes(r, integ) {
       const code = err.httpStatus || (err.integration ? 502 : 500);
       if (code === 500 && !err.integration) throw err;
       if (err.retryAfter) res.set('Retry-After', String(err.retryAfter));
-      res.status(code).json({ error: err.message, ...(err.needsConfirm ? { needsConfirm: true } : {}), ...(err.writesOff ? { writesOff: true } : {}), ...(err.stale ? { stale: true } : {}), ...(err.retryAfter ? { retryAfter: err.retryAfter } : {}) });
+      // stale: Monday's current record, so the page shows it at once (leads get their AI Status etc. as usual)
+      let rec = err.stale && err.record ? err.record : null;
+      if (rec && rec.board !== 'listings' && integ.enrich && /^lead/.test(String((req.body || {}).action))) { try { rec = integ.enrich(await monday.loadAll(false), [rec], await integ.mondayOverrides())[0]; } catch (e) { /* shown as read */ } }
+      res.status(code).json({ error: err.message, ...(err.needsConfirm ? { needsConfirm: true } : {}), ...(err.writesOff ? { writesOff: true } : {}), ...(err.stale ? { stale: true } : {}), ...(rec ? { record: rec } : {}), ...(err.uncertain ? { uncertain: true } : {}), ...(err.retryAfter ? { retryAfter: err.retryAfter } : {}) });
     }
   });
 

@@ -2,7 +2,9 @@
 // A local portal for reviewing by hand, with TEST DATA ONLY: an in-memory MongoDB (lost when it stops), the fake Monday
 // board, a fake respond.io (sends are recorded here and go nowhere), a fake Google Drive and a fake AI service.
 // Nothing real is contacted: no Monday, respond.io, Google, Anthropic or production database.
-//   node test/review-server.js [port]        (default 4180)
+//   node test/review-server.js [port]             (default 4180)
+//   node test/review-server.js [port] --mydrive   signed LOIs and deal files in a fake My Drive (GOOGLE_DRIVE_OAUTH=on):
+//     a Manager connects it in Settings → Files; the fake Google approves at once (Project Pages' Drive is off here)
 const http = require('http');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { start } = require('../server');
@@ -11,8 +13,10 @@ const { hashPassword } = require('../src/auth');
 const SH = require('../public/shared');
 const fx = require('./fixtures/fake-integrations');
 const { fakeServiceAccount, createFakeGoogle, createFakeAi, demoDrive } = require('./fixtures/fake-google-ai');
+const { createFakeGoogleOAuth } = require('./fixtures/fake-google-oauth');
 
-const PORT = Number(process.argv[2]) || 4180, PW = 'local-review-only-pw', TODAY = SH.manilaDay();
+const MYDRIVE = process.argv.includes('--mydrive');
+const PORT = Number(process.argv.slice(2).find((a) => /^\d+$/.test(a))) || 4180, PW = 'local-review-only-pw', TODAY = SH.manilaDay();
 const ACCOUNTS = [
   ['toby.reviewer@example.com', 'Toby (test reviewer)', 'Broker', '', { upsell: 'view' }],
   ['jonjo.reviewer@example.com', 'Jonjo (test reviewer)', 'Manager', '', {}],
@@ -61,16 +65,25 @@ fx.BOARDS['3333333'].items.push({ id: '6101', name: 'Viewing L', group: 'Viewing
     DealsFolderAAAAAAAAA: { name: 'Deal files (fake)', mimeType: 'application/vnd.google-apps.folder' } }), ai = createFakeAi();
   await new Promise((r) => g.listen(0, '127.0.0.1', r)); await new Promise((r) => ai.listen(0, '127.0.0.1', r));
   const gb = `http://127.0.0.1:${g.address().port}`;
+  // --mydrive: a fake Google account's My Drive, connected through the fake OAuth consent (fictional client and key)
+  const OAUTH_CLIENT = 'fake-review-client.apps.googleusercontent.com', OAUTH_SECRET = 'fake-review-secret';
+  const go = MYDRIVE ? createFakeGoogleOAuth({ clientId: OAUTH_CLIENT, clientSecret: OAUTH_SECRET, email: 'blackhouse.files.fake@example.com' }) : null;
+  if (go) await new Promise((r) => go.listen(0, '127.0.0.1', r));
+  const gob = go ? `http://127.0.0.1:${go.address().port}` : '';
+  const driveEnv = MYDRIVE ? { GOOGLE_DRIVE_OAUTH: 'on', GOOGLE_CLIENT_ID: OAUTH_CLIENT, GOOGLE_CLIENT_SECRET: OAUTH_SECRET, GOOGLE_DRIVE_TOKEN_KEY: require('crypto').randomBytes(32).toString('base64'),
+    GOOGLE_AUTH_URL: gob + '/auth', GOOGLE_TOKEN_URL: gob + '/token', GOOGLE_JWKS_URL: gob + '/certs', GOOGLE_REVOKE_URL: gob + '/revoke',
+    GOOGLE_DRIVE_API_URL: gob + '/drive/v3', GOOGLE_DRIVE_UPLOAD_URL: gob + '/upload/drive/v3', LOI_SIGNING: 'on', LOI_PDF_CONVERTER: 'drive' }
+    : { GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: sa.json, GOOGLE_DRIVE_TOKEN_URL: gb + '/token', GOOGLE_DRIVE_API_URL: gb + '/drive/v3',
+      // LOI signing and deal files against the fake Drive (writer account = the same fake key; nothing leaves this computer)
+      GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON: sa.json, GOOGLE_DRIVE_UPLOAD_URL: gb + '/upload/drive/v3',
+      GOOGLE_DRIVE_LOI_FOLDER_ID: 'LoiFolderAAAAAAAAAAA', GOOGLE_DRIVE_DEALS_FOLDER_ID: 'DealsFolderAAAAAAAAA', LOI_SIGNING: 'on', LOI_PDF_CONVERTER: 'drive' };
   const mem = await MongoMemoryServer.create();
   await start({ APP_MODE: 'mongo', MONGODB_URI: mem.getUri('bh_review'), PORT: String(PORT), HOST: '127.0.0.1',
     MONDAY_TOKEN: 'mtest', MONDAY_LEADS_BOARD_ID: '1111111', MONDAY_LISTINGS_BOARD_ID: '2222222', MONDAY_CALENDAR_BOARD_ID: '3333333', MONDAY_API_URL: f + '/monday',
     // RESPOND_SENDS stays off here as on the live server (Upselling / supplier send buttons show "switched off")
-    RESPOND_TOKEN: 'rtest', RESPOND_API_URL: f + '/respond',
+    RESPOND_TOKEN: 'rtest', RESPOND_API_URL: f + '/respond', RESPOND_SPACE_ID: '424242',   // a made-up space: Message Lead opens app.respond.io/space/424242/…
     KPI_REVIEWER_TOBY_EMAIL: ACCOUNTS[0][0], KPI_REVIEWER_JONJO_EMAIL: ACCOUNTS[1][0],
-    GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: sa.json, GOOGLE_DRIVE_TOKEN_URL: gb + '/token', GOOGLE_DRIVE_API_URL: gb + '/drive/v3',
-    // LOI signing and deal files against the fake Drive (writer account = the same fake key; nothing leaves this computer)
-    GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON: sa.json, GOOGLE_DRIVE_UPLOAD_URL: gb + '/upload/drive/v3',
-    GOOGLE_DRIVE_LOI_FOLDER_ID: 'LoiFolderAAAAAAAAAAA', GOOGLE_DRIVE_DEALS_FOLDER_ID: 'DealsFolderAAAAAAAAA', LOI_SIGNING: 'on', LOI_PDF_CONVERTER: 'drive',
+    ...driveEnv,
     // the fake AI service (local): never the real key in preview/.env
     ANTHROPIC_API_KEY: 'sk-ant-fake-local', ANTHROPIC_BASE_URL: `http://127.0.0.1:${ai.address().port}` }, ['node', 'server.js']);
   const passwordHash = await hashPassword(PW);
@@ -86,5 +99,6 @@ fx.BOARDS['3333333'].items.push({ id: '6101', name: 'Viewing L', group: 'Viewing
   ACCOUNTS.forEach(([e, n, role]) => console.log(`  ${e.padEnd(30)} ${n} · ${role}`));
   console.log('Fake Monday board, fake respond.io (sends are only logged here), fake Google Drive folder link:');
   console.log('  https://drive.google.com/drive/folders/DemoFolderAAAAAAAA   (fictional; shared with ' + sa.email + ')');
+  if (MYDRIVE) console.log('My Drive storage (fake): sign in as a Manager → Settings → Files → Connect Google Drive (the fake Google approves at once).');
   console.log('In-memory database: everything is lost when this stops. Ctrl+C to stop.\n');
 })().catch((e) => { console.error(e); process.exit(1); });

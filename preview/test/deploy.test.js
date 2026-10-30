@@ -219,7 +219,7 @@ test('Railway hosts page + API on one address (no custom domain): first-party Se
   } finally { s.close(); }
   // NODE_ENV=production is still refused with the same, complete settings (the production guard stays on)
   assert.throws(() => loadConfig({ APP_MODE: 'mongo', MONGODB_URI: 'mongodb://h/db', HOST: '0.0.0.0', PUBLIC_API_URL: 'https://appscriptproject-production.up.railway.app',
-    GOOGLE_CLIENT_ID: CLIENT_ID, GOOGLE_CLIENT_SECRET: 's', NODE_ENV: 'production' }, ARGV), /Production start is still blocked/);
+    GOOGLE_CLIENT_ID: CLIENT_ID, GOOGLE_CLIENT_SECRET: 's', NODE_ENV: 'production' }, ARGV), /Production start refused/);
 });
 
 test('GitHub Pages redirect: published only after the Railway portal checks out; plain HTML, no script or settings', async () => {

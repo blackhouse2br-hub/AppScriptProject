@@ -6,7 +6,7 @@ const { redact } = require('./config');
 
 const PUBLIC = path.join(__dirname, '..', 'public');
 
-function securityHeaders(mode) {
+function securityHeaders(mode, hsts) {
   // demo mode: the page may not make any network request at all; mongo mode: same-origin API only
   const csp = `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${mode === 'mongo' ? "'self'" : "'none'"}; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'`;
   return (req, res, next) => {
@@ -15,6 +15,8 @@ function securityHeaders(mode) {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Cache-Control', 'no-store');
+    // https only from now on, for a year (only on a server whose cookies are https-only anyway)
+    if (hsts) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     next();
   };
 }
@@ -42,7 +44,7 @@ function createApp(config) {
   app.disable('x-powered-by');
   const web = config.web;
   if (config.production || (web && web.trustProxy)) app.set('trust proxy', 1);
-  app.use(securityHeaders(config.mode));
+  app.use(securityHeaders(config.mode, !!(config.web && config.web.secureCookies && /^https:/.test(config.web.apiOrigin))));
   if (web && web.crossOrigin) app.use('/api', portalCors(web));
 
   app.get('/healthz', (req, res) => {

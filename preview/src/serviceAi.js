@@ -29,19 +29,26 @@ function createServiceAi(cfg) {
   async function classify({ offered, convo }) {
     let res;
     try {
+      // Haiku 5.5 thinks by default and thinking counts toward max_tokens: a short classification needs little of it
+      // (effort low), with room left for the JSON. No temperature: Haiku 5.5 rejects non-default sampling values.
       res = await client.messages.create({
-        model: MODEL, max_tokens: 1500, system: system(offered),
-        output_config: { format: { type: 'json_schema', schema: SCHEMA } },
+        model: MODEL, max_tokens: 4000, system: system(offered),
+        output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
         messages: [{ role: 'user', content: convo }],
       });
     } catch (err) {
-      if (err instanceof Anthropic.AuthenticationError) throw new AiError('The AI service refused the server\'s ANTHROPIC_API_KEY. Check the key.');
-      if (err instanceof Anthropic.RateLimitError) throw new AiError('The AI service is busy right now. Try again in a minute.', 429);
-      if (err instanceof Anthropic.APIConnectionError) throw new AiError('The AI service could not be reached. Try again in a minute.');
+      // fatal: the same answer for every chat (key, model access, credit), so a scan stops at the first one
+      const fatal = (m) => Object.assign(new AiError(m), { fatal: true });
+      if (err instanceof Anthropic.AuthenticationError) throw fatal('The AI service refused the server\'s ANTHROPIC_API_KEY. Check the key.');
+      if (err instanceof Anthropic.PermissionDeniedError) throw fatal('The server\'s ANTHROPIC_API_KEY isn\'t allowed to use this model. Check the key\'s workspace in the Anthropic Console.');
+      if (err instanceof Anthropic.RateLimitError || (err instanceof Anthropic.APIError && err.status === 529)) throw new AiError('The AI service is busy right now. Try again in a minute.', 429);
+      if (err instanceof Anthropic.BadRequestError && /credit balance/i.test(String(err.message))) throw fatal('The Anthropic account has no credit left. Add credit in the Anthropic Console (Plans & Billing).');
+      if (err instanceof Anthropic.APIConnectionError) throw fatal('The AI service could not be reached. Try again in a minute.');
       if (err instanceof Anthropic.APIError) throw new AiError('The AI service returned an error (HTTP ' + err.status + ').');
       throw err;
     }
     if (res.stop_reason === 'refusal') throw new AiError('The AI service declined to read this chat.');
+    if (res.stop_reason === 'max_tokens') throw new AiError('The AI answer was cut off. Try again; if it keeps happening the chat is too long to read in one go.');
     const text = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
     let o; try { o = JSON.parse(text); } catch (e) { throw new AiError('The AI service returned something that isn\'t valid.'); }
     const out = {};

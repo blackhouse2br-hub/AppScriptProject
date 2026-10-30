@@ -11,6 +11,7 @@
 const crypto = require('crypto');
 const { User, OAuthState, Session } = require('./models');
 const { parseCookies, sha256 } = require('./auth');
+const { createLimiter, limitRoute, byIp } = require('./rateLimit');
 
 const STATE_COOKIE = 'bh_oauth';
 const TTL_SEC = 600;
@@ -81,7 +82,12 @@ function googleRoutes(router, config, { startSession }) {
     res.redirect(303, u.href);
   };
 
-  router.get('/auth/google/start', async (req, res) => {
+  // each start writes a short-lived state record (expired by the database after 10 minutes): limited per address (an
+  // office shares one: 60 in 10 minutes is plenty), and a very high cap for the whole server against a wide flood
+  const startLimit = limitRoute([{ take: createLimiter({ max: 60, windowMs: 10 * 60e3 }), key: byIp }, { take: createLimiter({ max: 20000, windowMs: 10 * 60e3 }), key: () => 'all' }],
+    { html: true, message: 'Too many sign-in attempts from this connection. Wait a few minutes, then sign in again.' });
+  const backLimit = limitRoute([{ take: createLimiter({ max: 120, windowMs: 10 * 60e3 }), key: byIp }], { html: true, message: 'Too many sign-in attempts from this connection. Wait a few minutes, then sign in again.' });
+  router.get('/auth/google/start', startLimit, async (req, res) => {
     const state = b64url(crypto.randomBytes(32)), browser = b64url(crypto.randomBytes(32));
     const verifier = b64url(crypto.randomBytes(48)), nonce = b64url(crypto.randomBytes(24));
     await OAuthState.create({ stateHash: sha256(state), browserHash: sha256(browser), verifier, nonce, expiresAt: new Date(Date.now() + TTL_SEC * 1000) });
@@ -95,11 +101,11 @@ function googleRoutes(router, config, { startSession }) {
     res.redirect(302, u.href);
   });
 
-  router.get('/auth/google/callback', async (req, res) => {
+  router.get('/auth/google/callback', backLimit, async (req, res) => {
     const q = req.query, state = typeof q.state === 'string' ? q.state : '', code = typeof q.code === 'string' ? q.code : '';
     const browser = parseCookies(req.headers.cookie)[cookieName] || '';
     // one use only, and only in the browser that started it (stops someone sending you their sign-in link)
-    const saved = state && browser ? await OAuthState.findOneAndDelete({ stateHash: sha256(state), expiresAt: { $gt: new Date() } }) : null;
+    const saved = state && browser ? await OAuthState.findOneAndDelete({ stateHash: sha256(state), purpose: { $ne: 'drive' }, expiresAt: { $gt: new Date() } }) : null;
     if (q.error) return back(res, q.error === 'access_denied' ? 'cancelled' : 'google');
     if (!saved || saved.browserHash !== sha256(browser) || !code) return back(res, 'expired');
 

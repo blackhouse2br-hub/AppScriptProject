@@ -65,6 +65,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function upsellRoutes(r, config, integ) {
   const rc = config.integrations.respond;
   const sender = rc.token && rc.sends ? createRespondSender(rc) : null;
+  const onlyTo = rc.onlyTo || [];   // RESPOND_SEND_ONLY_TO: a controlled test, only these respond.io contacts
   const view = need('upsell', 'view'), edit = need('upsell', 'edit');
   const official = /^https:\/\/api\.respond\.io\//.test(rc.apiUrl + '/');
   const mailer = config.storage && config.storage.smtp ? createMailer(config.storage.smtp) : null;
@@ -114,12 +115,22 @@ function upsellRoutes(r, config, integ) {
     const last = new Map(sent.map((x) => [x._id, +x.at])), opted = new Set(outs.map((o) => o.leadId));
     legacy.forEach((x) => { if (+x.at > (last.get(x._id) || 0)) last.set(x._id, +x.at); });
     const cidOf = (l) => String(l.contactId || '').replace(/\D/g, '');
-    // an opt-out covers every lead with the same respond.io contact (a returning client can have two leads)
-    const optedCids = new Set(leads.filter((l) => opted.has(String(l.id))).map(cidOf).filter(Boolean));
+    // an opt-out covers every lead with the same respond.io contact (a returning client can have two leads), also a
+    // lead this member can't see
+    const optedCids = await optedContacts(source);
     return { source, tenantsNote, rows: leads.map((l) => ({ id: String(l.id), source, name: l.name || '', email: l.email || '', phone: l.phone || '', status: l.clientStatus || l.status || '',
       type: l.inquiry === 'Buy' ? 'Buy' : l.inquiry === 'Rent' ? 'Rent' : '', city: l.city || '', building: l.building || '', va: l.va || '',
       contactId: cidOf(l), onRespond: !!cidOf(l), tenant: tenants.has(String(l.id)), leaseEnd: leaseEnd[String(l.id)] || l.leaseEnd || '', lastOffer: last.get(String(l.id)) || 0,
       optedSelf: opted.has(String(l.id)), optedOut: opted.has(String(l.id)) || (!!cidOf(l) && optedCids.has(cidOf(l))) })) };
+  }
+  /** The respond.io contacts of every opted-out lead of this source (all leads, not one member's). */
+  async function optedContacts(source) {
+    const ids = (await UpsellOptOut.find({ source }, { leadId: 1 }).lean()).map((o) => o.leadId);
+    if (!ids.length) return new Set();
+    const want = new Set(ids), cid = (l) => String(l.contactId || '').replace(/\D/g, '');
+    const all = source === 'monday' ? (integ.monday ? (await integ.monday.loadAll(false)).leads || [] : [])
+      : await Lead.find({ _id: { $in: ids.filter((x) => /^[a-f0-9]{24}$/.test(x)) } }, { contactId: 1 }).lean();
+    return new Set(all.filter((l) => want.has(String(l.id || l._id))).map(cid).filter(Boolean));
   }
   /**
    * The campaign's audience now, and the exact next batches: send (new clients), tag, retry (failed only). Each batch
@@ -136,6 +147,7 @@ function upsellRoutes(r, config, integ) {
       const seen = new Set(), out = [];
       for (const x of list) {
         if (!x.onRespond || x.optedOut || done.has(x.contactId) || seen.has(x.contactId)) continue;
+        if (onlyTo.length && !onlyTo.includes(x.contactId)) continue;   // a controlled test: no record for anyone else
         const r = mine.get(x.id);
         if (retry ? !(r && r.status === 'failed') : !!r) continue;
         seen.add(x.contactId); out.push(x);
@@ -145,7 +157,7 @@ function upsellRoutes(r, config, integ) {
       const hash = crypto.createHash('sha256').update(JSON.stringify([source, action, !!retry, out.map((x) => x.id), c.text, c.image ? c.image.id : '', c.tag, c.channelId || ''])).digest('hex').slice(0, 32);
       return { list: out, hash };
     };
-    return { source, rows, list, recs, tenantsNote, batches: { message: batch('message', false), tag: batch('tag', false), retry: batch('message', true) } };
+    return { source, rows, list, recs, tenantsNote, batches: { message: batch('message', false), tag: batch('tag', false), retry: batch('message', true), retryTag: batch('tag', true) } };
   }
   const recipientOut = (x) => ({ id: x.id, name: x.name, status: x.status, type: x.type, city: x.city, email: x.email, phone: x.phone, onRespond: x.onRespond, tenant: x.tenant, leaseEnd: x.leaseEnd || '', lastOffer: x.lastOffer || null });
   const failed = (res, err) => { if (!err.integration) throw err; res.status(err.httpStatus || 502).json({ error: err.message }); };
@@ -160,7 +172,7 @@ function upsellRoutes(r, config, integ) {
     // without Project Pages access, only published projects (their pages are public anyway)
     const projects = (await Project.find(SH.access(req.user, 'pages') !== 'none' ? {} : { published: true }, { name: 1, developer: 1, published: 1 }).sort({ developer: 1, name: 1 }).limit(500).lean())
       .map((p) => ({ id: String(p._id), name: p.name, developer: p.developer, published: p.published }));
-    res.json({ templates: SH.upsellTemplates(), projects, respond: !!rc.token, sends: !!sender, channels: await channels(), mailer: { testEmail: !!mailer },
+    res.json({ templates: SH.upsellTemplates(), projects, respond: !!rc.token, sends: !!sender, testOnly: onlyTo.length, channels: await channels(), mailer: { testEmail: !!mailer },
       sendsNote: !rc.token ? 'respond.io is not connected (RESPOND_TOKEN).' : !rc.sends ? 'Sending is switched off on this server (RESPOND_SENDS is not "on"). Drafts, audiences, previews and the CSV work; nothing can be sent or tagged.' : '' });
   });
   r.get('/upsell/campaigns', view, async (req, res) => {
@@ -185,6 +197,11 @@ function upsellRoutes(r, config, integ) {
     const { value, errors } = SH.validateCampaign(req.body, { projectIds });
     if (errors.length) return bad(res, errors[0]);
     const { version, ...set } = value;
+    if (c.sendingUntil && c.sendingUntil > new Date()) return res.status(409).json({ error: 'A batch of this offer is being sent. Wait for it to finish.' });
+    // once sent, what recipients got stays the same for the rest of the offer: make a new offer to change it
+    const sentMsg = await UpsellSend.exists({ campaignId: c._id, action: 'message' }), sentTag = await UpsellSend.exists({ campaignId: c._id, action: 'tag' });
+    if (sentMsg && ((set.text !== undefined && set.text !== c.text) || (set.channelId !== undefined && String(set.channelId || '') !== String(c.channelId || '')))) return res.status(409).json({ error: 'This offer has already been sent: its text and channel can\'t change. Make a new offer.' });
+    if (sentTag && set.tag !== undefined && set.tag !== c.tag) return res.status(409).json({ error: 'This offer has already tagged clients: its tag can\'t change. Make a new offer.' });
     const done = await UpsellCampaign.findOneAndUpdate({ _id: c._id, version }, { $set: { ...set, updatedBy: by(req) }, $inc: { version: 1 } }, { returnDocument: 'after', runValidators: true });
     if (!done) return res.status(409).json({ conflict: true, error: 'This offer was changed in another tab or by someone else. Reload it, then make your changes again.' });
     res.json({ campaign: done });
@@ -226,7 +243,7 @@ function upsellRoutes(r, config, integ) {
   });
   r.delete('/upsell/campaigns/:id/image', edit, async (req, res) => {
     const c = await campaignFor(req, res); if (!c) return;
-    if (await UpsellSend.exists({ campaignId: c._id, action: 'message' })) return res.status(409).json({ error: 'This offer has already been sent; its image is kept.' });
+    if (await UpsellSend.exists({ campaignId: c._id, action: 'message' }) || (c.sendingUntil && c.sendingUntil > new Date())) return res.status(409).json({ error: 'This offer has already been sent; its image is kept.' });
     if (c.image) await media.remove(c.image.id);
     res.json({ campaign: await UpsellCampaign.findByIdAndUpdate(c._id, { $set: { image: null }, $inc: { version: 1 } }, { returnDocument: 'after' }) });
   });
@@ -245,7 +262,7 @@ function upsellRoutes(r, config, integ) {
       const statuses = [...new Set(a.rows.map((x) => x.status || UP.blank))].sort();
       const bOut = (k) => ({ hash: a.batches[k].hash, ids: a.batches[k].list.map((x) => x.id), names: a.batches[k].list.map((x) => x.name) });
       res.json({ source: a.source, total: a.rows.length, tenantsNote: a.tenantsNote || '', optedOut: a.rows.filter((x) => x.optedOut).length, statuses,
-        batches: { message: bOut('message'), tag: bOut('tag'), retry: bOut('retry') },
+        batches: { message: bOut('message'), tag: bOut('tag'), retry: bOut('retry'), retryTag: bOut('retryTag') }, testOnly: onlyTo.length,
         opted: a.rows.filter((x) => x.optedOut).slice(0, 500).map((x) => ({ id: x.id, name: x.name, self: x.optedSelf })),
         counts: { audience: a.list.length, respond: a.list.filter((x) => x.onRespond).length, email: a.list.filter((x) => x.email).length, phone: a.list.filter((x) => x.phone).length },
         recipients: a.list.slice(0, 2000).map((x) => ({ ...recipientOut(x), message: (done.get('message:' + x.id) || {}).status || '', tag: (done.get('tag:' + x.id) || {}).status || '' })) });
@@ -323,11 +340,11 @@ function upsellRoutes(r, config, integ) {
     }
     if (!rc.token) return res.status(409).json({ error: 'respond.io is not connected (RESPOND_TOKEN).', sendsOff: true });
     if (!sender) return res.status(409).json({ error: 'Sending is switched off on this server (RESPOND_SENDS). Nothing was sent.', sendsOff: true });
+    if (onlyTo.length && req.user.role !== 'Manager') return res.status(403).json({ error: 'This server is in a controlled test (RESPOND_SEND_ONLY_TO): only a Manager can send.' });
     const c = await campaignFor(req, res); if (!c) return;
     if (b.action === 'message' && !c.text.trim()) return bad(res, 'Write the message first.');
     if (b.action === 'tag' && !c.tag) return bad(res, 'Set a respond.io tag first.');
     if (b.action === 'message' && c.image && official && !/^https:\/\//.test(config.web.apiOrigin)) return res.status(409).json({ error: 'respond.io can only fetch the image from the portal\'s public https address (PUBLIC_API_URL). Remove the image or send from the hosted portal.' });
-    if (b.retry && b.action !== 'message') return bad(res, 'Only messages can be retried.');
     // one batch at a time per campaign; the lock is ours only while it carries our token (expires after 10 minutes)
     const lockToken = crypto.randomBytes(12).toString('hex');
     const lock = await UpsellCampaign.findOneAndUpdate({ _id: c._id, $or: [{ sendingUntil: null }, { sendingUntil: { $lt: new Date() } }] }, { $set: { sendingUntil: new Date(Date.now() + 10 * 60e3), sendLock: lockToken } });
@@ -336,12 +353,12 @@ function upsellRoutes(r, config, integ) {
     try {
       // the batch is worked out again now; it must be exactly the one the operator reviewed
       let a; try { a = await audienceOf(req.user, c); } catch (err) { return failed(res, err); }
-      const bt = a.batches[b.retry ? 'retry' : b.action];
+      const bt = a.batches[b.retry ? (b.action === 'tag' ? 'retryTag' : 'retry') : b.action];
       if (bt.hash !== b.hash) return res.status(409).json({ stale: true, error: 'The recipients or the message changed since you reviewed them (for example, someone else sent part of this offer). Nothing was sent: review the list again and confirm.' });
       const targets = bt.list;
       // opt-outs checked again right before sending, by client and by respond.io contact
-      const outIds = new Set((await UpsellOptOut.find({ source: a.source, leadId: { $in: a.rows.map((x) => x.id) } }, { leadId: 1 }).lean()).map((o) => o.leadId));
-      const outCids = new Set(a.rows.filter((x) => outIds.has(x.id) && x.contactId).map((x) => x.contactId));
+      const outIds = new Set((await UpsellOptOut.find({ source: a.source, leadId: { $in: targets.map((x) => x.id) } }, { leadId: 1 }).lean()).map((o) => o.leadId));
+      const outCids = await optedContacts(a.source);
       for (const x of targets) {
         if (outIds.has(x.id) || outCids.has(x.contactId)) { results.push({ id: x.id, name: x.name, status: 'skipped', error: 'opted out' }); continue; }
         // the record first: if it can't be written (or another send got there first, for this client or contact), nothing is sent
@@ -356,7 +373,8 @@ function upsellRoutes(r, config, integ) {
         try {
           if (b.action === 'tag') await sender.tag(x.contactId, c.tag);
           else {
-            if (c.image && !steps.image) { await sender.image(x.contactId, imageUrl(c), c.channelId); steps.image = true; await sleep(400); }
+            // the image step is saved at once: a retry after a crash never sends the image twice
+            if (c.image && !steps.image) { await sender.image(x.contactId, imageUrl(c), c.channelId); steps.image = true; await UpsellSend.updateOne({ _id: rec._id }, { $set: { 'steps.image': true } }); await sleep(400); }
             await sender.text(x.contactId, SH.upsellText(c.text, x, req.user.name), c.channelId); steps.text = true;
           }
           await UpsellSend.updateOne({ _id: rec._id }, { $set: { status: 'sent', steps, error: '' } });
@@ -400,6 +418,10 @@ function upsellRoutes(r, config, integ) {
 /** The offer image's public link for respond.io (an unguessable token; only images attached to an offer). */
 function upsellPublicRoutes() {
   const r = express.Router();
+  // respond.io fetches each recipient's image from a few shared addresses: per image (a batch is at most 40 sends) and per address
+  const { createLimiter, limitRoute, byIp } = require('./rateLimit');
+  r.use('/upsell-media', limitRoute([{ take: createLimiter({ max: 600, windowMs: 10 * 60e3 }), key: (req) => 'tok:' + String(req.path).slice(1, 33) },
+    { take: createLimiter({ max: 3000, windowMs: 10 * 60e3 }), key: byIp }]));
   r.get('/upsell-media/:token', async (req, res) => {
     const t = String(req.params.token);
     const c = /^[A-Za-z0-9_-]{32}$/.test(t) ? await UpsellCampaign.findOne({ 'image.token': t }, { image: 1 }).lean() : null;

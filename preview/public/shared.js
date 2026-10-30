@@ -919,8 +919,22 @@
     if (Object.keys(v).length === 1) return { errors: ['Nothing to save.'] };
     return { value: v, errors: [] };
   }
+  const PHONE_RE = /\+?\d[\d\s().-]{6,}\d/g;
+  /**
+   * A run of digits that is a phone number, not a date ("2026-11-05", "05/11/2026") or a range of amounts or sizes
+   * ("15000-20000", "40-60"): those are what a supplier needs and must survive the redaction.
+   */
+  function isPhoneLike(m) {
+    const t = String(m).trim();
+    if (t.replace(/\D/g, '').length < 7) return false;
+    if (/^\d{4}[-./]\d{1,2}[-./]\d{1,2}(\s+\d{1,2})?$/.test(t) || /^\d{1,2}[-./]\d{1,2}[-./]\d{2,4}(\s+\d{1,2})?$/.test(t)) return false;
+    const r = t.match(/^(\d{2,6})\s*-\s*(\d{2,6})$/);
+    return !(r && r[1][0] !== '0' && Number(r[2]) > Number(r[1]) && Number(r[2]) <= Number(r[1]) * 5);
+  }
+  const scrubPhones = (s, mark) => s.replace(PHONE_RE, (m) => (isPhoneLike(m) ? mark : m));
+  const hasPhone = (s) => (String(s).match(PHONE_RE) || []).some(isPhoneLike);
   /** Removes anything that looks like a phone number, email or link from AI text that goes to a supplier. */
-  const stripContacts = (s) => String(s || '').replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[removed]').replace(/https?:\/\/\S+/g, '[removed]').replace(/\+?\d[\d\s().-]{6,}\d/g, '[removed]');
+  const stripContacts = (s) => scrubPhones(String(s || '').replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[removed]').replace(/https?:\/\/\S+/g, '[removed]'), '[removed]');
   const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // a name part as a pattern that matches it with or without accents ("María" ↔ "Maria")
   const ACC = { a: 'aàáâãäåā', e: 'eèéêëē', i: 'iìíîïī', o: 'oòóôõöō', u: 'uùúûüū', n: 'nñ', c: 'cç', y: 'yýÿ' };
@@ -941,7 +955,7 @@
     [c.email, c.phone, c.contactId].filter((x) => String(x || '').trim().length >= 4).forEach((x) => { s = s.split(String(x).trim()).join('[id]'); });
     const digits = String(c.phone || '').replace(/\D/g, '');
     if (digits.length >= 7) s = s.replace(new RegExp(digits.slice(-7).split('').join('[\\s().-]*'), 'g'), '[phone]');
-    s = s.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]').replace(/(https?:\/\/|www\.)\S+/gi, '[link]').replace(/\+?\d[\d\s().-]{6,}\d/g, '[phone]');
+    s = scrubPhones(s.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]').replace(/(https?:\/\/|www\.)\S+/gi, '[link]'), '[phone]');
     // unit numbers: "Unit 12B", "#1203", and any the client mentioned before (c.units), even written bare ("12B")
     s = s.replace(UNIT_RE, '[unit]').replace(/#\s?\d{1,5}[A-Za-z]?\b/g, '[unit]');
     (c.units || []).filter((u) => String(u).length >= 2).forEach((u) => { s = s.replace(new RegExp('(^|[^\\w])' + reEsc(u) + '(?=$|[^\\w])', 'gi'), '$1[unit]'); });
@@ -955,7 +969,7 @@
   /** True when text still holds one of the client's identifiers (for a last check of what the AI returned). */
   function leaksClient(text, client) {
     const c = client || {}, s = String(text || '');
-    if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(s) || /\+?\d[\d\s().-]{6,}\d/.test(s)) return true;
+    if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(s) || hasPhone(s)) return true;
     const digits = String(c.phone || '').replace(/\D/g, '');
     if (digits.length >= 7 && s.replace(/\D/g, '').includes(digits.slice(-7))) return true;
     if (c.contactId && String(c.contactId).length >= 4 && s.includes(String(c.contactId))) return true;

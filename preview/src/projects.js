@@ -276,6 +276,9 @@ function matchUnitImages(proposal, p) {
 /** The published pages (no sign-in): /p/<slug> and its media. Unpublished or unknown → 404; files left off the page → 404. */
 function projectPublicRoutes() {
   const r = express.Router();
+  // anyone may open a published page: limited per address (visitors behind one network share it, so it is generous)
+  const { createLimiter, limitRoute, byIp } = require('./rateLimit');
+  r.use('/p', limitRoute([{ take: createLimiter({ max: 1200, windowMs: 10 * 60e3 }), key: byIp }], { html: true, message: 'Too many requests for this page. Try again in a few minutes.' }));
   const find = (slug) => (/^[a-z0-9-]{1,60}$/.test(slug) ? Project.findOne({ slug, published: true }).lean() : null);
   r.get('/p/:slug', async (req, res) => {
     const p = await find(req.params.slug);

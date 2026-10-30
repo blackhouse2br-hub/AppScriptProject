@@ -15,7 +15,10 @@ const { loiSignRoutes } = require('./loiSign');
 const MAX_TEMPLATE = 2 * 1024 * 1024, MAX_PER_LEAD = 50;   // prepared LOIs kept per client (the list shows them all)
 const bad = (res, msg) => res.status(400).json({ error: msg, errors: [msg] });
 const who = (u) => ({ userId: u._id, name: u.name, email: u.email || '' });
-const signOut = (s) => s && { name: s.name, at: s.at, drive: !!(s.docx && s.docx.fileId), pdf: !!s.pdf };
+// a signature for the page: who and when, and whether its copies are saved (Drive; the unit's deal files), never the files
+const signOut = (s) => s && { name: s.name, at: s.at, drive: !!(s.docx && s.docx.fileId), pdf: !!(s.pdfData || s.pdf),
+  store: s.store ? { status: s.store.status, error: s.store.error || '', tries: s.store.tries || 0, at: s.store.at || null } : null,
+  deal: s.deal ? { status: s.deal.status, error: s.deal.error || '' } : null };
 const loiOut = (x) => ({ id: String(x._id), slot: x.slot, slotLabel: SH.LOI_SLOTS[x.slot], templateName: x.templateName, fields: x.fields, missing: x.missing,
   status: x.status, createdAt: x.createdAt, by: x.createdBy && x.createdBy.name, size: x.data ? x.data.length : 0, unitKey: x.unitKey || '', unitName: x.unitName || '',
   signed: { client: signOut(x.signed && x.signed.client), owner: signOut(x.signed && x.signed.owner) }, hasSigned: !!x.signedData, hasPdf: !!x.pdf });

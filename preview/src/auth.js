@@ -39,7 +39,9 @@ function cookieHeader(value, maxAgeSec, secure) {
 }
 
 // Failed-login throttle (per process). Enough for local use; a shared store is needed with several instances.
-const WINDOW_MS = 15 * 60e3, MAX_PER_ACCOUNT = 8, MAX_PER_IP = 40;
+// An office shares one address: the per-address cap is generous (the per-account one stops guessing a password).
+// At most 10,000 keys are kept (expired ones first, then the least recently failed), so memory stays bounded.
+const WINDOW_MS = 15 * 60e3, MAX_PER_ACCOUNT = 8, MAX_PER_IP = 100, MAX_KEYS = 10000;
 const fails = new Map();
 function throttled(keys) {
   const now = Date.now();
@@ -47,7 +49,9 @@ function throttled(keys) {
 }
 function recordFail(keys) {
   const now = Date.now();
-  keys.forEach(([k]) => { const f = fails.get(k); if (!f || f.reset < now) fails.set(k, { count: 1, reset: now + WINDOW_MS }); else f.count++; });
+  keys.forEach(([k]) => { const f = fails.get(k); fails.delete(k); fails.set(k, !f || f.reset < now ? { count: 1, reset: now + WINDOW_MS } : { ...f, count: f.count + 1 }); });
+  if (fails.size > MAX_KEYS) for (const [k, f] of fails) { if (f.reset < now) fails.delete(k); }
+  while (fails.size > MAX_KEYS) fails.delete(fails.keys().next().value);
 }
 
 /**

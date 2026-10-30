@@ -1,14 +1,14 @@
 'use strict';
 // Deal files (Code.gs DEAL_SLOTS_ / apiDealUpload / apiDealSetTerm / apiDealClear): the LOI signed by the client and by the
 // owner, the signed contract (with the lease start and months), the deposit slip and renewal contracts, per lead and
-// unit, kept in Google Drive as the Apps Script did ("Blackhouse LOIs" folder → GOOGLE_DRIVE_DEALS_FOLDER_ID). The
+// unit, kept in Google Drive as the Apps Script did ("Blackhouse LOIs" folder → the deals folder of src/driveStore.js). The
 // portal does not generate contracts (the Apps Script didn't either). Nothing here writes to Monday.
 const express = require('express');
 const SH = require('../public/shared');
 const { DealFile, Viewing, Listing } = require('./models');
 const { need, findVisibleLead } = require('./access');
 const docx = require('./docx');
-const { createDrive } = require('./drive');
+const { createWriterStore } = require('./driveStore');
 
 const bad = (res, msg) => res.status(400).json({ error: msg, errors: [msg] });
 const SLOTS = Object.keys(SH.DEAL_SLOTS);
@@ -26,11 +26,10 @@ function sniff(buf) {
   return null;
 }
 
-function dealRoutes(r, config, integ) {
-  const st = config.storage || {};
-  const drive = st.drive ? createDrive(st.drive) : null;
-  const needs = () => [!drive ? 'GOOGLE_DRIVE_WRITER_SERVICE_ACCOUNT_JSON (a service account that is a Content manager of a Shared Drive folder)' : '',
-    !st.dealsFolder ? 'GOOGLE_DRIVE_DEALS_FOLDER_ID (the folder for deal files)' : ''].filter(Boolean);
+/** writer: src/driveStore.js (a Shared Drive service account, or a connected My Drive). */
+function dealRoutes(r, config, integ, writer) {
+  writer = writer || createWriterStore(config);
+  const needs = () => writer.needs('deals'), ready = () => writer.ready('deals');
   const rawBody = express.raw({ type: () => true, limit: SH.DEAL_FILE_MAX + 1024 });
   const readFile = (req, res, next) => rawBody(req, res, (err) => (err ? res.status(err.type === 'entity.too.large' ? 413 : 400).json({ error: err.type === 'entity.too.large' ? 'Files can be 15 MB at most.' : 'The file could not be read.' }) : next()));
 
@@ -61,13 +60,15 @@ function dealRoutes(r, config, integ) {
   r.get('/deals/:source/:id', need('leads', 'view'), async (req, res) => {
     const t = await target(req, res, false); if (!t) return;
     const recs = await DealFile.find({ source: req.params.source, leadId: t.lead.id }).lean();
-    res.json({ records: recs.map(recOut), setup: { ready: !!(drive && st.dealsFolder), needs: needs() } });
+    await writer.ensure();
+    res.json({ records: recs.map(recOut), setup: { ready: ready(), needs: needs() } });
   });
 
   // upload one file into a slot (?start=&months= for a contract / renewal); a filled slot must be removed first
   r.post('/deals/:source/:id/:key/:slot', need('leads', 'edit'), readFile, async (req, res) => {
     const slot = req.params.slot; if (!SLOTS.includes(slot)) return res.status(404).json({ error: 'Unknown file slot.' });
-    if (!drive || !st.dealsFolder) return res.status(503).json({ error: 'Deal files can\'t be saved yet: Google Drive storage is not set up.', setup: true, needs: needs() });
+    await writer.ensure();
+    if (!ready()) return res.status(503).json({ error: 'Deal files can\'t be saved yet: Google Drive storage is not set up.', setup: true, needs: needs() });
     const t = await target(req, res, true); if (!t) return;
     const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     if (!buf.length) return bad(res, 'The file is empty.');
@@ -84,7 +85,7 @@ function dealRoutes(r, config, integ) {
     if (slot === 'renewal' && cur && (cur.renewals || []).length >= 20) return res.status(409).json({ error: 'This unit already has 20 renewal contracts on file, the most the portal keeps.' });
     // as the Apps Script names them: "<slot> – <client> – <unit><ext>"
     const name = `${SH.DEAL_SLOTS[slot]} – ${t.lead.name || t.lead.id} – ${t.unitName}${kind.ext}`.replace(/[\\/:*?"<>|]/g, ' ').slice(0, 180);
-    let up; try { up = await drive.upload(buf, { name, mimeType: kind.type, parent: st.dealsFolder }); } catch (err) { if (!err.integration) throw err; return res.status(err.httpStatus || 502).json({ error: err.message }); }
+    let up; try { up = await writer.client().upload(buf, { name, mimeType: kind.type, parent: writer.folder('deals') }); } catch (err) { if (!err.integration) throw err; return res.status(err.httpStatus || 502).json({ error: err.message }); }
     const file = { storage: 'drive', fileId: up.id, url: up.webViewLink || '', name, type: kind.type, size: buf.length, src: 'upload', at: new Date(), by: req.user.name };
     const upd = slot === 'renewal' ? { $push: { renewals: { file, term } }, $set: { term, unitName: t.unitName } } : { $set: { ['slots.' + slot]: file, unitName: t.unitName, ...(term ? { term } : {}) } };
     const doc = await DealFile.findOneAndUpdate(key, { ...upd, $push: { ...(upd.$push || {}), history: { $each: [{ at: new Date(), by: req.user.name, what: 'Uploaded: ' + SH.DEAL_SLOTS[slot] }], $slice: -50 } } },
@@ -118,15 +119,22 @@ function dealRoutes(r, config, integ) {
     const slot = req.params.slot, i = Number(req.query.i || 0);
     const f = doc && (slot === 'renewal' ? (doc.renewals[i] || {}).file : SLOTS.includes(slot) ? doc.slots[slot] : null);
     if (!f) return res.status(404).json({ error: 'File not found.' });
-    if (!drive) return res.status(503).json({ error: 'Google Drive storage is not set up on this server.', setup: true, needs: needs() });
-    let buf; try { buf = await drive.download(f.fileId, SH.DEAL_FILE_MAX + 1024); } catch (err) { if (!err.integration) throw err; return res.status(err.httpStatus || 502).json({ error: err.message }); }
+    await writer.ensure();
+    if (!writer.client()) return res.status(503).json({ error: 'Google Drive storage is not set up on this server.', setup: true, needs: needs() });
+    let buf; try { buf = await writer.client().download(f.fileId, SH.DEAL_FILE_MAX + 1024); } catch (err) { if (!err.integration) throw err; return res.status(err.httpStatus || 502).json({ error: err.message }); }
     res.set({ 'Content-Type': f.type || 'application/octet-stream', 'Content-Disposition': `attachment; filename="${encodeURIComponent(f.name || 'file')}"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).send(buf);
   });
 
   /** For LOI signing: records an e-signed copy in the client / owner LOI slot of the unit (src/loiSign.js). */
+  // idempotent: the same file again changes nothing; a file staff uploaded into that slot is never replaced (→ conflict)
   async function recordSigned({ source, leadId, unitKey, unitName, slot, file }) {
-    await DealFile.findOneAndUpdate({ source, leadId, unitKey }, { $set: { ['slots.' + slot]: { ...file, src: 'esign' }, unitName }, $push: { history: { $each: [{ at: new Date(), by: file.by, what: 'E-signed: ' + SH.DEAL_SLOTS[slot] }], $slice: -50 } } },
-      { upsert: true, setDefaultsOnInsert: true });
+    const cur = await DealFile.findOne({ source, leadId, unitKey }, { ['slots.' + slot]: 1 }).lean(), have = cur && cur.slots && cur.slots[slot];
+    if (have && have.fileId === file.fileId) return { linked: true };
+    if (have && have.src !== 'esign') return { conflict: true };
+    const r = await DealFile.findOneAndUpdate({ source, leadId, unitKey, $or: [{ ['slots.' + slot]: null }, { ['slots.' + slot + '.src']: 'esign' }] },
+      { $set: { ['slots.' + slot]: { ...file, src: 'esign' }, unitName }, $push: { history: { $each: [{ at: new Date(), by: file.by, what: 'E-signed: ' + SH.DEAL_SLOTS[slot] }], $slice: -50 } } },
+      { upsert: !cur, setDefaultsOnInsert: true });
+    return r || !cur ? { linked: true } : { conflict: true };
   }
   /** The name of a unit of this client (its Monday Calendar item, or a portal viewing's listing), or '' if it isn't one. */
   async function unitOf(source, leadId, key) {
@@ -139,7 +147,7 @@ function dealRoutes(r, config, integ) {
     if (!/^[a-f0-9]{24}$/.test(key) || !(await Viewing.exists({ leadId, listingId: key }))) return '';
     const L = await Listing.findById(key).lean(); return L ? `${L.building} · ${L.code}` : key;
   }
-  return { recordSigned, unitOf, drive, ready: () => !!(drive && st.dealsFolder) };
+  return { recordSigned, unitOf, writer, ready };
 }
 
 module.exports = { dealRoutes, sniff };

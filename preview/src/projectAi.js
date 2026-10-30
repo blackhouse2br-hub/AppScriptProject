@@ -33,7 +33,8 @@ class AiError extends Error { constructor(message, status) { super(message); thi
 
 /** cfg: { apiKey, baseURL } */
 function createProjectAi(cfg) {
-  const client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseURL, maxRetries: 2, timeout: 180e3 });
+  // one retry only: each attempt re-sends (and bills) up to 18 MB of PDFs
+  const client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseURL, maxRetries: 1, timeout: 300e3 });
   /** project: { name, developer, location }; texts: [{ name, text }]; pdfs: [{ name, data (base64) }] → the found facts. */
   async function extract({ project, texts, pdfs }) {
     const content = [];
@@ -52,8 +53,10 @@ function createProjectAi(cfg) {
       });
     } catch (err) {
       if (err instanceof Anthropic.AuthenticationError) throw new AiError('The AI service refused the server\'s ANTHROPIC_API_KEY. Check the key.');
-      if (err instanceof Anthropic.RateLimitError) throw new AiError('The AI service is busy right now. Try again in a minute.', 429);
-      if (err instanceof Anthropic.BadRequestError) throw new AiError('The AI service could not read these documents (' + String(err.message).slice(0, 160) + ').');
+      if (err instanceof Anthropic.PermissionDeniedError) throw new AiError('The server\'s ANTHROPIC_API_KEY isn\'t allowed to use this model. Check the key\'s workspace in the Anthropic Console.');
+      if (err instanceof Anthropic.RateLimitError || (err instanceof Anthropic.APIError && err.status === 529)) throw new AiError('The AI service is busy right now. Try again in a minute.', 429);
+      if (err instanceof Anthropic.BadRequestError && /credit balance/i.test(String(err.message))) throw new AiError('The Anthropic account has no credit left. Add credit in the Anthropic Console (Plans & Billing).');
+      if (err instanceof Anthropic.BadRequestError) throw new AiError('The AI service could not read these documents (they may be too large, protected or damaged).');
       if (err instanceof Anthropic.APIConnectionError) throw new AiError('The AI service could not be reached. Try again in a minute.');
       if (err instanceof Anthropic.APIError) throw new AiError('The AI service returned an error (HTTP ' + err.status + ').');
       throw err;

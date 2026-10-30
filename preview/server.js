@@ -58,7 +58,7 @@ async function start(env = process.env, argv = process.argv, { dbTimeoutMs } = {
 
 /** Prints an error and its causes (messages only for known startup errors; stack for unexpected ones). Credentials are redacted. */
 function reportStartupError(err, log = console.error) {
-  const known = err && (err.code || /^(APP_MODE|MONGODB_URI|PORT|SESSION_HOURS|Demo mode|Email-and-password|Could not connect to MongoDB|MONDAY_|RESPOND_|KPI_REVIEWER|GOOGLE_DRIVE_|ANTHROPIC_|PUBLIC_API_URL|PORTAL_URL|AUTH_PROVIDER|GOOGLE_|Google sign-in needs|The portal \(|Production start is still blocked)/.test(err.message || ''));
+  const known = err && (err.code || /^(APP_MODE|MONGODB_URI|PORT|SESSION_HOURS|Demo mode|Email-and-password|Could not connect to MongoDB|MONDAY_|RESPOND_|KPI_REVIEWER|GOOGLE_DRIVE_|ANTHROPIC_|PUBLIC_API_URL|PORTAL_URL|AUTH_PROVIDER|GOOGLE_|Google sign-in needs|The portal \(|Production start refused|LOI_|GOTENBERG_|SMTP_)/.test(err.message || ''));
   log('[startup] ' + redact(err && err.message ? err.message : String(err)));
   let c = err && err.cause, depth = 0;
   while (c && depth++ < 5) { log('  caused by: ' + redact(c.code ? `${c.code}: ${c.message}` : c.message || String(c))); c = c.cause; }
@@ -69,8 +69,9 @@ function printBanner(server, config, log = console.log) {
   const url = serverUrl(server, config);
   log(url ? `Blackhouse Leads Portal preview running at ${url}` : 'Blackhouse Leads Portal preview started, but the server address is not available.');
   log(config.mode === 'mongo'
-    ? 'Mode: MONGO. Records are read from and saved to MongoDB; sign-in required. Monday.com and respond.io are read-only (see below; MONDAY_WRITES=on allows only the allowlisted, confirmed Monday updates); Google is not connected.'
+    ? 'Mode: MONGO. Records are read from and saved to MongoDB; sign-in required. Monday.com and respond.io are read-only unless switched on (see below; MONDAY_WRITES=on allows only the allowlisted, confirmed Monday updates).'
     : 'Mode: DEMO. Fictional data only, kept in your browser. No database, no API, no outside services.');
+  if (config.production) log('Production: every production condition was met (src/production.js).');
   if (config.integrations) {
     const m = config.integrations.monday, r = config.integrations.respond;
     log(`Monday.com (${m.writes ? 'reads + allowlisted confirmed updates' : 'read-only'}): ${m.token && Object.values(m.boards).some(Boolean) ? 'configured' : 'not connected'} · respond.io (${r.sends ? 'reads + Upselling sends, each confirmed' : 'read-only'}): ${r.token ? 'configured' : 'not connected'}`);
@@ -101,6 +102,17 @@ if (require.main === module) {
   start().then(({ server, config, app }) => {
     try { printBanner(server, config); } catch (err) { reportStartupError(err); }   // the server is up; a banner problem must not hide that
     preloadMonday(app);
+    // a redeploy (Railway sends SIGTERM): stop taking requests, let the ones running finish (up to 20 s), then close the
+    // database, so a save or a signature in progress isn't cut off halfway
+    let stopping = false;
+    const stop = (sig) => {
+      if (stopping) return; stopping = true;
+      console.log(`[shutdown] ${sig}: finishing requests in progress…`);
+      const force = setTimeout(() => process.exit(0), 20000); force.unref();
+      server.close(async () => { if (config.mode === 'mongo') await disconnectDb().catch(() => {}); process.exit(0); });
+      if (server.closeIdleConnections) server.closeIdleConnections();
+    };
+    process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT'));
   }).catch((err) => {
     reportStartupError(err);
     process.exit(1);
